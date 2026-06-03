@@ -7,6 +7,7 @@
 
 namespace dxvk {
   class Config; // fwd decl for Config-based overloads
+  enum class Tristate : int32_t; // fwd decl for shouldUpscale()
 
   /**
    * \brief Vegas performance state enum
@@ -23,6 +24,18 @@ namespace dxvk {
    */
   struct VegasFsrConstants {
     float info[4];
+  };
+
+  /**
+   * \brief Per-context Vegas runtime state
+   *
+   * Instance stored in DxvkContext. The type lives here so all
+   * feature decision logic is defined alongside the state it reads.
+   */
+  struct VegasProfile {
+    bool           initialized           = false;
+    bool           enabled               = false;
+    VkPipeline     lastBoundVkPipeline    = VK_NULL_HANDLE;
   };
 
   /**
@@ -59,6 +72,15 @@ namespace dxvk {
 
     /// Detected GPU tier (1=entry, 2=mid, 3=high)
     static uint32_t getTier();
+
+    // ---- Decision Helpers (consolidated feature logic) ----
+
+    /// Should the caller flush pending draws?
+    static bool shouldFlush(
+            uint32_t             drawCount);
+
+    /// Should the caller skip binding descriptors?
+    static bool shouldSkipBind();
 
     // ---- Legacy Profile (kept for compat, not user-facing) ----
 
@@ -126,6 +148,12 @@ namespace dxvk {
 
     static void calculateFsrConstants(
             VegasFsrConstants&   c,
+            VkExtent3D           src,
+            VkExtent3D           dst);
+
+    /// Should FSR upscale be applied? Resolves Tristate against src/dst extents.
+    static bool shouldUpscale(
+            Tristate             upscalerState,
             VkExtent3D           src,
             VkExtent3D           dst);
 

@@ -358,14 +358,7 @@ namespace dxvk {
                 srcSurface->GetVulkanImageInfo(&srcHandle, nullptr, &srcInfo);
                 dstSurface->GetVulkanImageInfo(&dstHandle, nullptr, &dstInfo);
 
-                // Determine if upscale is needed:
-                //   Tristate::True  -> force FSR even if src >= dst
-                //   Tristate::Auto  -> only FSR when src < dst (autodetect)
-                //   Tristate::False -> skipped above
-                bool needUpscale = (upscaleState == Tristate::True)
-                                || (srcInfo.extent.width < dstInfo.extent.width);
-
-                if (needUpscale) {
+                if (Vegas::shouldUpscale(upscaleState, srcInfo.extent, dstInfo.extent)) {
                     // Compute FSR EASU constants from src/dst extents
                     VegasFsrConstants fsrConsts = {};
                     Vegas::calculateFsrConstants(fsrConsts,

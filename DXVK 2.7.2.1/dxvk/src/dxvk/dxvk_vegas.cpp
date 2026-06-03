@@ -811,5 +811,25 @@ namespace dxvk {
   uint32_t Vegas::getHaaeThreshold() { return s_haaeThreshold; }
   uint32_t Vegas::getTier()         { return s_tier; }
 
+  // ============================================================
+  // Decision Helpers — all feature logic lives here
+  // ============================================================
+
+  bool Vegas::shouldFlush(uint32_t drawCount) {
+    return s_enabled && drawCount >= s_drawThreshold;
+  }
+
+  bool Vegas::shouldSkipBind() {
+    return s_enabled && s_bindSkipEnabled;
+  }
+
+  bool Vegas::shouldUpscale(Tristate upscalerState, VkExtent3D src, VkExtent3D dst) {
+    if (upscalerState == Tristate::False)
+      return false;
+    if (upscalerState == Tristate::True)
+      return true;
+    // Auto: only upscale when source is smaller than destination
+    return src.width < dst.width;
+  }
 
 } // namespace dxvk

@@ -827,13 +827,8 @@ namespace dxvk {
 
     // ========== [Vegas] SELF-AWARE OPTIMIZATION STATE ==========
 private:
-    struct VegasProfile {
-        bool           initialized           = false;
-        bool           enabled               = false;
-        VkPipeline     lastBoundVkPipeline    = VK_NULL_HANDLE;
-    } m_vegasProfile;
-
-    std::atomic<uint32_t> m_drawsSinceSubmit{0};
+    VegasProfile                m_vegasProfile;
+    std::atomic<uint32_t>       m_drawsSinceSubmit{0};
     
     void initVegasProfile();
     bool checkAsyncCompilationCompat() const;

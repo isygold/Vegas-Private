@@ -844,9 +844,8 @@ if (unlikely(!m_vegasProfile.initialized)) {
 }
 
 // Threshold check using Relaxed ordering
-    if (unlikely(m_vegasProfile.enabled &&
-        m_drawsSinceSubmit.load(std::memory_order_relaxed) >= Vegas::getDrawThreshold())) {
-        
+    uint32_t drawCount = m_drawsSinceSubmit.load(std::memory_order_relaxed);
+    if (unlikely(Vegas::shouldFlush(drawCount))) {
         this->spillRenderPass(true); 
         VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "Vegas_Flush" };
         this->flushCommandList(&flushLabel, nullptr);
@@ -956,9 +955,8 @@ if (unlikely(!m_vegasProfile.initialized)) {
     }
 
     // Threshold check using Relaxed ordering
-    if (unlikely(m_vegasProfile.enabled &&
-        m_drawsSinceSubmit.load(std::memory_order_relaxed) >= Vegas::getDrawThreshold())) {
-        
+    uint32_t drawCount = m_drawsSinceSubmit.load(std::memory_order_relaxed);
+    if (unlikely(Vegas::shouldFlush(drawCount))) {
         this->spillRenderPass(true); 
         VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "Vegas_Flush" };
         this->flushCommandList(&flushLabel, nullptr);
@@ -5890,7 +5888,7 @@ void DxvkContext::drawIndexed(
       
     bool shouldBind = true;
 
-    if (m_vegasProfile.enabled && Vegas::isBindSkipEnabled()) {
+    if (Vegas::shouldSkipBind()) {
       // Only skip if the handle matches AND the pipeline state isn't "dirty"
       if (pipelineInfo.handle == m_vegasProfile.lastBoundVkPipeline &&
           !m_flags.test(DxvkContextFlag::GpDirtyPipelineState)) {
