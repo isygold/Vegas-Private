@@ -83,9 +83,9 @@ namespace dxvk {
      * These allow the engine to read our custom Bionic-Ready settings.
      */
     
-    // Priority 3: Spatial Upscaler Toggle
-    bool getVegasUpscaleEnabled() const {
-      return this->getOption<bool>("vegas.enableUpscaler", true);
+    // Priority 3: Spatial Upscaler Toggle (Tristate: Auto/True/False)
+    Tristate getVegasUpscaleEnabled() const {
+      return this->getOption<Tristate>("vegas.enableUpscaler", Tristate::Auto);
     }
 
     // Priority 4: HAAE Thermal Threshold

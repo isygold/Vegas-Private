@@ -615,7 +615,7 @@ void DxvkDevice::submitCommandList(
     uint32_t drawCalls = commandList->statCounters().getCtr(DxvkStatCounter::CmdDrawCalls);
     vegasCounter += drawCalls;
 
-    int32_t baseThreshold = m_instance->config().getVegasHAAEThreshold();
+    int32_t baseThreshold = m_instance->options().vegasHaaeThreshold;
 
     if (vegasCounter >= uint32_t(baseThreshold)) {
         // Insert a submission fence to pace the GPU

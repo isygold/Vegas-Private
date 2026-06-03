@@ -23,6 +23,9 @@ namespace dxvk {
     tilerMode             = config.getOption<Tristate>("dxvk.tilerMode",              Tristate::Auto);
 	enableAsync = config.getOption<bool>("dxvk.enableAsync",                          false);
 
+    vegasEnableUpscaler = config.getOption<Tristate>("vegas.enableUpscaler", Tristate::Auto);
+    vegasHaaeThreshold  = config.getOption<int32_t> ("vegas.haaeThreshold",  65);
+
     auto budget = config.getOption<int32_t>("dxvk.maxMemoryBudget", 0);
     maxMemoryBudget = VkDeviceSize(std::max(budget, 0)) << 20u;
   }

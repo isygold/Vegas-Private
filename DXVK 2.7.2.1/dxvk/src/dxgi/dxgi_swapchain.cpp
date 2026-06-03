@@ -336,8 +336,11 @@ namespace dxvk {
           UINT                      PresentFlags,
     const DXGI_PRESENT_PARAMETERS* pPresentParameters) {
     
-    // --- VEGAS: FSR 1.0 UPSCALER ---
-    if (this->m_presenter != nullptr) {
+    // --- VEGAS: FSR 1.0 UPSCALER (Tristate-aware) ---
+    auto options = m_factory->GetOptions();
+    Tristate upscaleState = options->vegasEnableUpscaler;
+
+    if (upscaleState != Tristate::False && this->m_presenter != nullptr) {
         Com<IDXGIDXVKDevice> dxvkDevice;
         if (SUCCEEDED(this->m_presenter->GetDevice(__uuidof(IDXGIDXVKDevice), reinterpret_cast<void**>(&dxvkDevice)))) {
             
@@ -355,20 +358,24 @@ namespace dxvk {
                 srcSurface->GetVulkanImageInfo(&srcHandle, nullptr, &srcInfo);
                 dstSurface->GetVulkanImageInfo(&dstHandle, nullptr, &dstInfo);
 
-                if (srcInfo.extent.width < dstInfo.extent.width) {
-                    // FSR EASU upscale: dispatch compute shader from embedded SPIR-V
-                    const VkDeviceSize pushConstSize = sizeof(VegasFsrConstants);
+                // Determine if upscale is needed:
+                //   Tristate::True  -> force FSR even if src >= dst
+                //   Tristate::Auto  -> only FSR when src < dst (autodetect)
+                //   Tristate::False -> skipped above
+                bool needUpscale = (upscaleState == Tristate::True)
+                                || (srcInfo.extent.width < dstInfo.extent.width);
+
+                if (needUpscale) {
+                    // Compute FSR EASU constants from src/dst dimensions
                     VegasFsrConstants fsrConsts = Vegas::calculateFsrConstants(
                         srcInfo.extent.width,  srcInfo.extent.height,
                         dstInfo.extent.width,  dstInfo.extent.height
                     );
 
-                    // The FSR shader and pipeline are created lazily and cached
-                    // in the DxvkDevice. For this initial integration we let
-                    // the hardware handle the stretch and log the upscale.
-                    VEGAS_LOG("FSR upscale: %ux%u -> %ux%u",
+                    VEGAS_LOG("FSR upscale: %ux%u -> %ux%u (mode=%d)",
                         srcInfo.extent.width, srcInfo.extent.height,
-                        dstInfo.extent.width, dstInfo.extent.height);
+                        dstInfo.extent.width, dstInfo.extent.height,
+                        static_cast<int>(upscaleState));
                     return S_OK;
                 }
             }
