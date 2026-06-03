@@ -124,6 +124,7 @@ dxvk_src = [
   'dxvk_swapchain_blitter.cpp',
   'dxvk_unbound.cpp',
   'dxvk_util.cpp',
+  'dxvk_vegas.cpp',
 
   'hud/dxvk_hud.cpp',
   'hud/dxvk_hud_font.cpp',
