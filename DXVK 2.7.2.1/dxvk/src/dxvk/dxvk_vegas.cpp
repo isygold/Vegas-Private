@@ -1,11 +1,14 @@
 #include "dxvk_vegas.h"
 #include "dxvk_device.h"
 #include "dxvk_adapter.h"
+#include "../util/config/config.h"
 
 #include <algorithm>
 #include <string>
 #include <cstring>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -129,6 +132,64 @@ namespace dxvk {
       return static_cast<uint64_t>(pages) * static_cast<uint64_t>(pageSize) / (1024ULL * 1024ULL);
 #endif
   }
+
+  // ============================================================
+  // Config-load-time overloads (self-aware, no Vk device needed)
+  // ============================================================
+
+  void Vegas::applyVramSwap(Config& config) {
+    uint64_t totalRamMB = getSystemRamMB();
+    uint32_t vramReport = static_cast<uint32_t>(totalRamMB * 0.40);
+
+    // Safety bounds: 1 GB min, 4 GB max
+    if (vramReport < 1024)  vramReport = 1024;
+    if (vramReport > 4096)  vramReport = 4096;
+
+    config.setOption("dxgi.maxDeviceMemory", std::to_string(vramReport));
+    config.setOption("dxgi.maxSharedMemory",  std::to_string(vramReport / 2));
+  }
+
+
+  void Vegas::applyGpuMask(Config& config) {
+    // Self-aware: detect GPU tier without Vk device.
+    // Tries Android sysfs; falls back to safe default.
+    uint32_t tier = 2; // mid-range default (GTX 1070)
+
+    FILE* f = std::fopen("/sys/class/kgsl/kgsl-3d0/gpu_model", "r");
+    if (!f) f = std::fopen("/sys/class/kgsl/kgsl-3d0/devfreq/device/gpu_model", "r");
+
+    if (f) {
+      char buf[64] = {0};
+      if (std::fgets(buf, int(sizeof(buf)), f)) {
+        // Find and parse the Adreno model number
+        const char* p = buf;
+        while (*p && !std::isdigit(static_cast<unsigned char>(*p))) ++p;
+        if (*p) {
+          unsigned long model = std::strtoul(p, nullptr, 10);
+          if (model >= 700)       tier = 3; // Adreno 7xx/8xx -> RTX 3060
+          else if (model >= 640)  tier = 2; // Adreno 640-660 -> GTX 1070
+          else                    tier = 1; // Adreno 610/619 -> GTX 1050 Ti
+        }
+      }
+      std::fclose(f);
+    }
+
+    // Apply persona based on detected tier
+    static constexpr struct { const char* vid; const char* did; } personaTable[4] = {
+      {},                                          // [0] unused
+      {"10de", "1c82"}, // [1] GTX 1050 Ti
+      {"10de", "1b81"}, // [2] GTX 1070
+      {"10de", "2503"}, // [3] RTX 3060
+    };
+
+    if (tier >= 1 && tier <= 3) {
+      config.setOption("dxgi.customVendorId", personaTable[tier].vid);
+      config.setOption("dxgi.customDeviceId", personaTable[tier].did);
+      config.setOption("dxgi.customDeviceDesc",
+        std::string("NVIDIA GeForce (Vegas - Tier ") + std::to_string(tier) + ")");
+    }
+  }
+
 
   void Vegas::applyVramSwap(VkPhysicalDeviceMemoryProperties& props, uint32_t tier) {
     uint64_t systemRamBytes = getSystemRamMB() * 1024ULL * 1024ULL;

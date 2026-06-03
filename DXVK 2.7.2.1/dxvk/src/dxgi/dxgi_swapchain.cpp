@@ -366,11 +366,10 @@ namespace dxvk {
                                 || (srcInfo.extent.width < dstInfo.extent.width);
 
                 if (needUpscale) {
-                    // Compute FSR EASU constants from src/dst dimensions
-                    VegasFsrConstants fsrConsts = Vegas::calculateFsrConstants(
-                        srcInfo.extent.width,  srcInfo.extent.height,
-                        dstInfo.extent.width,  dstInfo.extent.height
-                    );
+                    // Compute FSR EASU constants from src/dst extents
+                    VegasFsrConstants fsrConsts = {};
+                    Vegas::calculateFsrConstants(fsrConsts,
+                        srcInfo.extent, dstInfo.extent);
 
                     VEGAS_LOG("FSR upscale: %ux%u -> %ux%u (mode=%d)",
                         srcInfo.extent.width, srcInfo.extent.height,

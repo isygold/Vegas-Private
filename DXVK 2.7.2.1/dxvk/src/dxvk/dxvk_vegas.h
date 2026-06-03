@@ -6,6 +6,7 @@
 #include "dxvk_adapter.h"
 
 namespace dxvk {
+  class Config; // fwd decl for Config-based overloads
 
   /**
    * \brief Vegas performance state enum
@@ -97,10 +98,20 @@ namespace dxvk {
 
     // ---- HW Masking (baked, not user-tunable) ----
 
+    /** Apply VRAM scaling at config-load time (self-aware, Config overload) */
+    static void applyVramSwap(
+            Config&              config);
+
+    /** Apply GPU persona at config-load time (self-aware, Config overload) */
+    static void applyGpuMask(
+            Config&              config);
+
+    /** Apply VRAM scaling at Vk-device-init time (tier from initializeProfile) */
     static void applyVramSwap(
             VkPhysicalDeviceMemoryProperties& props,
             uint32_t             tier);
 
+    /** Apply GPU persona at Vk-device-init time (tier from initializeProfile) */
     static void applyGpuMask(
             VkPhysicalDeviceProperties&       props,
             uint32_t             persona);
