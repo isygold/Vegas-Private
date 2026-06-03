@@ -82,6 +82,13 @@ namespace dxvk {
     /// Should the caller skip binding descriptors?
     static bool shouldSkipBind();
 
+    /// Should the caller submit HAAE early? Manages counter internally.
+    /// \param [in,out] counter Caller-owned draw counter (incremented internally)
+    /// \param [in]     drawCalls Number of draws in the current submission
+    static bool shouldSubmitHaae(
+            uint32_t&            counter,
+            uint32_t             drawCalls);
+
     // ---- Legacy Profile (kept for compat, not user-facing) ----
 
     static void initializeProfile(

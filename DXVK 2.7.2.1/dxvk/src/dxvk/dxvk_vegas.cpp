@@ -823,6 +823,15 @@ namespace dxvk {
     return s_enabled && s_bindSkipEnabled;
   }
 
+  bool Vegas::shouldSubmitHaae(uint32_t& counter, uint32_t drawCalls) {
+    counter += drawCalls;
+    if (counter >= s_haaeThreshold) {
+      counter = 0;
+      return true;
+    }
+    return false;
+  }
+
   bool Vegas::shouldUpscale(Tristate upscalerState, VkExtent3D src, VkExtent3D dst) {
     if (upscalerState == Tristate::False)
       return false;

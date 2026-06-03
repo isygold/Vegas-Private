@@ -613,14 +613,10 @@ void DxvkDevice::submitCommandList(
     // --- VEGAS: ADAPTIVE SUBMISSION THROTTLE ---
     static uint32_t vegasCounter = 0;
     uint32_t drawCalls = commandList->statCounters().getCtr(DxvkStatCounter::CmdDrawCalls);
-    vegasCounter += drawCalls;
 
-    int32_t baseThreshold = static_cast<int32_t>(Vegas::getHaaeThreshold());
-
-    if (vegasCounter >= uint32_t(baseThreshold)) {
+    if (Vegas::shouldSubmitHaae(vegasCounter, drawCalls)) {
         // Insert a submission fence to pace the GPU
         this->m_submissionQueue.submit(DxvkSubmitInfo(), DxvkLatencyInfo(), nullptr);
-        vegasCounter = 0;
     }
     // --- END VEGAS ---
 
