@@ -610,19 +610,19 @@ void DxvkDevice::submitCommandList(
           uint64_t                  frameId,
           DxvkSubmitStatus* status) {
     
-    // --- STAR ENGINE: HAAE THERMAL BRAIN ---
-    static uint32_t starCounter = 0;
+    // --- VEGAS: ADAPTIVE SUBMISSION THROTTLE ---
+    static uint32_t vegasCounter = 0;
     uint32_t drawCalls = commandList->statCounters().getCtr(DxvkStatCounter::CmdDrawCalls);
-    starCounter += drawCalls;
+    vegasCounter += drawCalls;
 
-    int32_t baseThreshold = m_instance->config().getStarHAAEThreshold();
+    int32_t baseThreshold = m_instance->config().getVegasHAAEThreshold();
 
-    if (starCounter >= uint32_t(baseThreshold)) {
-        // Correct 2.7.2 Submission syntax
+    if (vegasCounter >= uint32_t(baseThreshold)) {
+        // Insert a submission fence to pace the GPU
         this->m_submissionQueue.submit(DxvkSubmitInfo(), DxvkLatencyInfo(), nullptr);
-        starCounter = 0;
+        vegasCounter = 0;
     }
-    // --- END STAR ENGINE ---
+    // --- END VEGAS ---
 
     DxvkSubmitInfo submitInfo;
     submitInfo.cmdList = commandList;

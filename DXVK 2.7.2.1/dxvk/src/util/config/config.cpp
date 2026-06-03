@@ -5,7 +5,7 @@
 #include <regex>
 #include <utility>
 
-// --- STAR ENGINE: WINDOWS/LINUX COMPATIBILITY ---
+// --- VEGAS: WINDOWS/LINUX COMPATIBILITY ---
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -14,6 +14,7 @@
 // ------------------------------------------------
 
 #include "config.h"
+#include "../dxvk/dxvk_vegas.h"
 #include "../log/log.h"
 #include "../util_env.h"
 #include "../sha1/sha1_util.h"
@@ -1653,77 +1654,26 @@ namespace dxvk {
     Config finalConfig = config ? *config : Config();
 
     // ============================================================
-    // STAR ENGINE: DYNAMIC ADRENO OPTIMIZATION (Priority 1 & 2)
+    // VEGAS: DYNAMIC ADRENO OPTIMIZATION
     // ============================================================
     
     // Check if a manual override is already present in dxvk.conf
     if (finalConfig.getOptionValue("dxgi.customVendorId").empty()) {
-        Config starTier;
+        Config vegasOpts;
 
-        // --- STAR ENGINE: DYNAMIC RAM DETECTION ---
-        uint64_t totalRamMB = 0;
-
-        #ifdef _WIN32
-            // Windows logic for the UCRT64 Compiler
-            MEMORYSTATUSEX statex;
-            statex.dwLength = sizeof(statex);
-            GlobalMemoryStatusEx(&statex);
-            totalRamMB = statex.ullTotalPhys / (1024 * 1024);
-        #else
-            // Linux/Android logic for your Redmi Note 11
-            long pages = sysconf(_SC_PHYS_PAGES);
-            long pageSize = sysconf(_SC_PAGE_SIZE);
-            totalRamMB = (pages * pageSize) / (1024 * 1024);
-        #endif
-
-        // --- PRIORITY 2: DYNAMIC VRAM SCALING ---
-        // Target 40% of detected RAM
-        uint32_t vramReport = static_cast<uint32_t>(totalRamMB * 0.40);
-        
-        // Safety Bounds
-        if (vramReport < 1024) vramReport = 1024; 
-        if (vramReport > 4096) vramReport = 4096;
-
-        starTier.setOption("dxgi.maxDeviceMemory", std::to_string(vramReport));
-        starTier.setOption("dxgi.maxSharedMemory", std::to_string(vramReport / 2));
-        
-        // Safety Bounds: Min 1GB for compatibility, Max 4GB for stability
-        if (vramReport < 1024) vramReport = 1024; 
-        if (vramReport > 4096) vramReport = 4096;
-
-        starTier.setOption("dxgi.maxDeviceMemory", std::to_string(vramReport));
-        starTier.setOption("dxgi.maxSharedMemory", std::to_string(vramReport / 2));
+        // --- DYNAMIC VRAM SCALING ---
+        Vegas::applyVramSwap(vegasOpts);
 
         // BIONIC SAFETY LAYER (Universal Black Screen Fixes)
-        starTier.setOption("dxgi.enableDummyCompositionSwapchain", "True");
-        starTier.setOption("dxgi.deferSurfaceCreation", "True");
-        starTier.setOption("dxgi.hideNvidiaGpu", "False");
+        vegasOpts.setOption("dxgi.enableDummyCompositionSwapchain", "True");
+        vegasOpts.setOption("dxgi.deferSurfaceCreation", "True");
+        vegasOpts.setOption("dxgi.hideNvidiaGpu", "False");
 
-        // --- PRIORITY 1: MULTI-TIER PERSONA ---
-        // Uses the STAR_ENGINE_TIER environment variable or defaults to Tier 1
-        std::string socTier = env::getEnvVar("STAR_ENGINE_TIER");
+        // --- MULTI-TIER PERSONA ---
+        Vegas::applyGpuMask(vegasOpts);
 
-        if (socTier == "HIGH") {
-            // TIER 3: Adreno 7xx / 8xx -> RTX 3060 Mask
-            starTier.setOption("dxgi.customVendorId", "10de");
-            starTier.setOption("dxgi.customDeviceId", "2503");
-            starTier.setOption("dxgi.customDeviceDesc", "NVIDIA GeForce RTX 3060 (Star Engine)");
-        } 
-        else if (socTier == "MID") {
-            // TIER 2: Adreno 640-660 -> GTX 1070 Mask
-            starTier.setOption("dxgi.customVendorId", "10de");
-            starTier.setOption("dxgi.customDeviceId", "1b81");
-            starTier.setOption("dxgi.customDeviceDesc", "NVIDIA GeForce GTX 1070 (Star Engine)");
-        } 
-        else {
-            // TIER 1: Adreno 610/Baseline -> GTX 1050 Ti Mask
-            starTier.setOption("dxgi.customVendorId", "10de");
-            starTier.setOption("dxgi.customDeviceId", "1c82");
-            starTier.setOption("dxgi.customDeviceDesc", "NVIDIA GeForce GTX 1050 Ti (Star Engine)");
-        }
-
-        Logger::info(str::format("STAR ENGINE: Dynamic VRAM (", vramReport, "MB) applied via Smart Persona."));
-        finalConfig.merge(starTier);
+        Logger::info(str::format("VEGAS: Dynamic VRAM applied."));
+        finalConfig.merge(vegasOpts);
     }
 
     if (!finalConfig.m_options.empty()) {

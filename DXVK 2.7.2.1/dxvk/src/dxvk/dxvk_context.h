@@ -1,8 +1,8 @@
 #pragma once
 
-#define STAR_ENGINE_VERSION "DXVK v2.7.1-starengine"
+#define VEGAS_VERSION "DXVK v2.7.2.1-vegas"
 
-#include <atomic> // [StarEngine] Added for thread safety
+#include <atomic> // [Vegas] Thread-safe state
 #include <mutex>
 #include "dxvk_barrier.h"
 #include "dxvk_bind_mask.h"
@@ -15,6 +15,7 @@
 #include "dxvk_objects.h"
 #include "dxvk_queue.h"
 #include "dxvk_util.h"
+#include "dxvk_vegas.h"
 
 namespace dxvk {
 
@@ -824,22 +825,22 @@ namespace dxvk {
 
     DxvkImplicitResolveTracker  m_implicitResolves;
 
-    // ========== [StarEngine] OPTIMIZATION STATE ==========
+    // ========== [Vegas] OPTIMIZATION STATE ==========
 private:
-    struct StarProfile {
-        bool enabled         = false;
-        bool initialized     = false;
-        bool allowBindSkip   = true;
-        uint32_t drawThreshold = 150;           // Lower for mobile GPUs
-        VkPipeline lastBoundVkPipeline = VK_NULL_HANDLE;  // Track last bound pipeline
-    } m_starProfile;
+    struct VegasProfile {
+        bool enabled           = false;
+        bool initialized       = false;
+        bool allowBindSkip     = true;
+        uint32_t drawThreshold = 150;
+        VkPipeline lastBoundVkPipeline = VK_NULL_HANDLE;
+    } m_vegasProfile;
 
-    std::atomic<uint32_t> m_drawsSinceSubmit{0};  // Thread-safe draw counter
-        
-    void initStarProfile();                        // Initialize GPU-specific optimizations
-    bool loadStarConfig();                         // Load configuration from starengine.ini
-	bool checkAsyncCompilationCompat() const;
-// ========== END [StarEngine] ==========
+    std::atomic<uint32_t> m_drawsSinceSubmit{0};
+    
+    void initVegasProfile();
+    bool loadVegasConfig();
+    bool checkAsyncCompilationCompat() const;
+// ========== END [Vegas] ==========
 
     void blitImageFb(
             Rc<DxvkImageView>     dstView,

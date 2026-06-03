@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
-// --- STAR ENGINE: HARDWARE BRIDGE ---
+// --- VEGAS: HARDWARE BRIDGE ---
 #ifdef _WIN32
 #include <windows.h>  // For MEMORYSTATUSEX on your PC
 #else
@@ -77,20 +77,20 @@ namespace dxvk {
      * \returns The parsed option value
      */
 	 
-	 // --- STAR ENGINE: Custom Definitions ---
+	 // --- VEGAS: Custom Definitions ---
      // These allow other files (like the Swapchain) to read your new settings.
-	 /** * --- STAR ENGINE: API DEFINITIONS ---
+	 /** * --- VEGAS: API DEFINITIONS ---
      * These allow the engine to read our custom Bionic-Ready settings.
      */
     
     // Priority 3: Spatial Upscaler Toggle
-    bool getStarUpscaleEnabled() const {
-      return this->getOption<bool>("star.enableUpscaler", true);
+    bool getVegasUpscaleEnabled() const {
+      return this->getOption<bool>("vegas.enableUpscaler", true);
     }
 
     // Priority 4: HAAE Thermal Threshold
-    int32_t getStarHAAEThreshold() const {
-      return this->getOption<int32_t>("star.haaeThreshold", 65);
+    int32_t getVegasHAAEThreshold() const {
+      return this->getOption<int32_t>("vegas.haaeThreshold", 65);
     }
 	
     template<typename T>

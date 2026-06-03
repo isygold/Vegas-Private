@@ -11,15 +11,15 @@
 #include "dxvk_device.h"
 #include "dxvk_context.h"
 
-// === STAR ENGINE PATCH - ANDROID LOGGING ===
+// === VEGAS PATCH - ANDROID LOGGING ===
 #ifdef __ANDROID__
 #include <android/log.h>
-#define STAR_LOG(fmt, ...) __android_log_print(ANDROID_LOG_INFO, "StarEngine", fmt, ##__VA_ARGS__)
+#define VEGAS_LOG(fmt, ...) __android_log_print(ANDROID_LOG_INFO, "Vegas", fmt, ##__VA_ARGS__)
 #else
 #include <iostream>
-#define STAR_LOG(fmt, ...) std::cout << "[StarEngine] " << fmt << std::endl
+#define VEGAS_LOG(fmt, ...) std::cout << "[Vegas] " << fmt << std::endl
 #endif
-// === END STAR ENGINE PATCH ===
+// === END VEGAS PATCH ===
 
 namespace dxvk {
   
@@ -83,26 +83,26 @@ namespace dxvk {
 	// === STAR ENGINE HUD OVERRIDE ===
     // This forces the DXVK HUD to use your custom version string
     #ifdef _WIN32
-    _putenv_s("DXVK_HUD_VERSION", STAR_ENGINE_VERSION);
+    _putenv_s("DXVK_HUD_VERSION", VEGAS_VERSION);
 #else
-    setenv("DXVK_HUD_VERSION", STAR_ENGINE_VERSION, 1);
+    setenv("DXVK_HUD_VERSION", VEGAS_VERSION, 1);
 #endif
     
-    STAR_LOG("HUD Version initialized as: %s", STAR_ENGINE_VERSION);
+    VEGAS_LOG("HUD Version initialized as: %s", VEGAS_VERSION);
     // === END HUD OVERRIDE ===
 	
-	      // [StarEngine] Initialize once at creation
+	      // [Vegas] Initialize once at creation
     // Inside DxvkContext constructor
 m_drawsSinceSubmit.store(0, std::memory_order_relaxed);
-m_starProfile.lastBoundVkPipeline = VK_NULL_HANDLE;
-m_starProfile.initialized = false;
+m_vegasProfile.lastBoundVkPipeline = VK_NULL_HANDLE;
+m_vegasProfile.initialized = false;
 
 // Missing initializations now included:
-m_starProfile.enabled = false;
-m_starProfile.allowBindSkip = false;
-m_starProfile.drawThreshold = 0;
+m_vegasProfile.enabled = false;
+m_vegasProfile.allowBindSkip = false;
+m_vegasProfile.drawThreshold = 0;
 
-initStarProfile(); 
+initVegasProfile(); 
 }
  
   
@@ -119,11 +119,11 @@ initStarProfile();
 
     
 
-    // ✅ Reset StarEngine tracking
+    // ✅ Reset Vegas tracking
 
     m_drawsSinceSubmit.store(0, std::memory_order_relaxed);
 
-    m_starProfile.lastBoundVkPipeline = VK_NULL_HANDLE;
+    m_vegasProfile.lastBoundVkPipeline = VK_NULL_HANDLE;
 
     this->beginCurrentCommands();
 
@@ -182,11 +182,11 @@ initStarProfile();
 
     
 
-    // ✅ Reset ALL StarEngine state
+    // ✅ Reset ALL Vegas state
 
     m_drawsSinceSubmit.store(0, std::memory_order_relaxed);
 
-    m_starProfile.lastBoundVkPipeline = VK_NULL_HANDLE;
+    m_vegasProfile.lastBoundVkPipeline = VK_NULL_HANDLE;
 
     
     // Flush pending descriptor updates and assign the sync
@@ -841,16 +841,16 @@ initStarProfile();
 void DxvkContext::draw(uint32_t vertexCount, uint32_t instanceCount,
                        uint32_t firstVertex, uint32_t firstInstance) {
     // Corrected draw() and drawIndexed() calls
-if (unlikely(!m_starProfile.initialized)) {
-    initStarProfile();
+if (unlikely(!m_vegasProfile.initialized)) {
+    initVegasProfile();
 }
 
 // Threshold check using Relaxed ordering
-    if (unlikely(m_starProfile.enabled &&
-        m_drawsSinceSubmit.load(std::memory_order_relaxed) >= m_starProfile.drawThreshold)) {
+    if (unlikely(m_vegasProfile.enabled &&
+        m_drawsSinceSubmit.load(std::memory_order_relaxed) >= m_vegasProfile.drawThreshold)) {
         
         this->spillRenderPass(true); 
-        VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "StarEngine_Flush" };
+        VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "Vegas_Flush" };
         this->flushCommandList(&flushLabel, nullptr);
     }
 
@@ -860,7 +860,7 @@ if (unlikely(!m_starProfile.initialized)) {
     m_cmd->cmdDraw(vertexCount, instanceCount, firstVertex, firstInstance);
     m_cmd->addStatCtr(DxvkStatCounter::CmdDrawCalls, 1);
 
-    if (m_starProfile.enabled)
+    if (m_vegasProfile.enabled)
         m_drawsSinceSubmit.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -953,16 +953,16 @@ if (unlikely(!m_starProfile.initialized)) {
                               uint32_t firstIndex, int32_t vertexOffset,
                               uint32_t firstInstance) {
     // Corrected drawIndexed() call
-    if (unlikely(!m_starProfile.initialized)) {
-        initStarProfile();
+    if (unlikely(!m_vegasProfile.initialized)) {
+        initVegasProfile();
     }
 
     // Threshold check using Relaxed ordering
-    if (unlikely(m_starProfile.enabled &&
-        m_drawsSinceSubmit.load(std::memory_order_relaxed) >= m_starProfile.drawThreshold)) {
+    if (unlikely(m_vegasProfile.enabled &&
+        m_drawsSinceSubmit.load(std::memory_order_relaxed) >= m_vegasProfile.drawThreshold)) {
         
         this->spillRenderPass(true); 
-        VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "StarEngine_Flush" };
+        VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "Vegas_Flush" };
         this->flushCommandList(&flushLabel, nullptr);
     }
 
@@ -973,7 +973,7 @@ if (unlikely(!m_starProfile.initialized)) {
     m_cmd->cmdDrawIndexed(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
     m_cmd->addStatCtr(DxvkStatCounter::CmdDrawCalls, 1);
 
-    if (m_starProfile.enabled)
+    if (m_vegasProfile.enabled)
         m_drawsSinceSubmit.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -5310,7 +5310,7 @@ void DxvkContext::drawIndexed(
       m_flags.clr(DxvkContextFlag::GpRenderPassBound,
                   DxvkContextFlag::GpRenderPassSideEffects,
                   DxvkContextFlag::GpRenderPassNeedsFlush);
-      m_starProfile.lastBoundVkPipeline = VK_NULL_HANDLE;
+      m_vegasProfile.lastBoundVkPipeline = VK_NULL_HANDLE;
 
       this->pauseTransformFeedback();
 
@@ -5892,9 +5892,9 @@ void DxvkContext::drawIndexed(
       
     bool shouldBind = true;
 
-    if (m_starProfile.enabled && m_starProfile.allowBindSkip) {
+    if (m_vegasProfile.enabled && m_vegasProfile.allowBindSkip) {
       // Only skip if the handle matches AND the pipeline state isn't "dirty"
-      if (pipelineInfo.handle == m_starProfile.lastBoundVkPipeline &&
+      if (pipelineInfo.handle == m_vegasProfile.lastBoundVkPipeline &&
           !m_flags.test(DxvkContextFlag::GpDirtyPipelineState)) {
         shouldBind = false;
       }
@@ -5904,7 +5904,7 @@ void DxvkContext::drawIndexed(
       m_cmd->cmdBindPipeline(DxvkCmdBuffer::ExecBuffer, 
                              VK_PIPELINE_BIND_POINT_GRAPHICS, 
                              pipelineInfo.handle);
-      m_starProfile.lastBoundVkPipeline = pipelineInfo.handle;
+      m_vegasProfile.lastBoundVkPipeline = pipelineInfo.handle;
     }
     // === END MERGED PATCH ===
 
@@ -7159,7 +7159,7 @@ void DxvkContext::drawIndexed(
       // 1. Determine if we want to use Async for this draw
       bool useAsync = m_device->config().enableAsync && this->checkAsyncCompilationCompat();
 
-      // 2. Call your StarEngine-optimized update function
+      // 2. Call your Vegas-optimized update function
       // We pass 'useAsync' so the pipeline manager knows whether to wait or skip
       if (unlikely(!this->updateGraphicsPipeline(useAsync)))
         return false;
@@ -9499,96 +9499,55 @@ void DxvkContext::drawIndexed(
   }
 
 
-// ========== STAR ENGINE OPTIMIZATION HELPERS ==========
+// ========== VEGAS OPTIMIZATION HELPERS ==========
 
-void DxvkContext::initStarProfile() {
-    if (m_starProfile.initialized)
+void DxvkContext::initVegasProfile() {
+    if (m_vegasProfile.initialized)
         return;
 
     // Reset state and set defaults
-    m_starProfile.enabled = false;
-    m_starProfile.allowBindSkip = false;
-    m_starProfile.drawThreshold = 150; 
-    m_starProfile.lastBoundVkPipeline = VK_NULL_HANDLE;
+    m_vegasProfile.enabled = false;
+    m_vegasProfile.allowBindSkip = false;
+    m_vegasProfile.drawThreshold = 150;
+    m_vegasProfile.lastBoundVkPipeline = VK_NULL_HANDLE;
 
-    try {
-        if (m_device != nullptr && m_device->adapter() != nullptr) {
-            auto& props = m_device->adapter()->deviceProperties().core.properties;
-            
-            std::string deviceName = props.deviceName;
-            std::transform(deviceName.begin(), deviceName.end(), deviceName.begin(), ::tolower);
-            
-            // 0x5143 = Qualcomm Vendor ID
-            if (props.vendorID == 0x5143 || deviceName.find("adreno") != std::string::npos) {
-                m_starProfile.enabled = true;
-                m_starProfile.allowBindSkip = true;
-                STAR_LOG("Hardware Verified: Adreno GPU detected (0x%x). optimizations active.", props.vendorID);
-            }
-        }
-    } catch (const std::exception& e) {
-        STAR_LOG("Warning: Failed to query GPU properties: %s", e.what());
-    }
+    // Delegate hardware detection and profile setup to the Vegas class
+    Vegas::initializeProfile(m_device);
+
+    // Pull resolved values back into the context
+    m_vegasProfile.enabled       = Vegas::isEnabled();
+    m_vegasProfile.allowBindSkip = Vegas::isBindSkipEnabled();
+    m_vegasProfile.drawThreshold = Vegas::getDrawThreshold();
+
+    VEGAS_LOG("Vegas profile: enabled=%d bindSkip=%d drawThreshold=%u",
+              m_vegasProfile.enabled, m_vegasProfile.allowBindSkip,
+              m_vegasProfile.drawThreshold);
 
     // Load user configuration (overwrites hardware defaults if file exists)
-    loadStarConfig();
-    m_starProfile.initialized = true;
+    loadVegasConfig();
+    m_vegasProfile.initialized = true;
 }
 
-bool DxvkContext::loadStarConfig() {
-    std::vector<std::string> potentialPaths = {
-        "/storage/emulated/0/starengine.ini",
-        "/storage/emulated/0/Download/starengine.ini",
-        "/storage/emulated/0/Winlator/starengine.ini",
-        "/storage/emulated/0/Android/data/com.winlator/files/starengine.ini" // Scoped Storage
-    };
+bool DxvkContext::loadVegasConfig() {
+    // Delegate config file loading to the Vegas class
+    bool found = Vegas::loadConfig();
 
-    if (const char* env = std::getenv("STAR_CONFIG_FILE"))
-        potentialPaths.insert(potentialPaths.begin(), env);
-
-    bool found = false;
-    for (const auto& p : potentialPaths) {
-        std::ifstream file(p); // RAII ensures file is closed automatically
-        if (file.is_open()) {
-            STAR_LOG("StarEngine config found: %s", p.c_str());
-            std::string line;
-            while (std::getline(file, line)) {
-                // Strip comments
-                size_t commentPos = line.find('#');
-                if (commentPos != std::string::npos) line = line.substr(0, commentPos);
-
-                // Strip whitespace
-                line.erase(std::remove_if(line.begin(), line.end(), ::isspace), line.end());
-                if (line.empty()) continue;
-
-                size_t eqPos = line.find('=');
-                if (eqPos == std::string::npos) continue;
-
-                std::string key = line.substr(0, eqPos);
-                std::string val = line.substr(eqPos + 1);
-
-                try {
-                    if (key == "BindSkip") {
-                        m_starProfile.allowBindSkip = (val == "1" || val == "true");
-                    } else if (key == "DrawThreshold") {
-                        uint32_t v = std::stoul(val);
-                        // Clamping: Min 10, Max 10000
-                        m_starProfile.drawThreshold = (v < 10) ? 10 : (v > 10000 ? 10000 : v);
-                    }
-                } catch (const std::exception& e) {
-                    STAR_LOG("Config Error: Could not parse %s=%s", key.c_str(), val.c_str());
-                }
-            }
-            found = true;
-            break;
-        }
+    // Pull overrides back if the file was found
+    if (found) {
+        m_vegasProfile.allowBindSkip = Vegas::isBindSkipEnabled();
+        m_vegasProfile.drawThreshold = Vegas::getDrawThreshold();
+        VEGAS_LOG("Vegas config loaded: bindSkip=%d drawThreshold=%u",
+                  m_vegasProfile.allowBindSkip, m_vegasProfile.drawThreshold);
+    } else {
+        VEGAS_LOG("Vegas: No config file found. Using defaults.");
     }
-    if (!found) STAR_LOG("StarEngine: No config file found. Using defaults.");
+
     return found;
 }
 
 
 bool DxvkContext::checkAsyncCompilationCompat() const {
-  // For Adreno/StarEngine, we want this to be true for most graphics states
+  // For Adreno/Vegas, we want this to be true for most graphics states
   return true; 
 }
 
