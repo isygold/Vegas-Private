@@ -84,13 +84,10 @@ namespace dxvk {
      */
     
     // Priority 3: Spatial Upscaler Toggle (Tristate: Auto/True/False)
+    /// This is the ONLY user-facing Vegas option.
+    /// All other parameters are baked self-aware by the Vegas class.
     Tristate getVegasUpscaleEnabled() const {
       return this->getOption<Tristate>("vegas.enableUpscaler", Tristate::Auto);
-    }
-
-    // Priority 4: HAAE Thermal Threshold
-    int32_t getVegasHAAEThreshold() const {
-      return this->getOption<int32_t>("vegas.haaeThreshold", 65);
     }
 	
     template<typename T>

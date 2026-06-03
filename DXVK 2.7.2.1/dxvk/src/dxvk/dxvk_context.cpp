@@ -99,8 +99,6 @@ m_vegasProfile.initialized = false;
 
 // Missing initializations now included:
 m_vegasProfile.enabled = false;
-m_vegasProfile.allowBindSkip = false;
-m_vegasProfile.drawThreshold = 0;
 
 initVegasProfile(); 
 }
@@ -847,7 +845,7 @@ if (unlikely(!m_vegasProfile.initialized)) {
 
 // Threshold check using Relaxed ordering
     if (unlikely(m_vegasProfile.enabled &&
-        m_drawsSinceSubmit.load(std::memory_order_relaxed) >= m_vegasProfile.drawThreshold)) {
+        m_drawsSinceSubmit.load(std::memory_order_relaxed) >= Vegas::getDrawThreshold())) {
         
         this->spillRenderPass(true); 
         VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "Vegas_Flush" };
@@ -959,7 +957,7 @@ if (unlikely(!m_vegasProfile.initialized)) {
 
     // Threshold check using Relaxed ordering
     if (unlikely(m_vegasProfile.enabled &&
-        m_drawsSinceSubmit.load(std::memory_order_relaxed) >= m_vegasProfile.drawThreshold)) {
+        m_drawsSinceSubmit.load(std::memory_order_relaxed) >= Vegas::getDrawThreshold())) {
         
         this->spillRenderPass(true); 
         VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "Vegas_Flush" };
@@ -5892,7 +5890,7 @@ void DxvkContext::drawIndexed(
       
     bool shouldBind = true;
 
-    if (m_vegasProfile.enabled && m_vegasProfile.allowBindSkip) {
+    if (m_vegasProfile.enabled && Vegas::isBindSkipEnabled()) {
       // Only skip if the handle matches AND the pipeline state isn't "dirty"
       if (pipelineInfo.handle == m_vegasProfile.lastBoundVkPipeline &&
           !m_flags.test(DxvkContextFlag::GpDirtyPipelineState)) {
@@ -9505,45 +9503,24 @@ void DxvkContext::initVegasProfile() {
     if (m_vegasProfile.initialized)
         return;
 
-    // Reset state and set defaults
+    // Reset runtime state
     m_vegasProfile.enabled = false;
-    m_vegasProfile.allowBindSkip = false;
-    m_vegasProfile.drawThreshold = 150;
     m_vegasProfile.lastBoundVkPipeline = VK_NULL_HANDLE;
 
-    // Delegate hardware detection and profile setup to the Vegas class
+    // Self-aware profile: all thresholds baked by Vegas class
     Vegas::initializeProfile(m_device);
 
-    // Pull resolved values back into the context
-    m_vegasProfile.enabled       = Vegas::isEnabled();
-    m_vegasProfile.allowBindSkip = Vegas::isBindSkipEnabled();
-    m_vegasProfile.drawThreshold = Vegas::getDrawThreshold();
+    // Pull resolved values back into context
+    m_vegasProfile.enabled = Vegas::isEnabled();
 
-    VEGAS_LOG("Vegas profile: enabled=%d bindSkip=%d drawThreshold=%u",
-              m_vegasProfile.enabled, m_vegasProfile.allowBindSkip,
-              m_vegasProfile.drawThreshold);
+    VEGAS_LOG("Vegas self-aware profile: enabled=%d tier=%u drawThreshold=%u haaeThreshold=%u",
+              m_vegasProfile.enabled, Vegas::getTier(),
+              Vegas::getDrawThreshold(), Vegas::getHaaeThreshold());
 
-    // Load user configuration (overwrites hardware defaults if file exists)
-    loadVegasConfig();
     m_vegasProfile.initialized = true;
 }
 
-bool DxvkContext::loadVegasConfig() {
-    // Delegate config file loading to the Vegas class
-    bool found = Vegas::loadConfig();
 
-    // Pull overrides back if the file was found
-    if (found) {
-        m_vegasProfile.allowBindSkip = Vegas::isBindSkipEnabled();
-        m_vegasProfile.drawThreshold = Vegas::getDrawThreshold();
-        VEGAS_LOG("Vegas config loaded: bindSkip=%d drawThreshold=%u",
-                  m_vegasProfile.allowBindSkip, m_vegasProfile.drawThreshold);
-    } else {
-        VEGAS_LOG("Vegas: No config file found. Using defaults.");
-    }
-
-    return found;
-}
 
 
 bool DxvkContext::checkAsyncCompilationCompat() const {

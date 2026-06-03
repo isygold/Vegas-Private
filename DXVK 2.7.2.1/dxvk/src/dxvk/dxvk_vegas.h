@@ -35,7 +35,31 @@ namespace dxvk {
 
   public:
 
-    // ---- Profile & Threshold ----
+    // ============================================================
+    // Self-Aware Profile — All thresholds baked internally
+    // ============================================================
+
+    /// Initialize the self-aware profile. Detects GPU, tier,
+    /// and bakes all thresholds. Idempotent (safe to call multiple times).
+    static void initializeProfile(
+            DxvkDevice*          device);
+
+    /// True if Vegas optimizations are active (Adreno GPU detected)
+    static bool isEnabled();
+
+    /// True if pipeline bind-skip is active
+    static bool isBindSkipEnabled();
+
+    /// Bake-determined draw-call flush threshold
+    static uint32_t getDrawThreshold();
+
+    /// Bake-determined HAAE submission threshold
+    static uint32_t getHaaeThreshold();
+
+    /// Detected GPU tier (1=entry, 2=mid, 3=high)
+    static uint32_t getTier();
+
+    // ---- Legacy Profile (kept for compat, not user-facing) ----
 
     static void initializeProfile(
             uint32_t&            threshold,
@@ -71,7 +95,7 @@ namespace dxvk {
 
     static uint64_t getSystemRamMB();
 
-    // ---- HW Masking ----
+    // ---- HW Masking (baked, not user-tunable) ----
 
     static void applyVramSwap(
             VkPhysicalDeviceMemoryProperties& props,
@@ -81,13 +105,13 @@ namespace dxvk {
             VkPhysicalDeviceProperties&       props,
             uint32_t             persona);
 
-    // ---- Frame Gen ----
+    // ---- Frame Gen (baked) ----
 
     static bool needsFrameGen(
             float                frameTime,
             uint32_t             tier);
 
-    // ---- FSR ----
+    // ---- FSR (user-facing only via Tristate config) ----
 
     static void calculateFsrConstants(
             VegasFsrConstants&   c,
@@ -107,7 +131,7 @@ namespace dxvk {
     static const char* getStatusString(
             VegasPerformanceState state);
 
-    // ---- BCn→ASTC Transcoder ----
+    // ---- BCn→ASTC Transcoder (baked auto) ----
 
     static bool formatIsBcn(
             VkFormat             format);
@@ -129,6 +153,15 @@ namespace dxvk {
             uint32_t             width,
             uint32_t             height);
 
+  private:
+
+    // Baked state — set once by initializeProfile(), never user-tunable
+    static bool                s_initialized;
+    static bool                s_enabled;
+    static bool                s_bindSkipEnabled;
+    static uint32_t            s_tier;
+    static uint32_t            s_drawThreshold;
+    static uint32_t            s_haaeThreshold;
   };
 
 } // namespace dxvk

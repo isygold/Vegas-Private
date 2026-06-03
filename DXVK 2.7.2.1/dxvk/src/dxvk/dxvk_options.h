@@ -73,12 +73,11 @@ namespace dxvk {
     /// Device name
     std::string deviceFilter;
 
-    // --- VEGAS: ADRENO OPTIMIZATION OPTIONS (Tristate-enabled) ---
+    // --- VEGAS: ADRENO OPTIMIZATION OPTIONS ---
     /// Enables FSR 1.0 spatial upscaler (Auto/True/False)
+    /// This is the ONLY user-facing Vegas option.
+    /// All other parameters are baked self-aware by the Vegas class.
     Tristate vegasEnableUpscaler = Tristate::Auto;
-
-    /// HAAE adaptive submission threshold (draw calls before forced flush)
-    int32_t vegasHaaeThreshold = 65;
   };
 
 }

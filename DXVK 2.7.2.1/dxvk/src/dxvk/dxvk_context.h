@@ -825,20 +825,17 @@ namespace dxvk {
 
     DxvkImplicitResolveTracker  m_implicitResolves;
 
-    // ========== [Vegas] OPTIMIZATION STATE ==========
+    // ========== [Vegas] SELF-AWARE OPTIMIZATION STATE ==========
 private:
     struct VegasProfile {
-        bool enabled           = false;
-        bool initialized       = false;
-        bool allowBindSkip     = true;
-        uint32_t drawThreshold = 150;
-        VkPipeline lastBoundVkPipeline = VK_NULL_HANDLE;
+        bool           initialized           = false;
+        bool           enabled               = false;
+        VkPipeline     lastBoundVkPipeline    = VK_NULL_HANDLE;
     } m_vegasProfile;
 
     std::atomic<uint32_t> m_drawsSinceSubmit{0};
     
     void initVegasProfile();
-    bool loadVegasConfig();
     bool checkAsyncCompilationCompat() const;
 // ========== END [Vegas] ==========
 

@@ -15,6 +15,18 @@
 
 namespace dxvk {
 
+  // ============================================================
+  // Baked state — all values determined by initializeProfile()
+  // ============================================================
+  bool     Vegas::s_initialized    = false;
+  bool     Vegas::s_enabled        = false;
+  bool     Vegas::s_bindSkipEnabled = false;
+  uint32_t Vegas::s_tier           = 0;
+  uint32_t Vegas::s_drawThreshold  = 150;
+  uint32_t Vegas::s_haaeThreshold  = 65;
+
+
+
   void Vegas::initializeProfile(uint32_t& threshold, bool& enabled, bool& bindSkip, uint32_t& tier, DxvkDevice* device) {
       if (device == nullptr || device->adapter() == nullptr) return;
       auto& props = device->adapter()->deviceProperties().core.properties;
@@ -687,5 +699,56 @@ namespace dxvk {
 
     delete[] decodedPixels;
   }
+
+
+  // ============================================================
+  // Self-Aware Profile — auto-detect GPU, bake all thresholds
+  // ============================================================
+
+  void Vegas::initializeProfile(DxvkDevice* device) {
+    if (s_initialized) return;
+
+    if (device == nullptr || device->adapter() == nullptr) {
+      s_initialized = true;
+      return;
+    }
+
+    auto& props = device->adapter()->deviceProperties().core.properties;
+    bool isAdreno = device->adapter()->isAdreno();
+
+    if (!isAdreno) {
+      // Fallback: check device name
+      std::string dname(props.deviceName);
+      for (auto& c : dname) c = std::tolower(static_cast<unsigned char>(c));
+      isAdreno = (dname.find("adreno") != std::string::npos);
+    }
+
+    if (isAdreno) {
+      s_enabled        = true;
+      s_bindSkipEnabled = true;
+      s_tier           = device->adapter()->getStarEnginePersona();
+    } else {
+      s_enabled        = false;
+      s_bindSkipEnabled = false;
+      s_tier           = 0;
+    }
+
+    // Bake draw thresholds based on GPU tier (D3D11 base)
+    static constexpr uint32_t drawThresholdTable[] = { 600, 1200, 2000 };
+    static constexpr uint32_t haaeThresholdTable[] = { 40,  65,   100 };
+
+    uint32_t idx = (s_tier >= 1 && s_tier <= 3) ? s_tier - 1 : 0;
+    s_drawThreshold = drawThresholdTable[idx];
+    s_haaeThreshold = haaeThresholdTable[idx];
+
+    s_initialized = true;
+  }
+
+  bool Vegas::isEnabled()           { return s_enabled; }
+  bool Vegas::isBindSkipEnabled()   { return s_bindSkipEnabled; }
+  uint32_t Vegas::getDrawThreshold() { return s_drawThreshold; }
+  uint32_t Vegas::getHaaeThreshold() { return s_haaeThreshold; }
+  uint32_t Vegas::getTier()         { return s_tier; }
+
 
 } // namespace dxvk
