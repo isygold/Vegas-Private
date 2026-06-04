@@ -390,10 +390,16 @@ namespace dxvk {
         now - m_lastPresentTime).count();
     if (m_presentId > 0 && frameTime > 0.0f && frameTime < 500.0f) {
       double target = (m_frameRateLimit > 0.0) ? (1000.0 / m_frameRateLimit) : 16.667;
+      // GPU load estimate — hardcoded 0.5 pending Vulkan query support
+      constexpr float kGpuLoad = 0.5f;
+
       m_lastPerfState = Vegas::analyzePerformance(
-          0.5f,                          /* GPU load (future: query-based) */
-          frameTime,
+          kGpuLoad, frameTime,
           static_cast<float>(target));
+
+      // Let the governor react to current conditions
+      Vegas::tuneThreshold(kGpuLoad, frameTime);
+
       m_needsFrameGen = Vegas::needsFrameGen(frameTime, Vegas::getTier());
 
       Logger::debug(str::format(

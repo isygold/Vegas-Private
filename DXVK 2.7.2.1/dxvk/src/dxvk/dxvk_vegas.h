@@ -112,6 +112,12 @@ namespace dxvk {
             float                frameTime,
             uint32_t             tier);
 
+    /// Self-contained overload — reads internal s_tier and modifies
+    /// s_drawThreshold directly. Caller only supplies load + frameTime.
+    static void tuneThreshold(
+            float                load,
+            float                frameTime);
+
     static bool shouldZeroInit(
             uint32_t             tier);
 

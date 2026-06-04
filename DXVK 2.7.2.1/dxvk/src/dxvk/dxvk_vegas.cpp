@@ -97,6 +97,11 @@ namespace dxvk {
       }
   }
 
+  // Self-contained overload — delegates to the 4-arg form with internal state
+  void Vegas::tuneThreshold(float load, float frameTime) {
+      tuneThreshold(s_drawThreshold, load, frameTime, s_tier);
+  }
+
   // VEGAS: ZeroInitShaders = 1 (always enable for Unity/Adreno stability)
   bool Vegas::shouldZeroInit(uint32_t tier) {
       return true;
