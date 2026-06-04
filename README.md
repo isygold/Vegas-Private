@@ -1,93 +1,131 @@
-# 🌟 STAR ENGINE: DXVK v2.7.2.1 (HAAE Update)
-### **Adaptive High-Performance DXVK Fork for Android Emulation**
+# 🎰 VEGAS: DXVK v2.7.2.1
+### **Adreno-Tuned DXVK Fork for Android Emulation (Star Emulator / Winlator)**
 
-**STAR ENGINE** is a specialized performance modification of DXVK designed specifically for **Qualcomm Adreno GPUs** in mobile environments (Star Emulator, Winlator, Mobox). This fork prioritizes **Frame Pacing Stability** and **Driver Survival** over raw, stuttery peak FPS.
-
----
-
-## 🆕 What's New in v2.7.2.1
-
-### 🤖 Adaptive Command Stream (Auto-Threshold)(Experimental/not yet implented for use yet but will be in v2.7.3)
-The engine now features real-time frame telemetry monitoring to balance performance and safety automatically.
-* **Dynamic Pacing:** Automatically adjusts the Mid-Frame Flush threshold based on GPU load.
-* **Smart Performance:** High-FPS scenes allow larger command batches, while heavy scenes trigger frequent flushes to prevent **Adreno Driver Hangs**.
-
-### 🖼️ Tiered Adaptive Scaling (HAAE Vision)
-Implemented a hardware-aware upscaling layer to reclaim performance lost to mobile resolution bottlenecks.
-* **Performance Tier:** Uses optimized Linear Blit for low-end GPUs (SD6xx).
-* **Quality Tier:** Triggers **Cubic Reconstruction** for high-end GPUs (SD7xx/8xx) when performance headroom exists.
-* **Resolution Fix:** Improved handshake between D3D swapchains and Android displays to fix resolution mismatches in legacy titles.
-
-### 🛠️ Unity Engine "Initialization" Fixes
-Added core DXVK patches to solve the common **"Failed to initialize 3D engine"** errors.
-* **Shader Zero-Init:** Prevents Unity from reading garbage memory, fixing splash-screen crashes.
-* **D3D11 Modernization:** Implementation of `ID3DDestructionNotifier` and improved Planar Video paths for modern Unity titles.
+**VEGAS** (formerly Star Engine) is a specialized performance modification of DXVK designed for **Qualcomm Adreno GPUs** in mobile environments. It brings a tier-based auto-tuning engine, FSR 1.0 compute upscaling, motion-compensated frame generation, and dynamic driver safety features — all controlled by a single master switch.
 
 ---
 
-## 🚀 Key Technical Features
-* **Dynamic-State-Aware Bind-Skip:** Reduces CPU overhead by skipping redundant pipeline calls unless dynamic states (viewports/scissors) change.
-* **Mid-Frame Command Flushing:** Prevents command buffer overflows—a critical fix for Adreno 610/642L/7xx/8xx GPUs.
-* **Android-Native Storage Support:** Intelligent configuration loading from common Android paths for easier setup on mobile devices.
+## 🎯 Key Features
+
+### 🧠 Star Profile Master Switch (`dxvk.enableStarProfile`)
+All Vegas features are gated behind one Tristate option:
+- **Auto** — Enable on Adreno GPUs, disable on all others (default)
+- **True** — Force-enable all features (for testing on non-Adreno)
+- **False** — Hard-disable everything (emergency escape hatch)
+
+### 🏎️ Tier-Based Auto-Tuning
+Adreno GPUs are classified into 3 tiers via sysfs (`/sys/class/kgsl/kgsl-3d0/gpu_model`):
+
+| Tier | GPUs | Persona |
+|------|------|---------|
+| 1 | Adreno 610, 619 | GTX 1050 Ti |
+| 2 | Adreno 640, 642L, 650, 660 | GTX 1070 |
+| 3 | Adreno 7xx, 8xx | RTX 3060 |
+
+Each tier gets tuned draw thresholds, frame gen eligibility, HAAE quality scaling, and VRAM budgets automatically.
+
+### 🔬 FSR 1.0 Compute Upscaler (`vegas.enableUpscaler`)
+Full FSR 1.0 EASU compute pipeline:
+- **Auto** — Upscale when render resolution < swapchain resolution
+- **True** — Always upscale (half-resolution quadrants)
+- **False** — Disabled
+
+Uses push constants + 2-binding descriptor set, dispatch with blit + fence sync.
+
+### 🎞️ 3-Pass Motion-Compensated Frame Generation
+Available on Tier 2 (≤29ms frametime) and Tier 3 (≤33ms frametime):
+1. **Motion estimation** — Block SAD on prev/cur frames → raw motion vectors
+2. **Median filter** — 3×3 spatial denoise on motion field
+3. **Warp + blend** — Warp prev frame by filtered motion, alpha-blend at weight 0.5
+
+Compute-only pipeline with shared 4-binding descriptor layout.
+
+### 🛡️ Adaptive Governor (`tuneThreshold`)
+EMA-smoothed frame-time telemetry with 120-frame cooldown prevents threshold oscillation. Automatically adjusts mid-frame flush threshold based on GPU load.
+
+### 📊 Dynamic VRAM & GPU Mask
+- `applyVramSwap(Config&)` — Sets `dxgi.maxDeviceMemory` to 40% of system RAM (clamped 1–4 GB)
+- `applyGpuMask(Config&)` — Maps Adreno tier to NVIDIA vendor/device ID for game compatibility
+
+### 🧹 Bind Skip Optimization
+Skips redundant `vkCmdBindPipeline` calls when no dynamic state has changed — reduces CPU overhead.
+
+### 🎨 HUD Performance Colors
+Graph coloring via `getGraphColor()`: green (normal) → yellow (lagging) → orange (stuttering) → red (overheating).
 
 ---
 
-## 🛠️ Installation & Setup
+## 🛠️ Installation
 
-### Method 1: Star Emulator (Recommended)
-1. Open Star Emulator.
-2. Navigate to the **"Contents"** menu.
-3. Install the `dxvk-2.7.2.1.wcp` file.
+### Via Star Emulator
+1. Open Star Emulator
+2. Navigate to **Contents** menu
+3. Install the `dxvk-2.7.2.1.wcp` file
 
-### Method 2: Manual Config (Plug-and-Play)
-Place your `dxvk.conf` or `starengine.ini` in any of these supported paths:
-* `/storage/emulated/0/Winlator/`
-* `/storage/emulated/0/Download/`
-* `/storage/emulated/0/`
+### Manual Setup
+Place `dxvk.conf` in any of these paths:
+- `/storage/emulated/0/Winlator/`
+- `/storage/emulated/0/Download/`
+- `/storage/emulated/0/`
 
-**Environment Variable Configuration:**
-* **Name:** `DXVK_CONFIG_FILE`
-* **Value:** The directory where your `dxvk.conf` is located (e.g., `/sdcard/Winlator/dxvk.conf`).
-
-------
-
-## 📝 **Dev/User Note: Why 2.7.2.1 uses Manual Thresholds Internal** 
-* **Project Note: Core Branch 2.7.2.1 vs. 2.7.3 Roadmap**
-
-**"The decision to retain manual thresholding in the 2.7.2.1 release was made to ensure absolute stability during the transition to the new HAAE Upscaling Layer. While the Auto-Adaptive logic is mathematically sound, implementing it in the current branch without real-time GPU Load telemetry (utilization %) would lead to 'threshold oscillation' on mid-range devices like the SD680.
-We are delaying the AUTO-THRESHOLD SYSTEM to v2.7.3 to allow for a deeper integration with the Mesa/Turnip GPU Statistics framework. This will allow the engine to distinguish between a CPU-bound stutter and a GPU-bound overflow, preventing unnecessary command flushing and preserving maximum FPS."**
-
-------
+Or set `DXVK_CONFIG_FILE` env var to your config path.
 
 ---
 
-## ⚙️ Configuration Tuning
-You can modify your `dxvk.conf` to find the perfect balance for your specific hardware:
+## ⚙️ Configuration
 
 ```ini
-# STAR ENGINE CONFIG
-starengine.adaptiveThreshold = 1    # 1 = Auto (Recommended), 0 = Manual(Experimental/yet to be implemented)
-starengine.drawThreshold = 150      # Only used if Adaptive is 0
-starengine.bindSkip = 1             # Change based on level of game stuttering
-starengine.allowQualityScaling = 1  # 1 for High-End (Cubic), 0 for Low-End (Linear)(Experimental/yet to be implemented)
+# Master switch: Auto (Adreno only), True (force-on), False (force-off)
+dxvk.enableStarProfile = Auto
+
+# FSR 1.0 upscaler: Auto, True, False
+vegas.enableUpscaler = Auto
 ```
-------
-------
 
-## NOTE (FOR BIONIC VERSION USAGE): 
-* The turnip version 25.1.0 as default does not properly communicate with this dxvk driver hence should not be used as it will not work! properly install the latest turnip driver that is good or compatible for your device performance. All installations and manual placing should be done before the creating a container and the drivers are to be set during installation as this ensures a clean setup! 
-* Also the box 64 version is to be considered; version 0.3.6/ 0.3.6-xxxx for stability usage with this driver(this can be as a fall back for performance) versions 0.3.7/0.3.7-xxxx - 0.4.xxxx variant are recommended for better performance.( This relies greatly and depends on the Device used)
-* The tests in the container will have low fps beacuse of the draw call threshold being set but will notice a very smooth frame pacing and smoother test and smoother gameplay, which is the main aim of the driver, this applies in the game as well depending on your specific hardware device (GPUS with 6xx-7xx and 8s gen 1 too will be working good for this driver). If you're judging the speed based on the built-in container tests or system tools, don't trust them! They don't handle the Async paths in STAR ENGINE properly. Test with an actual game (like Tomb Raider or RE) and turn on the DXVK_HUD to make sure the engine is actually loading.
-* You can tweak your dxvk.conf to better suit your specific game having heavy stutter and lags which help in reducing its issue, but remember to always have a copy of your previous tweaked or default dxvk.conf file incase you want to fallback to it.
-* Provide log files when placing issues down it helps a lot to pinpoint the exact issues.
-* Make sure to avoid mistakes when inputing the environment variables as this is crucial for this versio
-* For max performance locking use the FEXCORE and VKD3D+DXVK and DGVOODO
-------
-------
+All other parameters (thresholds, tier, bind skip, HAAE, quality scaling) are auto-tuned by the Vegas engine.
 
-## 📜 Credits & License
-* Lead Developer: ISYGOLD
-* Base Project: DXVK (Original by doitsujin) v2.7.1
-* License: Distributed under the zlib/libpng license.
+---
 
-> NOTE FOR DEVELOPERS: Follow the Readme instructions in both the build/compilation folder and the source code folder to get successful build.
+## 🧱 Build from Source
+
+```bash
+git clone --recursive https://github.com/isygold/Star-Engine-DXVK-Releases.git
+cd Star-Engine-DXVK-Releases
+
+# Android cross-build (requires NDK + Meson)
+meson setup --cross-file build-android-aarch64.txt \
+  --buildtype release --prefix /output/dir build
+cd build
+ninja install
+```
+
+See `DXVK 2.7.2.1/dxvk/README.md` for upstream build instructions.
+
+---
+
+## 📜 Changelog (Vegas)
+
+| Commit | Feature |
+|--------|---------|
+| `c7be5c3` | Master switch + dead code removal + conf docs |
+| `c006dc3` | Framegen first-frame dead code fix |
+| `7da716a` | 3-pass framegen integration |
+| `42bcbe7` | FSR intermediate target + barrier validation |
+| (earlier) | FSR SPIR-V + compute pipeline + HAAE base |
+
+---
+
+## 📝 Notes
+
+- **Tier 1 (Adreno 610/619):** Frame generation disabled — compute budget insufficient for 3-pass. FSR available but not recommended.
+- **BCn→ASTC transcoder:** Implemented but gated — will be enabled when image upload pipeline is wired.
+- **Turnip driver:** Use a recent Turnip (Mesa 25.x+) for best results. The Vulkan 1.3 path is required for descriptor indexing and push constants.
+- **Container tests:** Built-in benchmarks may show lower FPS due to draw thresholds. Judge by actual gameplay smoothness.
+
+---
+
+## 📜 Credits
+
+- **Lead Developer:** ISYGOLD
+- **Base Project:** DXVK v2.7.1+ by doitsujin
+- **License:** zlib/libpng
