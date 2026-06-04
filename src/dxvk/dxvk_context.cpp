@@ -9506,7 +9506,7 @@ void DxvkContext::initVegasProfile() {
     m_vegasProfile.lastBoundVkPipeline = VK_NULL_HANDLE;
 
     // Self-aware profile: all thresholds baked by Vegas class
-    Vegas::initializeProfile(m_device);
+    Vegas::initializeProfile(m_device.ptr());
 
     // Pull resolved values back into context
     m_vegasProfile.enabled = Vegas::isEnabled();
