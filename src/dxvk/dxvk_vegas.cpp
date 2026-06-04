@@ -6,7 +6,9 @@
 #include "star_fsr_spv.h"
 #include "star_fg_spv.h"
 
+#ifndef _WIN32
 #include <dlfcn.h>
+#endif
 
 #include <algorithm>
 #include <string>
@@ -995,6 +997,7 @@ namespace dxvk {
 
     /** Load all needed Vulkan device functions via dlsym + vkGetDeviceProcAddr. */
     static bool loadVulkanFuncs(VkDevice device) {
+#ifndef _WIN32
       if (s_vk.loaded)
         return s_vk.vkCreateShaderModule != nullptr;
       void* lib = dlopen("libvulkan.so", RTLD_NOLOAD | RTLD_LOCAL);
@@ -1082,6 +1085,9 @@ namespace dxvk {
 
       s_vk.loaded = true;
       return true;
+#else
+      return false;
+#endif
     }
 
   } // anonymous namespace
