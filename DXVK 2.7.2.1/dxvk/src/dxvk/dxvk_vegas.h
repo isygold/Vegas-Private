@@ -241,7 +241,8 @@ namespace dxvk {
             uint32_t             height);
 
     /// Retrieve framegen output VkImage (interpolated intermediate frame).
-    /// The caller blits this to the swapchain backbuffer after framegenDispatch.
+    /// Note: framegenDispatch blits the output to curImage internally;
+    /// this getter exists for debug/inspection only.
     static uint64_t framegenOutputImage();
 
   private:
@@ -280,13 +281,14 @@ namespace dxvk {
     static bool                s_fgInitialized;
 
     // Framegen intermediate images
+    static bool                s_fgPrevValid;         ///< true after first frame saved to prev
     static uint64_t            s_fgPrevImage;         ///< VkImage (saved previous frame)
     static uint64_t            s_fgPrevMemory;        ///< VkDeviceMemory
     static uint32_t            s_fgPrevW;             ///< current width
     static uint32_t            s_fgPrevH;             ///< current height
-    static uint64_t            s_fgMotionImage;       ///< VkImage (raw motion, R16G16)
+    static uint64_t            s_fgMotionImage;       ///< VkImage (raw motion, R32G32_SFLOAT)
     static uint64_t            s_fgMotionMemory;      ///< VkDeviceMemory
-    static uint64_t            s_fgMotionFiltered;    ///< VkImage (filtered motion, R16G16)
+    static uint64_t            s_fgMotionFiltered;    ///< VkImage (filtered motion, R32G32_SFLOAT)
     static uint64_t            s_fgMotionFMemory;     ///< VkDeviceMemory
     static uint64_t            s_fgOutputImage;       ///< VkImage (framegen output)
     static uint64_t            s_fgOutputMemory;      ///< VkDeviceMemory

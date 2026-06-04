@@ -58,6 +58,7 @@ namespace dxvk {
   bool     Vegas::s_fgInitialized     = false;
 
   // Framegen intermediate images
+  bool     Vegas::s_fgPrevValid       = false;
   uint64_t Vegas::s_fgPrevImage       = 0;
   uint64_t Vegas::s_fgPrevMemory      = 0;
   uint32_t Vegas::s_fgPrevW           = 0;
@@ -1927,6 +1928,7 @@ namespace dxvk {
     destroyImage(s_fgMotionFiltered,  s_fgMotionFMemory);
     destroyImage(s_fgOutputImage,     s_fgOutputMemory);
 
+    s_fgPrevValid = false;
     s_fgPrevW = 0;
     s_fgPrevH = 0;
     s_fgMotionW = 0;
@@ -2104,7 +2106,7 @@ namespace dxvk {
     // ================================================================
     // First frame? Just save current as previous, return false
     // ================================================================
-    if (prevImage == VK_NULL_HANDLE && !s_fgPrevImage) {
+    if (prevImage == VK_NULL_HANDLE && !s_fgPrevValid) {
       // Copy curImage → s_fgPrevImage for next frame
       // Use a simple command buffer for the copy
       VkCommandPoolCreateInfo poolCI = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
@@ -2224,6 +2226,7 @@ namespace dxvk {
       s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
       s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
 
+      s_fgPrevValid = true;
       Logger::debug("Vegas FG: first frame captured as previous");
       return false;
     }
