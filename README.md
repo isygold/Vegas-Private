@@ -1,3 +1,7 @@
+<img width="1280" height="720" alt="20260505_152432" src="https://github.com/user-attachments/assets/495a3b98-5328-4aae-8d2e-2a6656dda567" />
+
+
+
 # 🎰 VEGAS: DXVK v2.7.3
 ### **Adreno-Tuned DXVK Fork for Android Emulation (Star Emulator / Winlator)**
 
