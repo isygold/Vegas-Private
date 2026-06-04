@@ -292,7 +292,7 @@ namespace dxvk {
       return statusTable[static_cast<int>(state)];
   }
 
-  // VEGAS: ASTC Texture Compression
+  // VEGAS: ASTC helpers — used by the gated shouldTranscodeFormat/transcodeImageData
   bool Vegas::formatIsBcn(VkFormat format) {
     switch (format) {
       case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
@@ -357,6 +357,11 @@ namespace dxvk {
     }
   }
 
+  // GATED FEATURE — see comment above transcodeImageData() for rationale.
+  // Currently logs when a texture would benefit from ASTC but does NOT modify
+  // the format. Flip the switch in createImage() only after the upload-path
+  // transcoding pipeline is wired AND block-size alignment is verified on
+  // real Adreno 6xx/7xx hardware.
   VkFormat Vegas::shouldTranscodeFormat(
       VkFormat              originalFormat,
       VkImageUsageFlags     usage,
@@ -391,7 +396,35 @@ namespace dxvk {
   }
 
   // ============================================================
-  // CPU-side BCn->ASTC transcoder
+  // CPU-side BCn->ASTC transcoder (GATED — NOT ACTIVATED YET)
+  // ============================================================
+  //
+  // Rationale: On older Adreno 6xx GPUs the closed-source Qualcomm
+  // driver decodes BCn in software at draw time, causing mid-frame
+  // CPU stalls. Pre-transcoding BCn→ASTC at upload time moves that
+  // decode cost to loading where it's harmless. On Adreno 8xx with
+  // native BCn hardware this buys nothing — but Star Engine targets
+  // the full range of Android devices.
+  //
+  // Why it's still gated:
+  //   1. Block-size mismatch — BCn uses 4×4 blocks, ASTC uses 5×5
+  //      or 6×6. Most game textures (power-of-2) don't align, so
+  //      vkCmdCopyBufferToImage would fail validation.
+  //   2. Upload pipeline — the staging buffer contains BCn data;
+  //      format-swapping the VkImage without also transcoding the
+  //      pixel data produces garbage.
+  //   3. Untested — written speculatively, never run end-to-end.
+  //
+  // To activate:
+  //   a) In DxvkDevice::createImage(): swap createInfo.format to
+  //      the ASTC format returned by shouldTranscodeFormat().
+  //   b) In DxvkContext::uploadImage[Fb|Hw](): call
+  //      transcodeImageData() on the staging buffer before the
+  //      vkCmdCopyBufferToImage call.
+  //   c) Verify block-size alignment on real Adreno 6xx/7xx hw.
+  //
+  // Until then this entire section is dead code — kept for future
+  // bring-up.
   // ============================================================
 
   namespace {

@@ -236,7 +236,10 @@ namespace dxvk {
   Rc<DxvkImage> DxvkDevice::createImage(
     const DxvkImageCreateInfo&  createInfo,
           VkMemoryPropertyFlags memoryType) {
-    // --- VEGAS: BCn→ASTC transcoding check (wired, format override gated) ---
+    // --- VEGAS: BCn→ASTC transcoding check (GATED) ---
+    // Rationale/activation checklist: see the long block comment above the
+    // anonymous namespace block in dxvk_vegas.cpp (~line 395) named
+    // "CPU-side BCn->ASTC transcoder"
     if (Vegas::isEnabled()) {
       VkFormat vegasFormat = Vegas::shouldTranscodeFormat(
           createInfo.format,
