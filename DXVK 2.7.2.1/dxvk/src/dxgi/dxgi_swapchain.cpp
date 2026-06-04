@@ -24,6 +24,7 @@ namespace dxvk {
     m_presenter (pPresenter),
     m_monitor   (wsi::getWindowMonitor(m_window)),
     m_is_d3d12(SUCCEEDED(pDevice->QueryInterface(__uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&Com<ID3D12CommandQueue>())))),
+    m_lastPresentTime(dxvk::high_resolution_clock::now()),
     m_destructionNotifier(this) {
 
     if (FAILED(m_presenter->GetAdapter(__uuidof(IDXGIAdapter), reinterpret_cast<void**>(&m_adapter))))
@@ -383,6 +384,26 @@ namespace dxvk {
           UINT                      PresentFlags,
     const DXGI_PRESENT_PARAMETERS*  pPresentParameters) {
 
+    // --- VEGAS: Frame timing and performance analysis ---
+    auto now = dxvk::high_resolution_clock::now();
+    float frameTime = std::chrono::duration<float, std::milli>(
+        now - m_lastPresentTime).count();
+    if (m_presentId > 0 && frameTime > 0.0f && frameTime < 500.0f) {
+      double target = (m_frameRateLimit > 0.0) ? (1000.0 / m_frameRateLimit) : 16.667;
+      m_lastPerfState = Vegas::analyzePerformance(
+          0.5f,                          /* GPU load (future: query-based) */
+          frameTime,
+          static_cast<float>(target));
+      m_needsFrameGen = Vegas::needsFrameGen(frameTime, Vegas::getTier());
+
+      Logger::debug(str::format(
+          "Vegas: Perf=", Vegas::getStatusString(m_lastPerfState),
+          " frameTime=", frameTime, "ms",
+          " frameGen=", m_needsFrameGen ? "yes" : "no"));
+    }
+    m_lastPresentTime = now;
+    // --- END VEGAS ---
+
     if (SyncInterval > 4)
       return DXGI_ERROR_INVALID_CALL;
 
@@ -477,6 +498,14 @@ namespace dxvk {
         m_desc.Width  ? nullptr : &m_desc.Width,
         m_desc.Height ? nullptr : &m_desc.Height);
     }
+
+    // --- VEGAS: update aspect ratio for letterboxing ---
+    Vegas::calculateAspectRatio(m_desc.Width, m_desc.Height,
+        m_aspectRatioX, m_aspectRatioY);
+    Logger::debug(str::format(
+        "Vegas: AspectRatio=", m_aspectRatioX, "x", m_aspectRatioY,
+        " (", m_desc.Width, "x", m_desc.Height, ")"));
+    // --- END VEGAS ---
     
     if (BufferCount != 0)
       m_desc.BufferCount = BufferCount;

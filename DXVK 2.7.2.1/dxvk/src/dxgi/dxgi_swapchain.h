@@ -202,6 +202,13 @@ namespace dxvk {
     uint32_t                        m_frameRateSyncInterval = 0u;
     bool                            m_is_d3d12;
 
+    // Vegas performance/framegen state
+    dxvk::high_resolution_clock::time_point  m_lastPresentTime;
+    VegasPerformanceState                    m_lastPerfState = VegasPerformanceState::Normal;
+    bool                                     m_needsFrameGen = false;
+    float                                    m_aspectRatioX = 1.0f;
+    float                                    m_aspectRatioY = 1.0f;
+
     DXGI_COLOR_SPACE_TYPE           m_colorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
 
     uint32_t                        m_globalHDRStateSerial = 0;

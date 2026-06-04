@@ -4,6 +4,7 @@
 #include "dxvk_latency_reflex.h"
 #include "dxvk_shader_cache.h"
 #include "dxvk_shader_ir.h"
+#include "dxvk_vegas.h"
 
 namespace dxvk {
   
@@ -235,6 +236,22 @@ namespace dxvk {
   Rc<DxvkImage> DxvkDevice::createImage(
     const DxvkImageCreateInfo&  createInfo,
           VkMemoryPropertyFlags memoryType) {
+    // --- VEGAS: BCn→ASTC transcoding check (wired, format override gated) ---
+    if (Vegas::isEnabled()) {
+      VkFormat vegasFormat = Vegas::shouldTranscodeFormat(
+          createInfo.format,
+          createInfo.usage,
+          createInfo.extent,
+          m_adapter);
+      if (vegasFormat != VK_FORMAT_UNDEFINED) {
+        Logger::debug(str::format(
+            "Vegas: Image ", createInfo.extent.width, "x", createInfo.extent.height,
+            " format ", createInfo.format, " -> would transcode to ", vegasFormat,
+            " (not yet active — upload transcoding not wired)"));
+      }
+    }
+    // --- END VEGAS ---
+
     return new DxvkImage(this, createInfo, m_objects.memoryManager(), memoryType);
   }
   
