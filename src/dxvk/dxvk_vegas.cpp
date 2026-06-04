@@ -84,9 +84,12 @@ namespace dxvk {
       static constexpr size_t adrenoLen = 6;
       bool isAdreno = false;
 
+#ifndef _WIN32
       if (device->adapter()->isAdreno()) {
           isAdreno = true;
-      } else {
+      } else
+#endif
+      {
           for (size_t i = 0; i < VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - adrenoLen && props.deviceName[i] != '\0'; ++i) {
               size_t j = 0;
               for (; j < adrenoLen; ++j) {
@@ -102,7 +105,11 @@ namespace dxvk {
       if (isAdreno) {
           enabled = true;
           bindSkip = true;
+#ifndef _WIN32
           tier = device->adapter()->getStarEnginePersona();
+#else
+          tier = 2;  // safe fallback for non-Adreno
+#endif
           // VEGAS: Set default tier-based threshold (fallback)
           static constexpr uint32_t defaultThresholds[] = {600, 1200, 2000};
           threshold = (tier >= 1 && tier <= 3) ? defaultThresholds[tier - 1] : 600;
@@ -851,13 +858,21 @@ namespace dxvk {
     }
 
     auto& props = device->adapter()->deviceProperties().core.properties;
+#ifndef _WIN32
     bool isAdreno = device->adapter()->isAdreno();
+#else
+    bool isAdreno = false;
+#endif
 
     if (master == Tristate::True) {
       // Force-enable: skip Adreno detection, default to tier 2
       s_enabled        = true;
       s_bindSkipEnabled = true;
+#ifndef _WIN32
       s_tier           = device->adapter()->getStarEnginePersona();
+#else
+      s_tier           = 2;  // safe fallback for non-Adreno
+#endif
       if (s_tier == 0) s_tier = 2; // safe fallback for non-Adreno
     } else {
       // Auto: detect Adreno
@@ -871,7 +886,11 @@ namespace dxvk {
       if (isAdreno) {
         s_enabled        = true;
         s_bindSkipEnabled = true;
+#ifndef _WIN32
         s_tier           = device->adapter()->getStarEnginePersona();
+#else
+        s_tier           = 2;  // safe fallback for non-Adreno
+#endif
       } else {
         s_enabled        = false;
         s_bindSkipEnabled = false;
@@ -2276,6 +2295,29 @@ namespace dxvk {
       return false;
     }
 
+    // Cleanup helper — call with stage number indicating what was allocated.
+    // Stage: 0=none, 1=cmdPool, 2=cmdBuf, 3=fence,
+    //        4=srcViewCur, 5=srcViewPrev, 6=motionView,
+    //        7=motionFilteredView, 8=outputView
+    auto fgCleanup = [&](int stage) {
+      if (stage >= 8)
+        s_vk.vkDestroyImageView(device, outputView, nullptr);
+      if (stage >= 7)
+        s_vk.vkDestroyImageView(device, motionFilteredView, nullptr);
+      if (stage >= 6)
+        s_vk.vkDestroyImageView(device, motionView, nullptr);
+      if (stage >= 5)
+        s_vk.vkDestroyImageView(device, srcViewPrev, nullptr);
+      if (stage >= 4)
+        s_vk.vkDestroyImageView(device, srcViewCur, nullptr);
+      if (stage >= 3)
+        s_vk.vkDestroyFence(device, fence, nullptr);
+      if (stage >= 2)
+        s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+      if (stage >= 1)
+        s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+    };
+
     // ================================================================
     // Create image views
     // ================================================================
@@ -2293,7 +2335,7 @@ namespace dxvk {
     vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &srcViewCur);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreateImageView(cur) failed (", vr, ")"));
-      goto cleanup_fence;
+      fgCleanup(3); return false;
     }
 
     // prevImage view (same format)
@@ -2302,7 +2344,7 @@ namespace dxvk {
     vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &srcViewPrev);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreateImageView(prev) failed (", vr, ")"));
-      goto cleanup_view_cur;
+      fgCleanup(4); return false;
     }
 
     // Motion raw view (R32G32_SFLOAT)
@@ -2311,7 +2353,7 @@ namespace dxvk {
     vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &motionView);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreateImageView(motion) failed (", vr, ")"));
-      goto cleanup_view_prev;
+      fgCleanup(5); return false;
     }
 
     // Motion filtered view (R32G32_SFLOAT)
@@ -2320,7 +2362,7 @@ namespace dxvk {
     vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &motionFilteredView);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreateImageView(motionFiltered) failed (", vr, ")"));
-      goto cleanup_view_motion;
+      fgCleanup(6); return false;
     }
 
     // Output view (R8G8B8A8_UNORM)
@@ -2329,7 +2371,7 @@ namespace dxvk {
     vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &outputView);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreateImageView(output) failed (", vr, ")"));
-      goto cleanup_view_mfilt;
+      fgCleanup(7); return false;
     }
 
     // ================================================================
@@ -2340,7 +2382,7 @@ namespace dxvk {
     vr = s_vk.vkBeginCommandBuffer(cmdBuf, &beginInfo);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkBeginCommandBuffer failed (", vr, ")"));
-      goto cleanup_all_views;
+      fgCleanup(8); return false;
     }
 
     // ----------------------------------------------------------------
@@ -2435,7 +2477,7 @@ namespace dxvk {
     vr = s_vk.vkAllocateDescriptorSets(device, &descAlloc, descSets);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkAllocateDescriptorSets failed (", vr, ")"));
-      goto cleanup_all_views;
+      fgCleanup(8); return false;
     }
 
     // ---- Write descriptors for Pass 1 (MOTION) ----
@@ -2760,7 +2802,7 @@ namespace dxvk {
     vr = s_vk.vkEndCommandBuffer(cmdBuf);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkEndCommandBuffer failed (", vr, ")"));
-      goto cleanup_all_views;
+      fgCleanup(8); return false;
     }
 
     VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -2770,7 +2812,7 @@ namespace dxvk {
     vr = s_vk.vkQueueSubmit(queue, 1, &submitInfo, fence);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkQueueSubmit failed (", vr, ")"));
-      goto cleanup_all_views;
+      fgCleanup(8); return false;
     }
 
     vr = s_vk.vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
@@ -2792,22 +2834,6 @@ namespace dxvk {
     Logger::debug(str::format("Vegas FG: dispatch complete (", extent.width, "x", extent.height, ")"));
     return true;
 
-    // ---- Error jump labels ----
-  cleanup_all_views:
-    if (outputView)        s_vk.vkDestroyImageView(device, outputView, nullptr);
-  cleanup_view_mfilt:
-    if (motionFilteredView) s_vk.vkDestroyImageView(device, motionFilteredView, nullptr);
-  cleanup_view_motion:
-    if (motionView)        s_vk.vkDestroyImageView(device, motionView, nullptr);
-  cleanup_view_prev:
-    if (srcViewPrev)       s_vk.vkDestroyImageView(device, srcViewPrev, nullptr);
-  cleanup_view_cur:
-    if (srcViewCur)        s_vk.vkDestroyImageView(device, srcViewCur, nullptr);
-  cleanup_fence:
-    s_vk.vkDestroyFence(device, fence, nullptr);
-    s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
-    s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
-    return false;
   }
 
 } // namespace dxvk

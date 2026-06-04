@@ -235,7 +235,7 @@ namespace dxvk {
     /// this getter exists for debug/inspection only.
     static uint64_t framegenOutputImage();
 
-  private:
+  public:
 
     // Baked state — set once by initializeProfile(), never user-tunable
     static bool                s_initialized;
