@@ -336,46 +336,7 @@ namespace dxvk {
           UINT                      SyncInterval,
           UINT                      PresentFlags,
     const DXGI_PRESENT_PARAMETERS* pPresentParameters) {
-    
-    // --- VEGAS: FSR 1.0 UPSCALER (Tristate-aware) ---
-    auto options = m_factory->GetOptions();
-    Tristate upscaleState = options->vegasEnableUpscaler;
-
-    if (upscaleState != Tristate::False && this->m_presenter != nullptr) {
-        Com<IDXGIDXVKDevice> dxvkDevice;
-        if (SUCCEEDED(this->m_presenter->GetDevice(__uuidof(IDXGIDXVKDevice), reinterpret_cast<void**>(&dxvkDevice)))) {
-            
-            Com<IDXGIVkInteropSurface> srcSurface;
-            Com<IDXGIVkInteropSurface> dstSurface;
-
-            this->m_presenter->GetImage(0, __uuidof(IDXGIVkInteropSurface), reinterpret_cast<void**>(&srcSurface));
-            this->m_presenter->GetImage(1, __uuidof(IDXGIVkInteropSurface), reinterpret_cast<void**>(&dstSurface));
-
-            if (srcSurface != nullptr && dstSurface != nullptr) {
-                VkImage srcHandle, dstHandle;
-                VkImageCreateInfo srcInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-                VkImageCreateInfo dstInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-
-                srcSurface->GetVulkanImageInfo(&srcHandle, nullptr, &srcInfo);
-                dstSurface->GetVulkanImageInfo(&dstHandle, nullptr, &dstInfo);
-
-                if (Vegas::shouldUpscale(upscaleState, srcInfo.extent, dstInfo.extent)) {
-                    // Compute FSR EASU constants from src/dst extents
-                    VegasFsrConstants fsrConsts = {};
-                    Vegas::calculateFsrConstants(fsrConsts,
-                        srcInfo.extent, dstInfo.extent);
-
-                    VEGAS_LOG("FSR upscale: %ux%u -> %ux%u (mode=%d)",
-                        srcInfo.extent.width, srcInfo.extent.height,
-                        dstInfo.extent.width, dstInfo.extent.height,
-                        static_cast<int>(upscaleState));
-                    return S_OK;
-                }
-            }
-        }
-    }
-    // --- END VEGAS ---
-
+    // All logic (FSR decision + dispatch) is now consolidated in PresentBase.
     return this->PresentBase(SyncInterval, PresentFlags, pPresentParameters);
   }
 
@@ -434,6 +395,50 @@ namespace dxvk {
 
     UpdateGlobalHDRState();
     UpdateTargetFrameRate(SyncInterval);
+
+    // --- VEGAS: FSR 1.0 UPSCALE DISPATCH ---
+    // (Outside swapchain lock — uses independent Vulkan submit)
+    {
+      Tristate upscaleState = options->vegasEnableUpscaler;
+      if (upscaleState != Tristate::False && m_presenter != nullptr && m_presentId > 0) {
+        Com<IDXGIDXVKDevice> dxvkDevice;
+        if (SUCCEEDED(m_presenter->GetDevice(__uuidof(IDXGIDXVKDevice),
+                reinterpret_cast<void**>(&dxvkDevice)))) {
+          Com<IDXGIVkInteropSurface> srcSurface;
+          Com<IDXGIVkInteropSurface> dstSurface;
+          m_presenter->GetImage(0, __uuidof(IDXGIVkInteropSurface),
+              reinterpret_cast<void**>(&srcSurface));
+          m_presenter->GetImage(1, __uuidof(IDXGIVkInteropSurface),
+              reinterpret_cast<void**>(&dstSurface));
+          if (srcSurface != nullptr && dstSurface != nullptr) {
+            VkImage srcHandle, dstHandle;
+            VkImageCreateInfo srcInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+            VkImageCreateInfo dstInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+            srcSurface->GetVulkanImageInfo(&srcHandle, nullptr, &srcInfo);
+            dstSurface->GetVulkanImageInfo(&dstHandle, nullptr, &dstInfo);
+            if (Vegas::shouldUpscale(upscaleState, srcInfo.extent, dstInfo.extent)) {
+              // FSR dispatch: uses intermediate private VkImage with
+              // STORAGE_BIT, then blits to dst (avoids STORAGE_BIT on
+              // swapchain — HIGH risk on Adreno/Turnip).
+              VegasFsrConstants fsrConsts = {};
+              Vegas::calculateFsrConstants(fsrConsts,
+                  srcInfo.extent, dstInfo.extent);
+              Logger::debug(str::format(
+                  "Vegas FSR: attempting upscale ",
+                  srcInfo.extent.width, "x", srcInfo.extent.height,
+                  " -> ", dstInfo.extent.width, "x", dstInfo.extent.height));
+              bool dispatched = Vegas::fsrUpscale(
+                  srcHandle, dstHandle,
+                  srcInfo.extent, dstInfo.extent,
+                  dstInfo.format, fsrConsts);
+              Logger::debug(str::format(
+                  "Vegas FSR: ", dispatched ? "OK" : "SKIPPED/FAILED"));
+            }
+          }
+        }
+      }
+    }
+    // --- END VEGAS ---
 
     std::lock_guard<dxvk::recursive_mutex> lockWin(m_lockWindow);
     HRESULT hr = S_OK;

@@ -183,6 +183,25 @@ namespace dxvk {
     static const char* getStatusString(
             VegasPerformanceState state);
 
+    // ---- FSR Upscale Dispatch (baked, fail-closed) ----
+
+    /// Attempt FSR 1.0 EASU upscale dispatch.
+    /// \param [in] srcImage Source image (render output, low-res)
+    /// \param [in] dstImage Destination image (swapchain output, high-res)
+    /// \param [in] srcExtent Source image extent
+    /// \param [in] dstExtent Destination image extent
+    /// \param [in] swapchainFormat VkFormat of the swapchain
+    /// \param [in] fsrConsts Pre-computed FSR constants from calculateFsrConstants
+    /// \returns true if the dispatch was successfully submitted and completed
+    /// \note Fail-closed: returns false on any error. Never crashes the frame.
+    static bool fsrUpscale(
+            VkImage              srcImage,
+            VkImage              dstImage,
+            VkExtent3D           srcExtent,
+            VkExtent3D           dstExtent,
+            VkFormat             swapchainFormat,
+            VegasFsrConstants&   fsrConsts);
+
     // ---- BCn→ASTC Transcoder (baked auto) ----
 
     static bool formatIsBcn(
@@ -214,6 +233,24 @@ namespace dxvk {
     static uint32_t            s_tier;
     static uint32_t            s_drawThreshold;
     static uint32_t            s_haaeThreshold;
+
+    // Vulkan state (opaque handles, defined in .cpp with full DXVK includes)
+    static void*               s_device;          ///< VkDevice
+    static uint64_t            s_physicalDevice;  ///< VkPhysicalDevice (for mem type lookup)
+    static uint64_t            s_vkQueue;         ///< VkQueue
+    static uint32_t            s_queueFamily;
+    // FSR pipeline cache (opaque Vulkan handles)
+    static uint64_t            s_fsrPipeline;       ///< VkPipeline
+    static uint64_t            s_fsrPipelineLayout; ///< VkPipelineLayout
+    static uint64_t            s_fsrDescSetLayout;  ///< VkDescriptorSetLayout
+    static uint64_t            s_fsrDescPool;       ///< VkDescriptorPool
+    static bool                s_fsrInitialized;
+
+    // Intermediate FSR target — avoids VK_IMAGE_USAGE_STORAGE_BIT on swapchain
+    static uint64_t            s_fsrInterImage;     ///< VkImage
+    static uint64_t            s_fsrInterMemory;    ///< VkDeviceMemory
+    static uint32_t            s_fsrInterW;         ///< current width
+    static uint32_t            s_fsrInterH;         ///< current height
   };
 
 } // namespace dxvk

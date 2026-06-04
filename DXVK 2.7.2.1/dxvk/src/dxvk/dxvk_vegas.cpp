@@ -3,6 +3,10 @@
 #include "dxvk_adapter.h"
 #include "../util/config/config.h"
 
+#include "star_fsr_spv.h"
+
+#include <dlfcn.h>
+
 #include <algorithm>
 #include <string>
 #include <cstring>
@@ -27,6 +31,23 @@ namespace dxvk {
   uint32_t Vegas::s_tier           = 0;
   uint32_t Vegas::s_drawThreshold  = 150;
   uint32_t Vegas::s_haaeThreshold  = 65;
+
+  // Vulkan state — populated by initializeProfile(DxvkDevice*)
+  void*    Vegas::s_device           = nullptr;
+  uint64_t Vegas::s_physicalDevice   = 0;
+  uint64_t Vegas::s_vkQueue         = 0;
+  uint32_t Vegas::s_queueFamily     = 0;
+  // FSR pipeline cache
+  uint64_t Vegas::s_fsrPipeline       = 0;
+  uint64_t Vegas::s_fsrPipelineLayout = 0;
+  uint64_t Vegas::s_fsrDescSetLayout  = 0;
+  uint64_t Vegas::s_fsrDescPool       = 0;
+  bool     Vegas::s_fsrInitialized    = false;
+  // FSR intermediate target
+  uint64_t Vegas::s_fsrInterImage    = 0;
+  uint64_t Vegas::s_fsrInterMemory   = 0;
+  uint32_t Vegas::s_fsrInterW        = 0;
+  uint32_t Vegas::s_fsrInterH        = 0;
 
 
 
@@ -287,7 +308,7 @@ namespace dxvk {
       if (load >= 0.95f && frameTime >= overheatThreshold) {
           return VegasPerformanceState::Overheating;
       }
-      if (delta > targetFrameTime * 0.75f) {
+      if (delta > targetFrameTime * 1.25f) {
           return VegasPerformanceState::Stuttering;
       }
       if (frameTime >= laggingThreshold) {
@@ -854,11 +875,20 @@ namespace dxvk {
 
     // Bake draw thresholds based on GPU tier (D3D11 base)
     static constexpr uint32_t drawThresholdTable[] = { 600, 1200, 2000 };
-    static constexpr uint32_t haaeThresholdTable[] = { 40,  65,   100 };
+    static constexpr uint32_t haaeThresholdTable[] = { 150, 65,   100 };
 
     uint32_t idx = (s_tier >= 1 && s_tier <= 3) ? s_tier - 1 : 0;
     s_drawThreshold = drawThresholdTable[idx];
     s_haaeThreshold = haaeThresholdTable[idx];
+
+    // Store Vulkan device/queue handles for FSR dispatch.
+    // The VkDevice handle from device->handle() is an opaque pointer
+    // valid for the lifetime of DxvkDevice.
+    s_vkQueue         = reinterpret_cast<uint64_t>(device->queues().graphics.queueHandle);
+    s_queueFamily     = device->queues().graphics.queueFamily;
+
+    s_device          = reinterpret_cast<void*>(device->handle());
+    s_physicalDevice  = reinterpret_cast<uint64_t>(device->adapter()->handle());
 
     s_initialized = true;
   }
@@ -897,6 +927,750 @@ namespace dxvk {
       return true;
     // Auto: only upscale when source is smaller than destination
     return src.width < dst.width;
+  }
+
+
+  // ============================================================
+  // FSR 1.0 EASU Dispatch — with all 4 safety steps
+  // ============================================================
+
+  // ---- Vulkan function pointer cache (loaded once via dlsym) ----
+
+  namespace {
+
+    // Loaded via dlopen+dlsym at first fsrUpscale call
+    struct FsrVulkanFuncs {
+      PFN_vkGetDeviceProcAddr      vkGetDeviceProcAddr      = nullptr;
+      PFN_vkCreateShaderModule     vkCreateShaderModule     = nullptr;
+      PFN_vkDestroyShaderModule    vkDestroyShaderModule    = nullptr;
+      PFN_vkCreatePipelineLayout   vkCreatePipelineLayout   = nullptr;
+      PFN_vkDestroyPipelineLayout  vkDestroyPipelineLayout  = nullptr;
+      PFN_vkCreateComputePipelines vkCreateComputePipelines = nullptr;
+      PFN_vkDestroyPipeline        vkDestroyPipeline        = nullptr;
+      PFN_vkCreateDescriptorSetLayout   vkCreateDescriptorSetLayout   = nullptr;
+      PFN_vkDestroyDescriptorSetLayout  vkDestroyDescriptorSetLayout  = nullptr;
+      PFN_vkCreateDescriptorPool        vkCreateDescriptorPool        = nullptr;
+      PFN_vkDestroyDescriptorPool       vkDestroyDescriptorPool       = nullptr;
+      PFN_vkResetDescriptorPool         vkResetDescriptorPool         = nullptr;
+      PFN_vkAllocateDescriptorSets      vkAllocateDescriptorSets      = nullptr;
+      PFN_vkUpdateDescriptorSets        vkUpdateDescriptorSets        = nullptr;
+      PFN_vkCreateImageView        vkCreateImageView        = nullptr;
+      PFN_vkDestroyImageView       vkDestroyImageView       = nullptr;
+      PFN_vkCreateCommandPool      vkCreateCommandPool      = nullptr;
+      PFN_vkDestroyCommandPool     vkDestroyCommandPool     = nullptr;
+      PFN_vkAllocateCommandBuffers vkAllocateCommandBuffers = nullptr;
+      PFN_vkFreeCommandBuffers     vkFreeCommandBuffers     = nullptr;
+      PFN_vkBeginCommandBuffer     vkBeginCommandBuffer     = nullptr;
+      PFN_vkEndCommandBuffer       vkEndCommandBuffer       = nullptr;
+      PFN_vkCmdPipelineBarrier     vkCmdPipelineBarrier     = nullptr;
+      PFN_vkCmdBindPipeline        vkCmdBindPipeline        = nullptr;
+      PFN_vkCmdPushConstants       vkCmdPushConstants       = nullptr;
+      PFN_vkCmdDispatch            vkCmdDispatch            = nullptr;
+      PFN_vkQueueSubmit            vkQueueSubmit            = nullptr;
+      PFN_vkQueueWaitIdle          vkQueueWaitIdle          = nullptr;
+      PFN_vkCreateFence            vkCreateFence            = nullptr;
+      PFN_vkDestroyFence           vkDestroyFence           = nullptr;
+      PFN_vkWaitForFences          vkWaitForFences          = nullptr;
+      PFN_vkResetFences            vkResetFences            = nullptr;
+      // Intermediate target + blit
+      PFN_vkCreateImage               vkCreateImage               = nullptr;
+      PFN_vkDestroyImage              vkDestroyImage              = nullptr;
+      PFN_vkGetImageMemoryRequirements vkGetImageMemoryRequirements = nullptr;
+      PFN_vkAllocateMemory            vkAllocateMemory            = nullptr;
+      PFN_vkFreeMemory                vkFreeMemory                = nullptr;
+      PFN_vkBindImageMemory           vkBindImageMemory           = nullptr;
+      PFN_vkCmdBlitImage              vkCmdBlitImage              = nullptr;
+      // Physical-device-level (loaded separately)
+      PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties = nullptr;
+      bool                         loaded                   = false;
+    };
+
+    static FsrVulkanFuncs s_vk;
+
+    /** Load all needed Vulkan device functions via dlsym + vkGetDeviceProcAddr. */
+    static bool loadVulkanFuncs(VkDevice device) {
+      if (s_vk.loaded)
+        return s_vk.vkCreateShaderModule != nullptr;
+      void* lib = dlopen("libvulkan.so", RTLD_NOLOAD | RTLD_LOCAL);
+      if (!lib) lib = dlopen("libvulkan.so.1", RTLD_NOLOAD | RTLD_LOCAL);
+      // Fall back to RTLD_DEFAULT if libvulkan isn't accessible by path
+      s_vk.vkGetDeviceProcAddr =
+          lib ? (PFN_vkGetDeviceProcAddr)dlsym(lib, "vkGetDeviceProcAddr")
+              : (PFN_vkGetDeviceProcAddr)dlsym(RTLD_DEFAULT, "vkGetDeviceProcAddr");
+      if (!s_vk.vkGetDeviceProcAddr) {
+        Logger::warn("Vegas FSR: vkGetDeviceProcAddr not found");
+        s_vk.loaded = true;
+        return false;
+      }
+      if (!s_vk.vkGetDeviceProcAddr) {
+        Logger::warn("Vegas FSR: vkGetDeviceProcAddr not found");
+        s_vk.loaded = true;
+        return false;
+      }
+#     define VK_LOAD_DEV_FUNC(name) \
+        s_vk.name = (PFN_##name)s_vk.vkGetDeviceProcAddr(device, #name); \
+        if (!s_vk.name) { \
+          Logger::warn("Vegas FSR: " #name " not found"); \
+          s_vk.loaded = true; \
+          return false; \
+        }
+      VK_LOAD_DEV_FUNC(vkCreateShaderModule)
+      VK_LOAD_DEV_FUNC(vkDestroyShaderModule)
+      VK_LOAD_DEV_FUNC(vkCreatePipelineLayout)
+      VK_LOAD_DEV_FUNC(vkDestroyPipelineLayout)
+      VK_LOAD_DEV_FUNC(vkCreateComputePipelines)
+      VK_LOAD_DEV_FUNC(vkDestroyPipeline)
+      VK_LOAD_DEV_FUNC(vkCreateDescriptorSetLayout)
+      VK_LOAD_DEV_FUNC(vkDestroyDescriptorSetLayout)
+      VK_LOAD_DEV_FUNC(vkCreateDescriptorPool)
+      VK_LOAD_DEV_FUNC(vkDestroyDescriptorPool)
+      VK_LOAD_DEV_FUNC(vkResetDescriptorPool)
+      VK_LOAD_DEV_FUNC(vkAllocateDescriptorSets)
+      VK_LOAD_DEV_FUNC(vkUpdateDescriptorSets)
+      VK_LOAD_DEV_FUNC(vkCreateImageView)
+      VK_LOAD_DEV_FUNC(vkDestroyImageView)
+      VK_LOAD_DEV_FUNC(vkCreateCommandPool)
+      VK_LOAD_DEV_FUNC(vkDestroyCommandPool)
+      VK_LOAD_DEV_FUNC(vkAllocateCommandBuffers)
+      VK_LOAD_DEV_FUNC(vkFreeCommandBuffers)
+      VK_LOAD_DEV_FUNC(vkBeginCommandBuffer)
+      VK_LOAD_DEV_FUNC(vkEndCommandBuffer)
+      VK_LOAD_DEV_FUNC(vkCmdPipelineBarrier)
+      VK_LOAD_DEV_FUNC(vkCmdBindPipeline)
+      VK_LOAD_DEV_FUNC(vkCmdPushConstants)
+      VK_LOAD_DEV_FUNC(vkCmdDispatch)
+      VK_LOAD_DEV_FUNC(vkQueueSubmit)
+      VK_LOAD_DEV_FUNC(vkQueueWaitIdle)
+      VK_LOAD_DEV_FUNC(vkCreateFence)
+      VK_LOAD_DEV_FUNC(vkDestroyFence)
+      VK_LOAD_DEV_FUNC(vkWaitForFences)
+      VK_LOAD_DEV_FUNC(vkResetFences)
+      // Intermediate target + blit
+      VK_LOAD_DEV_FUNC(vkCreateImage)
+      VK_LOAD_DEV_FUNC(vkDestroyImage)
+      VK_LOAD_DEV_FUNC(vkGetImageMemoryRequirements)
+      VK_LOAD_DEV_FUNC(vkAllocateMemory)
+      VK_LOAD_DEV_FUNC(vkFreeMemory)
+      VK_LOAD_DEV_FUNC(vkBindImageMemory)
+      VK_LOAD_DEV_FUNC(vkCmdBlitImage)
+#     undef VK_LOAD_DEV_FUNC
+
+      // Load physical-device-level functions via dlsym (not vkGetDeviceProcAddr)
+      if (!s_vk.vkGetPhysicalDeviceMemoryProperties) {
+        s_vk.vkGetPhysicalDeviceMemoryProperties =
+            reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+                dlsym(RTLD_DEFAULT, "vkGetPhysicalDeviceMemoryProperties"));
+        if (!s_vk.vkGetPhysicalDeviceMemoryProperties && lib) {
+          s_vk.vkGetPhysicalDeviceMemoryProperties =
+              reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+                  dlsym(lib, "vkGetPhysicalDeviceMemoryProperties"));
+        }
+        if (!s_vk.vkGetPhysicalDeviceMemoryProperties) {
+          Logger::warn("Vegas FSR: vkGetPhysicalDeviceMemoryProperties not found");
+          s_vk.loaded = true;
+          return false;
+        }
+      }
+
+      s_vk.loaded = true;
+      return true;
+    }
+
+  } // anonymous namespace
+
+
+  /** Helper: init FSR pipeline & descriptor resources. Returns true on success. */
+  static bool initFsrPipeline(VkDevice device) {
+    if (s_fsrInitialized)
+      return reinterpret_cast<VkPipeline>(s_fsrPipeline) != VK_NULL_HANDLE;
+
+    VkResult vr;
+
+    // --- Shader module ---
+    VkShaderModuleCreateInfo smCI = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+    smCI.codeSize = sizeof(dxvk_fsr_easu_code);
+    smCI.pCode    = dxvk_fsr_easu_code;
+    VkShaderModule sm = VK_NULL_HANDLE;
+    vr = s_vk.vkCreateShaderModule(device, &smCI, nullptr, &sm);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkCreateShaderModule failed (", vr, ")"));
+      s_fsrInitialized = true;
+      return false;
+    }
+
+    // --- Descriptor set layout ---
+    // Binding 0: sampled image (uInput)
+    // Binding 1: storage image  (uOutput)
+    VkDescriptorSetLayoutBinding bindings[2] = {};
+    bindings[0].binding            = 0;
+    bindings[0].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    bindings[0].descriptorCount    = 1;
+    bindings[0].stageFlags         = VK_SHADER_STAGE_COMPUTE_BIT;
+    bindings[1].binding            = 1;
+    bindings[1].descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[1].descriptorCount    = 1;
+    bindings[1].stageFlags         = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo dslCI = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    dslCI.bindingCount = 2;
+    dslCI.pBindings    = bindings;
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    vr = s_vk.vkCreateDescriptorSetLayout(device, &dslCI, nullptr, &dsl);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkCreateDescriptorSetLayout failed (", vr, ")"));
+      s_vk.vkDestroyShaderModule(device, sm, nullptr);
+      s_fsrInitialized = true;
+      return false;
+    }
+
+    // --- Pipeline layout (push constants) ---
+    VkPushConstantRange pcRange = {};
+    pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcRange.offset     = 0;
+    pcRange.size       = sizeof(VegasFsrConstants); // 16 bytes (vec4)
+
+    VkPipelineLayoutCreateInfo plCI = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plCI.setLayoutCount         = 1;
+    plCI.pSetLayouts            = &dsl;
+    plCI.pushConstantRangeCount = 1;
+    plCI.pPushConstantRanges    = &pcRange;
+    VkPipelineLayout pl = VK_NULL_HANDLE;
+    vr = s_vk.vkCreatePipelineLayout(device, &plCI, nullptr, &pl);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkCreatePipelineLayout failed (", vr, ")"));
+      s_vk.vkDestroyDescriptorSetLayout(device, dsl, nullptr);
+      s_vk.vkDestroyShaderModule(device, sm, nullptr);
+      s_fsrInitialized = true;
+      return false;
+    }
+
+    // --- Compute pipeline ---
+    VkPipelineShaderStageCreateInfo ssCI = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+    ssCI.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+    ssCI.module = sm;
+    ssCI.pName  = "main";
+
+    VkComputePipelineCreateInfo cpCI = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+    cpCI.stage  = ssCI;
+    cpCI.layout = pl;
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    vr = s_vk.vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpCI, nullptr, &pipeline);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkCreateComputePipelines failed (", vr, ")"));
+      s_vk.vkDestroyPipelineLayout(device, pl, nullptr);
+      s_vk.vkDestroyDescriptorSetLayout(device, dsl, nullptr);
+      s_vk.vkDestroyShaderModule(device, sm, nullptr);
+      s_fsrInitialized = true;
+      return false;
+    }
+
+    // --- Shader module no longer needed after pipeline creation ---
+    s_vk.vkDestroyShaderModule(device, sm, nullptr);
+
+    // --- Descriptor pool (small, reusable) ---
+    VkDescriptorPoolSize poolSizes[2] = {};
+    poolSizes[0].type            = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    poolSizes[0].descriptorCount = 1;
+    poolSizes[1].type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    poolSizes[1].descriptorCount = 1;
+
+    VkDescriptorPoolCreateInfo dpCI = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    dpCI.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpCI.maxSets       = 1;
+    dpCI.poolSizeCount = 2;
+    dpCI.pPoolSizes    = poolSizes;
+    VkDescriptorPool dp = VK_NULL_HANDLE;
+    vr = s_vk.vkCreateDescriptorPool(device, &dpCI, nullptr, &dp);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkCreateDescriptorPool failed (", vr, ")"));
+      s_vk.vkDestroyPipeline(device, pipeline, nullptr);
+      s_vk.vkDestroyPipelineLayout(device, pl, nullptr);
+      s_vk.vkDestroyDescriptorSetLayout(device, dsl, nullptr);
+      s_fsrInitialized = true;
+      return false;
+    }
+
+    // --- Done ---
+    s_fsrPipeline       = reinterpret_cast<uint64_t>(pipeline);
+    s_fsrPipelineLayout = reinterpret_cast<uint64_t>(pl);
+    s_fsrDescSetLayout  = reinterpret_cast<uint64_t>(dsl);
+    s_fsrDescPool       = reinterpret_cast<uint64_t>(dp);
+    s_fsrInitialized    = true;
+
+    Logger::debug("Vegas FSR: compute pipeline created successfully");
+    return true;
+  }
+
+
+  /** Ensure FSR intermediate image exists at the given dimensions.
+   *  Creates a private VkImage with STORAGE_BIT + TRANSFER_SRC_BIT.
+   *  Destroys and recreates if dimensions changed (swapchain resize). */
+  static bool ensureFsrIntermediate(VkDevice device, VkExtent3D extent) {
+    if (s_fsrInterImage != 0 && s_fsrInterW == extent.width && s_fsrInterH == extent.height) {
+      return true;  // already exists at correct size
+    }
+
+    // Destroy old intermediate if any (size mismatch or first init)
+    if (s_fsrInterImage != 0) {
+      s_vk.vkDestroyImage(device, reinterpret_cast<VkImage>(s_fsrInterImage), nullptr);
+      s_fsrInterImage = 0;
+    }
+    if (s_fsrInterMemory != 0) {
+      s_vk.vkFreeMemory(device, reinterpret_cast<VkDeviceMemory>(s_fsrInterMemory), nullptr);
+      s_fsrInterMemory = 0;
+    }
+    s_fsrInterW = 0;
+    s_fsrInterH = 0;
+
+    VkImageCreateInfo imgCI = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    imgCI.imageType     = VK_IMAGE_TYPE_2D;
+    imgCI.format        = VK_FORMAT_R8G8B8A8_UNORM;
+    imgCI.extent.width  = extent.width;
+    imgCI.extent.height = extent.height;
+    imgCI.extent.depth  = 1;
+    imgCI.mipLevels     = 1;
+    imgCI.arrayLayers   = 1;
+    imgCI.samples       = VK_SAMPLE_COUNT_1_BIT;
+    imgCI.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    imgCI.usage         = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    imgCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkImage interImage = VK_NULL_HANDLE;
+    VkResult vr = s_vk.vkCreateImage(device, &imgCI, nullptr, &interImage);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkCreateImage(intermediate) failed (", vr, ")"));
+      return false;
+    }
+
+    VkMemoryRequirements memReqs;
+    s_vk.vkGetImageMemoryRequirements(device, interImage, &memReqs);
+
+    VkPhysicalDevice physDev = reinterpret_cast<VkPhysicalDevice>(s_physicalDevice);
+    VkPhysicalDeviceMemoryProperties physMemProps;
+    s_vk.vkGetPhysicalDeviceMemoryProperties(physDev, &physMemProps);
+
+    uint32_t memTypeIdx = UINT32_MAX;
+    for (uint32_t i = 0; i < physMemProps.memoryTypeCount; ++i) {
+      if ((memReqs.memoryTypeBits & (1u << i)) &&
+          (physMemProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+        memTypeIdx = i;
+        break;
+      }
+    }
+    if (memTypeIdx == UINT32_MAX) {
+      // Fallback: any compatible type (may be HOST_VISIBLE on integrated GPUs)
+      for (uint32_t i = 0; i < physMemProps.memoryTypeCount; ++i) {
+        if (memReqs.memoryTypeBits & (1u << i)) {
+          memTypeIdx = i;
+          break;
+        }
+      }
+    }
+    if (memTypeIdx == UINT32_MAX) {
+      Logger::warn("Vegas FSR: no compatible memory type for intermediate image");
+      s_vk.vkDestroyImage(device, interImage, nullptr);
+      return false;
+    }
+
+    VkMemoryAllocateInfo allocCI = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    allocCI.allocationSize  = memReqs.size;
+    allocCI.memoryTypeIndex = memTypeIdx;
+
+    VkDeviceMemory interMem = VK_NULL_HANDLE;
+    vr = s_vk.vkAllocateMemory(device, &allocCI, nullptr, &interMem);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkAllocateMemory(intermediate) failed (", vr, ")"));
+      s_vk.vkDestroyImage(device, interImage, nullptr);
+      return false;
+    }
+
+    vr = s_vk.vkBindImageMemory(device, interImage, interMem, 0);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkBindImageMemory(intermediate) failed (", vr, ")"));
+      s_vk.vkFreeMemory(device, interMem, nullptr);
+      s_vk.vkDestroyImage(device, interImage, nullptr);
+      return false;
+    }
+
+    s_fsrInterImage  = reinterpret_cast<uint64_t>(interImage);
+    s_fsrInterMemory = reinterpret_cast<uint64_t>(interMem);
+    s_fsrInterW      = extent.width;
+    s_fsrInterH      = extent.height;
+
+    Logger::debug(str::format("Vegas FSR: intermediate image created (",
+                              extent.width, "x", extent.height, ")"));
+    return true;
+  }
+
+
+  bool Vegas::fsrUpscale(
+          VkImage              srcImage,
+          VkImage              dstImage,
+          VkExtent3D           srcExtent,
+          VkExtent3D           dstExtent,
+          VkFormat             swapchainFormat,
+          VegasFsrConstants&   fsrConsts) {
+    // ================================================================
+    // Format guard — FSR only on UNORM swapchain formats
+    // ================================================================
+    if (swapchainFormat != VK_FORMAT_B8G8R8A8_UNORM &&
+        swapchainFormat != VK_FORMAT_R8G8B8A8_UNORM) {
+      Logger::debug(str::format(
+          "Vegas FSR: skipped — unsupported swapchain format 0x",
+          std::hex, static_cast<uint32_t>(swapchainFormat)));
+      return false;
+    }
+
+    // ================================================================
+    // Get device & queue handles
+    // ================================================================
+    VkDevice device = reinterpret_cast<VkDevice>(s_device);
+    VkQueue  queue  = reinterpret_cast<VkQueue>(s_vkQueue);
+    if (device == VK_NULL_HANDLE || queue == VK_NULL_HANDLE) {
+      Logger::debug("Vegas FSR: skipped — no VkDevice/VkQueue");
+      return false;
+    }
+
+    // ================================================================
+    // Load Vulkan functions (lazy, one-time)
+    // ================================================================
+    if (!loadVulkanFuncs(device)) {
+      Logger::debug("Vegas FSR: skipped — Vulkan functions not available");
+      return false;
+    }
+
+    // ================================================================
+    // Init FSR pipeline (lazy, one-time)
+    // ================================================================
+    if (!initFsrPipeline(device)) {
+      Logger::debug("Vegas FSR: skipped — pipeline init failed");
+      return false;
+    }
+
+    // ================================================================
+    // Ensure intermediate image exists at dstExtent
+    // ================================================================
+    if (!ensureFsrIntermediate(device, dstExtent)) {
+      Logger::debug("Vegas FSR: skipped — intermediate image creation failed");
+      return false;
+    }
+
+    VkPipeline              pipeline        = reinterpret_cast<VkPipeline>(s_fsrPipeline);
+    VkPipelineLayout        pipelineLayout  = reinterpret_cast<VkPipelineLayout>(s_fsrPipelineLayout);
+    VkDescriptorSetLayout   descSetLayout   = reinterpret_cast<VkDescriptorSetLayout>(s_fsrDescSetLayout);
+    VkDescriptorPool        descPool        = reinterpret_cast<VkDescriptorPool>(s_fsrDescPool);
+    VkImage                 interImage      = reinterpret_cast<VkImage>(s_fsrInterImage);
+
+    VkResult vr;
+
+    // --- Create temporary command pool ---
+    VkCommandPoolCreateInfo poolCI = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    poolCI.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolCI.queueFamilyIndex = s_queueFamily;
+    VkCommandPool cmdPool = VK_NULL_HANDLE;
+    vr = s_vk.vkCreateCommandPool(device, &poolCI, nullptr, &cmdPool);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkCreateCommandPool failed (", vr, ")"));
+      return false;
+    }
+
+    // --- Allocate command buffer ---
+    VkCommandBufferAllocateInfo allocCI = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    allocCI.commandPool        = cmdPool;
+    allocCI.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocCI.commandBufferCount = 1;
+    VkCommandBuffer cmdBuf = VK_NULL_HANDLE;
+    vr = s_vk.vkAllocateCommandBuffers(device, &allocCI, &cmdBuf);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkAllocateCommandBuffers failed (", vr, ")"));
+      s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+      return false;
+    }
+
+    // --- Create fence ---
+    VkFenceCreateInfo fenceCI = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkFence fence = VK_NULL_HANDLE;
+    vr = s_vk.vkCreateFence(device, &fenceCI, nullptr, &fence);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkCreateFence failed (", vr, ")"));
+      s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+      s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+      return false;
+    }
+
+    // --- Create temporary image views ---
+    VkImageViewCreateInfo viewCI = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    viewCI.viewType     = VK_IMAGE_VIEW_TYPE_2D;
+    viewCI.format       = swapchainFormat;  // src matches swapchain format
+    viewCI.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewCI.subresourceRange.baseMipLevel   = 0;
+    viewCI.subresourceRange.levelCount     = 1;
+    viewCI.subresourceRange.baseArrayLayer = 0;
+    viewCI.subresourceRange.layerCount     = 1;
+
+    viewCI.image = srcImage;
+    VkImageView srcView = VK_NULL_HANDLE;
+    vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &srcView);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkCreateImageView(src) failed (", vr, ")"));
+      s_vk.vkDestroyFence(device, fence, nullptr);
+      s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+      s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+      return false;
+    }
+
+    // Intermediate view uses R8G8B8A8_UNORM (guaranteed storage support)
+    viewCI.image  = interImage;
+    viewCI.format = VK_FORMAT_R8G8B8A8_UNORM;
+    VkImageView interView = VK_NULL_HANDLE;
+    vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &interView);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkCreateImageView(intermediate) failed (", vr, ")"));
+      s_vk.vkDestroyImageView(device, srcView, nullptr);
+      s_vk.vkDestroyFence(device, fence, nullptr);
+      s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+      s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+      return false;
+    }
+
+    // --- Allocate + update descriptor set ---
+    s_vk.vkResetDescriptorPool(device, descPool, 0);
+
+    VkDescriptorSetAllocateInfo descAlloc = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    descAlloc.descriptorPool     = descPool;
+    descAlloc.descriptorSetCount = 1;
+    descAlloc.pSetLayouts        = &descSetLayout;
+    VkDescriptorSet descSet = VK_NULL_HANDLE;
+    vr = s_vk.vkAllocateDescriptorSets(device, &descAlloc, &descSet);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkAllocateDescriptorSets failed (", vr, ")"));
+      s_vk.vkDestroyImageView(device, interView, nullptr);
+      s_vk.vkDestroyImageView(device, srcView, nullptr);
+      s_vk.vkDestroyFence(device, fence, nullptr);
+      s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+      s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+      return false;
+    }
+
+    VkDescriptorImageInfo srcImgInfo = {};
+    srcImgInfo.sampler     = VK_NULL_HANDLE;
+    srcImgInfo.imageView   = srcView;
+    srcImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo interImgInfo = {};
+    interImgInfo.sampler     = VK_NULL_HANDLE;
+    interImgInfo.imageView   = interView;
+    interImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkWriteDescriptorSet writes[2] = {};
+    writes[0].sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet           = descSet;
+    writes[0].dstBinding       = 0;
+    writes[0].descriptorCount  = 1;
+    writes[0].descriptorType   = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[0].pImageInfo       = &srcImgInfo;
+
+    writes[1].sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet           = descSet;
+    writes[1].dstBinding       = 1;
+    writes[1].descriptorCount  = 1;
+    writes[1].descriptorType   = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[1].pImageInfo       = &interImgInfo;
+
+    s_vk.vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+
+    // ================================================================
+    // Record command buffer — intermediate target + blit
+    // ================================================================
+    VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vr = s_vk.vkBeginCommandBuffer(cmdBuf, &beginInfo);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkBeginCommandBuffer failed (", vr, ")"));
+      s_vk.vkDestroyImageView(device, interView, nullptr);
+      s_vk.vkDestroyImageView(device, srcView, nullptr);
+      s_vk.vkDestroyFence(device, fence, nullptr);
+      s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+      s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+      return false;
+    }
+
+    // ----------------------------------------------------------------
+    // Pre-dispatch barriers (split into two calls because srcImage
+    // needs COLOR_ATTACHMENT_OUTPUT write visibility; inter + dst
+    // have no producer to synchronize with).
+    // ----------------------------------------------------------------
+    // Barrier 1a: src PRESENT_SRC_KHR -> GENERAL (for shader read)
+    //   srcStage/access must cover the COLOR_ATTACHMENT_OUTPUT writes
+    //   from the previous render pass that produced srcImage content.
+    VkImageMemoryBarrier srcBarrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    srcBarrier.srcAccessMask    = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    srcBarrier.dstAccessMask    = VK_ACCESS_SHADER_READ_BIT;
+    srcBarrier.oldLayout        = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    srcBarrier.newLayout        = VK_IMAGE_LAYOUT_GENERAL;
+    srcBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    srcBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    srcBarrier.image            = srcImage;
+    srcBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    s_vk.vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &srcBarrier);
+
+    // Barrier 1b: intermediate UNDEFINED -> GENERAL (for shader write)
+    VkImageMemoryBarrier interBarrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    interBarrier.srcAccessMask    = 0;
+    interBarrier.dstAccessMask    = VK_ACCESS_SHADER_WRITE_BIT;
+    interBarrier.oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED;
+    interBarrier.newLayout        = VK_IMAGE_LAYOUT_GENERAL;
+    interBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    interBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    interBarrier.image            = interImage;
+    interBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    // Barrier 1c: dst PRESENT_SRC_KHR -> TRANSFER_DST_OPTIMAL (for blit)
+    VkImageMemoryBarrier dstBarrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    dstBarrier.srcAccessMask    = 0;
+    dstBarrier.dstAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
+    dstBarrier.oldLayout        = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    dstBarrier.newLayout        = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    dstBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    dstBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    dstBarrier.image            = dstImage;
+    dstBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    VkImageMemoryBarrier preBarriers[2] = { interBarrier, dstBarrier };
+    s_vk.vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 2, preBarriers);
+
+    // --- FSR compute dispatch: src -> intermediate ---
+    s_vk.vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    s_vk.vkCmdBindDescriptorSets(cmdBuf,
+        VK_PIPELINE_BIND_POINT_COMPUTE,
+        pipelineLayout, 0, 1, &descSet, 0, nullptr);
+    s_vk.vkCmdPushConstants(cmdBuf, pipelineLayout,
+        VK_SHADER_STAGE_COMPUTE_BIT, 0,
+        sizeof(VegasFsrConstants), &fsrConsts);
+
+    uint32_t gx = (dstExtent.width  + 15) / 16;
+    uint32_t gy = (dstExtent.height + 15) / 16;
+    s_vk.vkCmdDispatch(cmdBuf, gx, gy, 1);
+
+    // Barrier 4: intermediate GENERAL -> TRANSFER_SRC_OPTIMAL (for blit read)
+    VkImageMemoryBarrier interToBlit = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    interToBlit.srcAccessMask    = VK_ACCESS_SHADER_WRITE_BIT;
+    interToBlit.dstAccessMask    = VK_ACCESS_TRANSFER_READ_BIT;
+    interToBlit.oldLayout        = VK_IMAGE_LAYOUT_GENERAL;
+    interToBlit.newLayout        = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    interToBlit.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    interToBlit.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    interToBlit.image            = interImage;
+    interToBlit.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    s_vk.vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &interToBlit);
+
+    // --- Blit intermediate -> dst (nearest filter, 1:1 scale) ---
+    VkImageBlit blitRegion = {};
+    blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blitRegion.srcSubresource.layerCount = 1;
+    blitRegion.srcOffsets[0] = { 0, 0, 0 };
+    blitRegion.srcOffsets[1] = { static_cast<int32_t>(dstExtent.width),
+                                 static_cast<int32_t>(dstExtent.height), 1 };
+    blitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blitRegion.dstSubresource.layerCount = 1;
+    blitRegion.dstOffsets[0] = { 0, 0, 0 };
+    blitRegion.dstOffsets[1] = { static_cast<int32_t>(dstExtent.width),
+                                 static_cast<int32_t>(dstExtent.height), 1 };
+
+    s_vk.vkCmdBlitImage(cmdBuf,
+        interImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        dstImage,   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1, &blitRegion, VK_FILTER_NEAREST);
+
+    // Barrier 5a: src GENERAL -> PRESENT_SRC_KHR (restore for future acquire)
+    VkImageMemoryBarrier srcBack = {};
+    srcBack.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    srcBack.srcAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+    srcBack.dstAccessMask       = 0;  // no producer — just layout restore
+    srcBack.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    srcBack.newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    srcBack.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    srcBack.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    srcBack.image               = srcImage;
+    srcBack.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    // Barrier 5b: dst TRANSFER_DST_OPTIMAL -> PRESENT_SRC_KHR (for present)
+    VkImageMemoryBarrier dstBack = {};
+    dstBack.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    dstBack.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+    dstBack.dstAccessMask       = 0;  // presentation reads via queue
+    dstBack.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    dstBack.newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    dstBack.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    dstBack.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    dstBack.image               = dstImage;
+    dstBack.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    // Use ALL_COMMANDS_BIT as srcStage to cover both the compute
+    // shader read (srcImage → GENERAL→PRESENT) and the blit write
+    // (dstImage → TRANSFER_DST→PRESENT) without splitting the call.
+    VkImageMemoryBarrier postBarriers[2] = { srcBack, dstBack };
+    s_vk.vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        0, 0, nullptr, 0, nullptr, 2, postBarriers);
+
+    vr = s_vk.vkEndCommandBuffer(cmdBuf);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkEndCommandBuffer failed (", vr, ")"));
+      s_vk.vkDestroyImageView(device, interView, nullptr);
+      s_vk.vkDestroyImageView(device, srcView, nullptr);
+      s_vk.vkDestroyFence(device, fence, nullptr);
+      s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+      s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+      return false;
+    }
+
+    // ================================================================
+    // Submit with fence
+    // ================================================================
+    VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers    = &cmdBuf;
+
+    vr = s_vk.vkQueueSubmit(queue, 1, &submitInfo, fence);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkQueueSubmit failed (", vr, ")"));
+      s_vk.vkDestroyImageView(device, interView, nullptr);
+      s_vk.vkDestroyImageView(device, srcView, nullptr);
+      s_vk.vkDestroyFence(device, fence, nullptr);
+      s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+      s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+      return false;
+    }
+
+    vr = s_vk.vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkWaitForFences failed (", vr, ")"));
+    }
+
+    // Cleanup temporary resources
+    s_vk.vkDestroyImageView(device, interView, nullptr);
+    s_vk.vkDestroyImageView(device, srcView, nullptr);
+    s_vk.vkDestroyFence(device, fence, nullptr);
+    s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+    s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+
+    Logger::debug(str::format("Vegas FSR: upscaled ", srcExtent.width, "x", srcExtent.height,
+        " -> ", dstExtent.width, "x", dstExtent.height));
+    return true;
   }
 
 } // namespace dxvk
