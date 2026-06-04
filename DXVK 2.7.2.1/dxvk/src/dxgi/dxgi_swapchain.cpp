@@ -438,6 +438,39 @@ namespace dxvk {
         }
       }
     }
+
+    // --- VEGAS: FRAMEGEN DISPATCH (Tier 2-3, after FSR) ---
+    // Uses the swapchain presentation image (index 1 if FSR ran, else index 0).
+    if (m_needsFrameGen && m_presenter != nullptr && m_presentId > 0) {
+      Com<IDXGIDXVKDevice> dxvkDevice;
+      if (SUCCEEDED(m_presenter->GetDevice(__uuidof(IDXGIDXVKDevice),
+              reinterpret_cast<void**>(&dxvkDevice)))) {
+        // Prefer image 1 (FSR output destination) when available.
+        // image 0 is the render target which may be lower resolution.
+        const uint32_t fgImgIdx = 1;
+        Com<IDXGIVkInteropSurface> fgSurface;
+        m_presenter->GetImage(fgImgIdx, __uuidof(IDXGIVkInteropSurface),
+            reinterpret_cast<void**>(&fgSurface));
+        if (fgSurface == nullptr) {
+          // Fallback to image 0 if image 1 doesn't exist (single-buffered).
+          m_presenter->GetImage(0, __uuidof(IDXGIVkInteropSurface),
+              reinterpret_cast<void**>(&fgSurface));
+        }
+        if (fgSurface != nullptr) {
+          VkImage curHandle;
+          VkImageCreateInfo curInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+          fgSurface->GetVulkanImageInfo(&curHandle, nullptr, &curInfo);
+          Logger::debug(str::format(
+              "Vegas FG: attempting dispatch ",
+              curInfo.extent.width, "x", curInfo.extent.height));
+          bool dispatched = Vegas::framegenDispatch(
+              curHandle, VK_NULL_HANDLE,
+              curInfo.extent, curInfo.format);
+          Logger::debug(str::format(
+              "Vegas FG: ", dispatched ? "OK (interpolated)" : "first frame / skipped"));
+        }
+      }
+    }
     // --- END VEGAS ---
 
     std::lock_guard<dxvk::recursive_mutex> lockWin(m_lockWindow);

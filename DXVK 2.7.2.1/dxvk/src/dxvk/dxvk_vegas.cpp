@@ -4,6 +4,7 @@
 #include "../util/config/config.h"
 
 #include "star_fsr_spv.h"
+#include "star_fg_spv.h"
 
 #include <dlfcn.h>
 
@@ -48,6 +49,27 @@ namespace dxvk {
   uint64_t Vegas::s_fsrInterMemory   = 0;
   uint32_t Vegas::s_fsrInterW        = 0;
   uint32_t Vegas::s_fsrInterH        = 0;
+
+  // Framegen resources
+  uint64_t Vegas::s_fgPipeline[3]     = {0, 0, 0};
+  uint64_t Vegas::s_fgPipelineLayout  = 0;
+  uint64_t Vegas::s_fgDescSetLayout   = 0;
+  uint64_t Vegas::s_fgDescPool        = 0;
+  bool     Vegas::s_fgInitialized     = false;
+
+  // Framegen intermediate images
+  uint64_t Vegas::s_fgPrevImage       = 0;
+  uint64_t Vegas::s_fgPrevMemory      = 0;
+  uint32_t Vegas::s_fgPrevW           = 0;
+  uint32_t Vegas::s_fgPrevH           = 0;
+  uint64_t Vegas::s_fgMotionImage     = 0;
+  uint64_t Vegas::s_fgMotionMemory    = 0;
+  uint64_t Vegas::s_fgMotionFiltered  = 0;
+  uint64_t Vegas::s_fgMotionFMemory   = 0;
+  uint64_t Vegas::s_fgOutputImage     = 0;
+  uint64_t Vegas::s_fgOutputMemory    = 0;
+  uint32_t Vegas::s_fgMotionW         = 0;
+  uint32_t Vegas::s_fgMotionH         = 0;
 
 
 
@@ -280,11 +302,13 @@ namespace dxvk {
        }
   }
 
-  // VEGAS: Enhanced LSFG with tiered frame time thresholds
+  // VEGAS: Framegen should activate when there IS headroom (low frame times),
+  // not when the GPU is saturated. Inverted from the original logic.
+  // Tier 1 (Adreno 610) excluded — compute budget insufficient for 3-pass.
   bool Vegas::needsFrameGen(float frameTime, uint32_t tier) {
       if (tier == 1) return false;
-      if (tier == 2) return frameTime > 29.0f;
-      return frameTime > 33.0f;
+      if (tier == 2) return frameTime <= 29.0f;  // ≥34 FPS headroom
+      return frameTime <= 33.0f;                   // ≥30 FPS headroom
   }
 
   void Vegas::calculateFsrConstants(VegasFsrConstants& c, VkExtent3D src, VkExtent3D dst) {
@@ -964,8 +988,10 @@ namespace dxvk {
       PFN_vkEndCommandBuffer       vkEndCommandBuffer       = nullptr;
       PFN_vkCmdPipelineBarrier     vkCmdPipelineBarrier     = nullptr;
       PFN_vkCmdBindPipeline        vkCmdBindPipeline        = nullptr;
+      PFN_vkCmdBindDescriptorSets  vkCmdBindDescriptorSets  = nullptr;
       PFN_vkCmdPushConstants       vkCmdPushConstants       = nullptr;
       PFN_vkCmdDispatch            vkCmdDispatch            = nullptr;
+      PFN_vkCmdCopyImage           vkCmdCopyImage           = nullptr;
       PFN_vkQueueSubmit            vkQueueSubmit            = nullptr;
       PFN_vkQueueWaitIdle          vkQueueWaitIdle          = nullptr;
       PFN_vkCreateFence            vkCreateFence            = nullptr;
@@ -1037,8 +1063,10 @@ namespace dxvk {
       VK_LOAD_DEV_FUNC(vkEndCommandBuffer)
       VK_LOAD_DEV_FUNC(vkCmdPipelineBarrier)
       VK_LOAD_DEV_FUNC(vkCmdBindPipeline)
+      VK_LOAD_DEV_FUNC(vkCmdBindDescriptorSets)
       VK_LOAD_DEV_FUNC(vkCmdPushConstants)
       VK_LOAD_DEV_FUNC(vkCmdDispatch)
+      VK_LOAD_DEV_FUNC(vkCmdCopyImage)
       VK_LOAD_DEV_FUNC(vkQueueSubmit)
       VK_LOAD_DEV_FUNC(vkQueueWaitIdle)
       VK_LOAD_DEV_FUNC(vkCreateFence)
@@ -1671,6 +1699,1127 @@ namespace dxvk {
     Logger::debug(str::format("Vegas FSR: upscaled ", srcExtent.width, "x", srcExtent.height,
         " -> ", dstExtent.width, "x", dstExtent.height));
     return true;
+  }
+
+  // ================================================================
+  // ====  Frame Generation (3-pass motion-compensated)  =============
+  // ================================================================
+  //
+  // Binding convention (set=0, shared by all 3 shaders):
+  //   0: texture2D uCurrent   (sampled image — current frame)
+  //   1: texture2D uPrevious  (sampled image — previous frame)
+  //   2: storage image         (motion write / median read)
+  //   3: storage image         (median write / warp output)
+  //
+  // Pass 1 (FG_MOTION):  current, previous  → raw motion (R32G32_SFLOAT)
+  // Pass 2 (FG_MEDIAN):  raw motion         → filtered motion
+  // Pass 3 (FG_WARP):    current, previous, filtered motion → interpolated frame
+  //
+  // Push constants: float4(motionScale, blendMin, blendMax, blendStrength)
+  // - motionScale : 1.0 / 16.0  (tile size normalization)
+  // - blendMin    : minimum blend weight for edge stability
+  // - blendMax    : maximum blend weight for motion-adaptive blending
+  // - blendStrength: overall interpolation intensity
+  //
+  // ================================================================
+
+  enum : uint32_t {
+    FG_PASS_MOTION  = 0,
+    FG_PASS_MEDIAN  = 1,
+    FG_PASS_WARP    = 2,
+
+    FG_BIND_CURRENT     = 0,  // sampled
+    FG_BIND_PREVIOUS    = 1,  // sampled
+    FG_BIND_MOTION      = 2,  // storage (raw / filtered input)
+    FG_BIND_OUTPUT      = 3,  // storage (median output / warp output)
+
+    FG_DESC_POOL_SIZE  = 3,   // one descriptor set per pass
+    FG_TILE_SIZE       = 16,  // motion search tile
+    FG_MEDIAN_TILE     = 8,   // median filter tile
+    FG_WARP_TILE       = 8,   // warp tile
+  };
+
+  /** Helper: init framegen 3-pass pipeline. Call once. */
+  static bool initFgPipeline(VkDevice device) {
+    if (s_fgInitialized)
+      return s_fgPipeline[0] != VK_NULL_HANDLE;
+
+    VkResult vr;
+
+    // ---- Shader modules ----
+    const struct { const uint32_t* code; size_t size; } shaders[3] = {
+      { dxvk_fg_motion_code,  sizeof(dxvk_fg_motion_code)  },
+      { dxvk_fg_median_code,  sizeof(dxvk_fg_median_code)  },
+      { dxvk_fg_warp_code,    sizeof(dxvk_fg_warp_code)    },
+    };
+
+    VkShaderModule modules[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    for (uint32_t i = 0; i < 3; i++) {
+      VkShaderModuleCreateInfo smCI = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+      smCI.codeSize = shaders[i].size;
+      smCI.pCode    = shaders[i].code;
+      vr = s_vk.vkCreateShaderModule(device, &smCI, nullptr, &modules[i]);
+      if (vr != VK_SUCCESS) {
+        Logger::warn(str::format("Vegas FG: vkCreateShaderModule(pass ", i, ") failed (", vr, ")"));
+        for (uint32_t j = 0; j < i; j++)
+          s_vk.vkDestroyShaderModule(device, modules[j], nullptr);
+        s_fgInitialized = true;
+        return false;
+      }
+    }
+
+    // ---- Descriptor set layout (4 bindings, shared) ----
+    VkDescriptorSetLayoutBinding bindings[4] = {};
+    // Binding 0: uCurrent (sampled)
+    bindings[0].binding            = FG_BIND_CURRENT;
+    bindings[0].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    bindings[0].descriptorCount    = 1;
+    bindings[0].stageFlags         = VK_SHADER_STAGE_COMPUTE_BIT;
+    // Binding 1: uPrevious (sampled)
+    bindings[1].binding            = FG_BIND_PREVIOUS;
+    bindings[1].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    bindings[1].descriptorCount    = 1;
+    bindings[1].stageFlags         = VK_SHADER_STAGE_COMPUTE_BIT;
+    // Binding 2: motion/median (storage)
+    bindings[2].binding            = FG_BIND_MOTION;
+    bindings[2].descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[2].descriptorCount    = 1;
+    bindings[2].stageFlags         = VK_SHADER_STAGE_COMPUTE_BIT;
+    // Binding 3: median output / warp output (storage)
+    bindings[3].binding            = FG_BIND_OUTPUT;
+    bindings[3].descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[3].descriptorCount    = 1;
+    bindings[3].stageFlags         = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo dslCI = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    dslCI.bindingCount = 4;
+    dslCI.pBindings    = bindings;
+
+    VkDescriptorSetLayout dsLayout = VK_NULL_HANDLE;
+    vr = s_vk.vkCreateDescriptorSetLayout(device, &dslCI, nullptr, &dsLayout);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkCreateDescriptorSetLayout failed (", vr, ")"));
+      for (uint32_t i = 0; i < 3; i++)
+        s_vk.vkDestroyShaderModule(device, modules[i], nullptr);
+      s_fgInitialized = true;
+      return false;
+    }
+
+    // ---- Pipeline layout (push constants + DS) ----
+    VkPushConstantRange pcRange = {};
+    pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcRange.offset     = 0;
+    pcRange.size       = sizeof(float) * 4;  // vec4
+
+    VkPipelineLayoutCreateInfo plCI = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plCI.setLayoutCount         = 1;
+    plCI.pSetLayouts            = &dsLayout;
+    plCI.pushConstantRangeCount = 1;
+    plCI.pPushConstantRanges    = &pcRange;
+
+    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+    vr = s_vk.vkCreatePipelineLayout(device, &plCI, nullptr, &pipelineLayout);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkCreatePipelineLayout failed (", vr, ")"));
+      s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
+      for (uint32_t i = 0; i < 3; i++)
+        s_vk.vkDestroyShaderModule(device, modules[i], nullptr);
+      s_fgInitialized = true;
+      return false;
+    }
+
+    // ---- Compute pipelines ----
+    VkComputePipelineCreateInfo cpCI[3] = {};
+    for (uint32_t i = 0; i < 3; i++) {
+      cpCI[i].sType              = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+      cpCI[i].stage.sType        = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+      cpCI[i].stage.stage        = VK_SHADER_STAGE_COMPUTE_BIT;
+      cpCI[i].stage.module       = modules[i];
+      cpCI[i].stage.pName        = "main";
+      cpCI[i].layout             = pipelineLayout;
+    }
+
+    VkPipeline pipelines[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    vr = s_vk.vkCreateComputePipelines(device, VK_NULL_HANDLE, 3, cpCI, nullptr, pipelines);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkCreateComputePipelines failed (", vr, ")"));
+      s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+      s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
+      for (uint32_t i = 0; i < 3; i++)
+        s_vk.vkDestroyShaderModule(device, modules[i], nullptr);
+      s_fgInitialized = true;
+      return false;
+    }
+
+    // ---- Destroy shader modules (no longer needed) ----
+    for (uint32_t i = 0; i < 3; i++)
+      s_vk.vkDestroyShaderModule(device, modules[i], nullptr);
+
+    // ---- Descriptor pool ----
+    VkDescriptorPoolSize poolSizes[2] = {};
+    poolSizes[0].type            = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    poolSizes[0].descriptorCount = FG_DESC_POOL_SIZE * 2;  // each pass uses up to 2 sampled
+    poolSizes[1].type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    poolSizes[1].descriptorCount = FG_DESC_POOL_SIZE * 2;  // each pass uses up to 2 storage
+
+    VkDescriptorPoolCreateInfo dpCI = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    dpCI.maxSets       = FG_DESC_POOL_SIZE;
+    dpCI.poolSizeCount = 2;
+    dpCI.pPoolSizes    = poolSizes;
+
+    VkDescriptorPool descPool = VK_NULL_HANDLE;
+    vr = s_vk.vkCreateDescriptorPool(device, &dpCI, nullptr, &descPool);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkCreateDescriptorPool failed (", vr, ")"));
+      s_vk.vkDestroyPipeline(device, pipelines[0], nullptr);
+      s_vk.vkDestroyPipeline(device, pipelines[1], nullptr);
+      s_vk.vkDestroyPipeline(device, pipelines[2], nullptr);
+      s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+      s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
+      s_fgInitialized = true;
+      return false;
+    }
+
+    // ---- Store as boxed uint64_t ----
+    s_fgPipeline[0]     = reinterpret_cast<uint64_t>(pipelines[0]);
+    s_fgPipeline[1]     = reinterpret_cast<uint64_t>(pipelines[1]);
+    s_fgPipeline[2]     = reinterpret_cast<uint64_t>(pipelines[2]);
+    s_fgPipelineLayout  = reinterpret_cast<uint64_t>(pipelineLayout);
+    s_fgDescSetLayout   = reinterpret_cast<uint64_t>(dsLayout);
+    s_fgDescPool        = reinterpret_cast<uint64_t>(descPool);
+
+    s_fgInitialized = true;
+
+    Logger::debug("Vegas FG: 3-pass pipeline initialized");
+    return true;
+  }
+
+  /** Helper: ensure framegen intermediate images exist at given resolution.
+   *  Creates s_fgPrevImage, s_fgMotionImage, s_fgMotionFiltered, s_fgOutputImage
+   *  if dimensions changed or images do not exist.
+   */
+  static bool ensureFgIntermediateImages(VkDevice device, uint32_t w, uint32_t h) {
+    VkResult vr;
+
+    // Motion buffer dimensions: one vector per 16×16 tile
+    uint32_t mw = (w + FG_TILE_SIZE - 1) / FG_TILE_SIZE;
+    uint32_t mh = (h + FG_TILE_SIZE - 1) / FG_TILE_SIZE;
+
+    // If dimensions match and images exist, nothing to do
+    if (s_fgPrevImage && s_fgMotionImage && s_fgMotionFiltered && s_fgOutputImage
+        && s_fgPrevW == w && s_fgPrevH == h && s_fgMotionW == mw && s_fgMotionH == mh)
+      return true;
+
+    // ---- Destroy old images if any ----
+    auto destroyImage = [&](uint64_t& img, uint64_t& mem) {
+      if (img) {
+        s_vk.vkDestroyImage(device, reinterpret_cast<VkImage>(img), nullptr);
+        img = 0;
+      }
+      if (mem) {
+        s_vk.vkFreeMemory(device, reinterpret_cast<VkDeviceMemory>(mem), nullptr);
+        mem = 0;
+      }
+    };
+
+    destroyImage(s_fgPrevImage,       s_fgPrevMemory);
+    destroyImage(s_fgMotionImage,     s_fgMotionMemory);
+    destroyImage(s_fgMotionFiltered,  s_fgMotionFMemory);
+    destroyImage(s_fgOutputImage,     s_fgOutputMemory);
+
+    s_fgPrevW = 0;
+    s_fgPrevH = 0;
+    s_fgMotionW = 0;
+    s_fgMotionH = 0;
+
+    // Helper to create a storage/transfer image
+    auto createImage = [&](uint32_t imgW, uint32_t imgH,
+                           VkFormat fmt, VkImageUsageFlags usage,
+                           uint64_t& outImg, uint64_t& outMem) -> bool {
+      VkImageCreateInfo imgCI = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+      imgCI.imageType     = VK_IMAGE_TYPE_2D;
+      imgCI.extent.width  = imgW;
+      imgCI.extent.height = imgH;
+      imgCI.extent.depth  = 1;
+      imgCI.mipLevels     = 1;
+      imgCI.arrayLayers   = 1;
+      imgCI.format        = fmt;
+      imgCI.tiling        = VK_IMAGE_TILING_OPTIMAL;
+      imgCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      imgCI.usage         = usage;
+      imgCI.samples       = VK_SAMPLE_COUNT_1_BIT;
+
+      VkImage img = VK_NULL_HANDLE;
+      vr = s_vk.vkCreateImage(device, &imgCI, nullptr, &img);
+      if (vr != VK_SUCCESS) {
+        Logger::warn(str::format("Vegas FG: vkCreateImage (", imgW, "x", imgH, ") failed (", vr, ")"));
+        return false;
+      }
+
+      VkMemoryRequirements memReq;
+      s_vk.vkGetImageMemoryRequirements(device, img, &memReq);
+
+      VkPhysicalDeviceMemoryProperties memProps;
+      s_vk.vkGetPhysicalDeviceMemoryProperties(
+          reinterpret_cast<VkPhysicalDevice>(s_physicalDevice), &memProps);
+
+      uint32_t memType = VK_MAX_MEMORY_TYPES;
+      for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+        if ((memReq.memoryTypeBits & (1u << i)) &&
+            (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+          memType = i;
+          break;
+        }
+      }
+      if (memType == VK_MAX_MEMORY_TYPES) {
+        Logger::warn("Vegas FG: no suitable memory type for intermediate image");
+        s_vk.vkDestroyImage(device, img, nullptr);
+        return false;
+      }
+
+      VkMemoryAllocateInfo allocAI = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+      allocAI.allocationSize  = memReq.size;
+      allocAI.memoryTypeIndex = memType;
+
+      VkDeviceMemory mem = VK_NULL_HANDLE;
+      vr = s_vk.vkAllocateMemory(device, &allocAI, nullptr, &mem);
+      if (vr != VK_SUCCESS) {
+        Logger::warn(str::format("Vegas FG: vkAllocateMemory failed (", vr, ")"));
+        s_vk.vkDestroyImage(device, img, nullptr);
+        return false;
+      }
+
+      vr = s_vk.vkBindImageMemory(device, img, mem, 0);
+      if (vr != VK_SUCCESS) {
+        Logger::warn(str::format("Vegas FG: vkBindImageMemory failed (", vr, ")"));
+        s_vk.vkFreeMemory(device, mem, nullptr);
+        s_vk.vkDestroyImage(device, img, nullptr);
+        return false;
+      }
+
+      outImg = reinterpret_cast<uint64_t>(img);
+      outMem = reinterpret_cast<uint64_t>(mem);
+      return true;
+    };
+
+    // ---- Create images ----
+    // s_fgPrevImage: previous frame (UNORM, same as swapchain)
+    if (!createImage(w, h, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+        s_fgPrevImage, s_fgPrevMemory)) {
+      return false;
+    }
+
+    // s_fgMotionImage: raw motion vectors (R32G32_SFLOAT, storage)
+    if (!createImage(mw, mh, VK_FORMAT_R32G32_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        s_fgMotionImage, s_fgMotionMemory)) {
+      return false;
+    }
+
+    // s_fgMotionFiltered: median-filtered motion (R32G32_SFLOAT, storage)
+    if (!createImage(mw, mh, VK_FORMAT_R32G32_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        s_fgMotionFiltered, s_fgMotionFMemory)) {
+      return false;
+    }
+
+    // s_fgOutputImage: interpolated frame output (UNORM)
+    if (!createImage(w, h, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        s_fgOutputImage, s_fgOutputMemory)) {
+      return false;
+    }
+
+    s_fgPrevW   = w;
+    s_fgPrevH   = h;
+    s_fgMotionW = mw;
+    s_fgMotionH = mh;
+
+    Logger::debug(str::format("Vegas FG: intermediate images created (",
+                              w, "x", h, ", motion ", mw, "x", mh, ")"));
+    return true;
+  }
+
+  /** Public getter for framegen output image (uint64_t → VkImage). */
+  uint64_t Vegas::framegenOutputImage() {
+    return s_fgOutputImage;
+  }
+
+  /** Dispatch 3-pass motion-compensated framegen.
+   *
+   *  \param [in] curImage  Current rendered frame (VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+   *  \param [in] prevImage Previous frame (caller-provided; may be VK_NULL_HANDLE)
+   *  \param [in] extent    Image dimensions
+   *  \param [in] format    Image format (must be R8G8B8A8_UNORM)
+   *  \returns true if dispatch succeeded and output is in s_fgOutputImage
+   *
+   *  On the first call (no previous frame), saves curImage internally and
+   *  returns false.  Subsequent calls produce the interpolated frame.
+   */
+  bool Vegas::framegenDispatch(
+          VkImage              curImage,
+          VkImage              prevImage,
+          VkExtent3D           extent,
+          VkFormat             format) {
+    // ================================================================
+    // Guard: only UNORM supported
+    // ================================================================
+    if (format != VK_FORMAT_R8G8B8A8_UNORM &&
+        format != VK_FORMAT_B8G8R8A8_UNORM) {
+      Logger::debug("Vegas FG: skipped — unsupported format");
+      return false;
+    }
+
+    // ================================================================
+    // Get device & queue
+    // ================================================================
+    VkDevice device = reinterpret_cast<VkDevice>(s_device);
+    VkQueue  queue  = reinterpret_cast<VkQueue>(s_vkQueue);
+    if (device == VK_NULL_HANDLE || queue == VK_NULL_HANDLE) {
+      Logger::debug("Vegas FG: skipped — no VkDevice/VkQueue");
+      return false;
+    }
+
+    if (!loadVulkanFuncs(device)) {
+      Logger::debug("Vegas FG: skipped — Vulkan functions not available");
+      return false;
+    }
+
+    if (!initFgPipeline(device)) {
+      Logger::debug("Vegas FG: skipped — pipeline init failed");
+      return false;
+    }
+
+    if (!ensureFgIntermediateImages(device, extent.width, extent.height)) {
+      Logger::debug("Vegas FG: skipped — intermediate image creation failed");
+      return false;
+    }
+
+    VkPipelineLayout    pipelineLayout  = reinterpret_cast<VkPipelineLayout>(s_fgPipelineLayout);
+    VkDescriptorSetLayout descSetLayout = reinterpret_cast<VkDescriptorSetLayout>(s_fgDescSetLayout);
+    VkDescriptorPool    descPool        = reinterpret_cast<VkDescriptorPool>(s_fgDescPool);
+
+    // ================================================================
+    // First frame? Just save current as previous, return false
+    // ================================================================
+    if (prevImage == VK_NULL_HANDLE && !s_fgPrevImage) {
+      // Copy curImage → s_fgPrevImage for next frame
+      // Use a simple command buffer for the copy
+      VkCommandPoolCreateInfo poolCI = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+      poolCI.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+      poolCI.queueFamilyIndex = s_queueFamily;
+      VkCommandPool cmdPool = VK_NULL_HANDLE;
+      VkResult vr = s_vk.vkCreateCommandPool(device, &poolCI, nullptr, &cmdPool);
+      if (vr != VK_SUCCESS) return false;
+
+      VkCommandBufferAllocateInfo allocCI = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+      allocCI.commandPool        = cmdPool;
+      allocCI.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+      allocCI.commandBufferCount = 1;
+      VkCommandBuffer cmdBuf = VK_NULL_HANDLE;
+      vr = s_vk.vkAllocateCommandBuffers(device, &allocCI, &cmdBuf);
+      if (vr != VK_SUCCESS) {
+        s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+        return false;
+      }
+
+      VkFenceCreateInfo fenceCI = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+      VkFence fence = VK_NULL_HANDLE;
+      vr = s_vk.vkCreateFence(device, &fenceCI, nullptr, &fence);
+      if (vr != VK_SUCCESS) {
+        s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+        s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+        return false;
+      }
+
+      VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+      beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+      s_vk.vkBeginCommandBuffer(cmdBuf, &beginInfo);
+
+      // Transition curImage PRESENT_SRC_KHR → TRANSFER_SRC_OPTIMAL
+      VkImageMemoryBarrier curToSrc = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+      curToSrc.srcAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+      curToSrc.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+      curToSrc.oldLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+      curToSrc.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+      curToSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      curToSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      curToSrc.image               = curImage;
+      curToSrc.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+      s_vk.vkCmdPipelineBarrier(cmdBuf,
+          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+          VK_PIPELINE_STAGE_TRANSFER_BIT,
+          0, 0, nullptr, 0, nullptr, 1, &curToSrc);
+
+      // Transition s_fgPrevImage UNDEFINED → TRANSFER_DST_OPTIMAL
+      VkImage prevDst = reinterpret_cast<VkImage>(s_fgPrevImage);
+      VkImageMemoryBarrier prevToDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+      prevToDst.srcAccessMask        = 0;
+      prevToDst.dstAccessMask        = VK_ACCESS_TRANSFER_WRITE_BIT;
+      prevToDst.oldLayout            = VK_IMAGE_LAYOUT_UNDEFINED;
+      prevToDst.newLayout            = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+      prevToDst.srcQueueFamilyIndex  = VK_QUEUE_FAMILY_IGNORED;
+      prevToDst.dstQueueFamilyIndex  = VK_QUEUE_FAMILY_IGNORED;
+      prevToDst.image                = prevDst;
+      prevToDst.subresourceRange     = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+      s_vk.vkCmdPipelineBarrier(cmdBuf,
+          VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+          VK_PIPELINE_STAGE_TRANSFER_BIT,
+          0, 0, nullptr, 0, nullptr, 1, &prevToDst);
+
+      // Copy curImage → prevImage
+      VkImageCopy copyRegion = {};
+      copyRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      copyRegion.srcSubresource.layerCount = 1;
+      copyRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      copyRegion.dstSubresource.layerCount = 1;
+      copyRegion.extent = extent;
+
+      s_vk.vkCmdCopyImage(cmdBuf,
+          curImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+          prevDst,  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+          1, &copyRegion);
+
+      // Restore curImage TRANSFER_SRC_OPTIMAL → PRESENT_SRC_KHR
+      VkImageMemoryBarrier curBack = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+      curBack.srcAccessMask        = VK_ACCESS_TRANSFER_READ_BIT;
+      curBack.dstAccessMask        = 0;
+      curBack.oldLayout            = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+      curBack.newLayout            = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+      curBack.srcQueueFamilyIndex  = VK_QUEUE_FAMILY_IGNORED;
+      curBack.dstQueueFamilyIndex  = VK_QUEUE_FAMILY_IGNORED;
+      curBack.image                = curImage;
+      curBack.subresourceRange     = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+      // Leave prev in GENERAL for shader read next frame
+      VkImageMemoryBarrier prevToGen = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+      prevToGen.srcAccessMask        = VK_ACCESS_TRANSFER_WRITE_BIT;
+      prevToGen.dstAccessMask        = VK_ACCESS_SHADER_READ_BIT;
+      prevToGen.oldLayout            = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+      prevToGen.newLayout            = VK_IMAGE_LAYOUT_GENERAL;
+      prevToGen.srcQueueFamilyIndex  = VK_QUEUE_FAMILY_IGNORED;
+      prevToGen.dstQueueFamilyIndex  = VK_QUEUE_FAMILY_IGNORED;
+      prevToGen.image                = prevDst;
+      prevToGen.subresourceRange     = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+      VkImageMemoryBarrier postBarriers[2] = { curBack, prevToGen };
+      s_vk.vkCmdPipelineBarrier(cmdBuf,
+          VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+          0, 0, nullptr, 0, nullptr, 2, postBarriers);
+
+      s_vk.vkEndCommandBuffer(cmdBuf);
+
+      VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+      submitInfo.commandBufferCount = 1;
+      submitInfo.pCommandBuffers    = &cmdBuf;
+      s_vk.vkQueueSubmit(queue, 1, &submitInfo, fence);
+      s_vk.vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+
+      s_vk.vkDestroyFence(device, fence, nullptr);
+      s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+      s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+
+      Logger::debug("Vegas FG: first frame captured as previous");
+      return false;
+    }
+
+    // ================================================================
+    // Use s_fgPrevImage as the actual previous frame if prevImage is null
+    // ================================================================
+    VkImage actualPrev = (prevImage != VK_NULL_HANDLE)
+                         ? prevImage
+                         : reinterpret_cast<VkImage>(s_fgPrevImage);
+    VkImage actualCur  = curImage;
+
+    // Unwrap intermediate images
+    VkImage motionRaw      = reinterpret_cast<VkImage>(s_fgMotionImage);
+    VkImage motionFiltered = reinterpret_cast<VkImage>(s_fgMotionFiltered);
+    VkImage fgOutput       = reinterpret_cast<VkImage>(s_fgOutputImage);
+    VkImage prevDst        = reinterpret_cast<VkImage>(s_fgPrevImage);
+
+    // All 3 pipelines
+    VkPipeline pipelineMotion  = reinterpret_cast<VkPipeline>(s_fgPipeline[FG_PASS_MOTION]);
+    VkPipeline pipelineMedian  = reinterpret_cast<VkPipeline>(s_fgPipeline[FG_PASS_MEDIAN]);
+    VkPipeline pipelineWarp    = reinterpret_cast<VkPipeline>(s_fgPipeline[FG_PASS_WARP]);
+
+    VkImageView srcViewCur   = VK_NULL_HANDLE;
+    VkImageView srcViewPrev  = VK_NULL_HANDLE;
+    VkImageView motionView   = VK_NULL_HANDLE;
+    VkImageView motionFilteredView = VK_NULL_HANDLE;
+    VkImageView outputView   = VK_NULL_HANDLE;
+
+    // ================================================================
+    // Create temporary command pool + buffer + fence
+    // ================================================================
+    VkCommandPoolCreateInfo poolCI = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    poolCI.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolCI.queueFamilyIndex = s_queueFamily;
+    VkCommandPool cmdPool = VK_NULL_HANDLE;
+    VkResult vr = s_vk.vkCreateCommandPool(device, &poolCI, nullptr, &cmdPool);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkCreateCommandPool failed (", vr, ")"));
+      return false;
+    }
+
+    VkCommandBufferAllocateInfo allocCI = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    allocCI.commandPool        = cmdPool;
+    allocCI.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocCI.commandBufferCount = 1;
+    VkCommandBuffer cmdBuf = VK_NULL_HANDLE;
+    vr = s_vk.vkAllocateCommandBuffers(device, &allocCI, &cmdBuf);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkAllocateCommandBuffers failed (", vr, ")"));
+      s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+      return false;
+    }
+
+    VkFenceCreateInfo fenceCI = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkFence fence = VK_NULL_HANDLE;
+    vr = s_vk.vkCreateFence(device, &fenceCI, nullptr, &fence);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkCreateFence failed (", vr, ")"));
+      s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+      s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+      return false;
+    }
+
+    // ================================================================
+    // Create image views
+    // ================================================================
+    VkImageViewCreateInfo viewCI = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    viewCI.viewType     = VK_IMAGE_VIEW_TYPE_2D;
+    viewCI.format       = format;
+    viewCI.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewCI.subresourceRange.baseMipLevel   = 0;
+    viewCI.subresourceRange.levelCount     = 1;
+    viewCI.subresourceRange.baseArrayLayer = 0;
+    viewCI.subresourceRange.layerCount     = 1;
+
+    // curImage view
+    viewCI.image = actualCur;
+    vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &srcViewCur);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkCreateImageView(cur) failed (", vr, ")"));
+      goto cleanup_fence;
+    }
+
+    // prevImage view (same format)
+    viewCI.image = actualPrev;
+    viewCI.format = VK_FORMAT_R8G8B8A8_UNORM;  // prev is always UNORM
+    vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &srcViewPrev);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkCreateImageView(prev) failed (", vr, ")"));
+      goto cleanup_view_cur;
+    }
+
+    // Motion raw view (R32G32_SFLOAT)
+    viewCI.image  = motionRaw;
+    viewCI.format = VK_FORMAT_R32G32_SFLOAT;
+    vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &motionView);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkCreateImageView(motion) failed (", vr, ")"));
+      goto cleanup_view_prev;
+    }
+
+    // Motion filtered view (R32G32_SFLOAT)
+    viewCI.image  = motionFiltered;
+    viewCI.format = VK_FORMAT_R32G32_SFLOAT;
+    vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &motionFilteredView);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkCreateImageView(motionFiltered) failed (", vr, ")"));
+      goto cleanup_view_motion;
+    }
+
+    // Output view (R8G8B8A8_UNORM)
+    viewCI.image  = fgOutput;
+    viewCI.format = VK_FORMAT_R8G8B8A8_UNORM;
+    vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &outputView);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkCreateImageView(output) failed (", vr, ")"));
+      goto cleanup_view_mfilt;
+    }
+
+    // ================================================================
+    // Record command buffer — 3-pass dispatch
+    // ================================================================
+    VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vr = s_vk.vkBeginCommandBuffer(cmdBuf, &beginInfo);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkBeginCommandBuffer failed (", vr, ")"));
+      goto cleanup_all_views;
+    }
+
+    // ----------------------------------------------------------------
+    // Pre-dispatch barriers: bring all images to GENERAL layout
+    // ----------------------------------------------------------------
+    VkImageMemoryBarrier preBarriers[5] = {};
+
+    // curImage: PRESENT_SRC_KHR → GENERAL (shader read)
+    preBarriers[0].sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    preBarriers[0].srcAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    preBarriers[0].dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+    preBarriers[0].oldLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    preBarriers[0].newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    preBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preBarriers[0].image               = actualCur;
+    preBarriers[0].subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    // actualPrev: GENERAL remains GENERAL (assumed already in GENERAL from previous frame)
+    // Just ensure shader-read access is visible
+    preBarriers[1].sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    preBarriers[1].srcAccessMask       = 0;
+    preBarriers[1].dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+    preBarriers[1].oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    preBarriers[1].newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    preBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preBarriers[1].image               = actualPrev;
+    preBarriers[1].subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    // motionRaw: UNDEFINED → GENERAL (storage write)
+    preBarriers[2].sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    preBarriers[2].srcAccessMask       = 0;
+    preBarriers[2].dstAccessMask       = VK_ACCESS_SHADER_WRITE_BIT;
+    preBarriers[2].oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+    preBarriers[2].newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    preBarriers[2].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preBarriers[2].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preBarriers[2].image               = motionRaw;
+    preBarriers[2].subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    // motionFiltered: UNDEFINED → GENERAL (storage write)
+    preBarriers[3].sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    preBarriers[3].srcAccessMask       = 0;
+    preBarriers[3].dstAccessMask       = VK_ACCESS_SHADER_WRITE_BIT;
+    preBarriers[3].oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+    preBarriers[3].newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    preBarriers[3].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preBarriers[3].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preBarriers[3].image               = motionFiltered;
+    preBarriers[3].subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    // fgOutput: UNDEFINED → GENERAL (storage write)
+    preBarriers[4].sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    preBarriers[4].srcAccessMask       = 0;
+    preBarriers[4].dstAccessMask       = VK_ACCESS_SHADER_WRITE_BIT;
+    preBarriers[4].oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+    preBarriers[4].newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    preBarriers[4].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preBarriers[4].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preBarriers[4].image               = fgOutput;
+    preBarriers[4].subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    // Split into two calls: barrier 0 (cur) needs COLOR_ATTACHMENT_OUTPUT srcStage,
+    // barriers 1-4 need TOP_OF_PIPE srcStage (no prior producer).
+    // Barrier for curImage
+    VkImageMemoryBarrier curBarrier = preBarriers[0];
+    s_vk.vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &curBarrier);
+
+    // Barriers for prev + intermediates
+    s_vk.vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 4, &preBarriers[1]);
+
+    // ----------------------------------------------------------------
+    // Allocate 3 descriptor sets (one per pass)
+    // ----------------------------------------------------------------
+    s_vk.vkResetDescriptorPool(device, descPool, 0);
+
+    VkDescriptorSetAllocateInfo descAlloc = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    descAlloc.descriptorPool     = descPool;
+    descAlloc.descriptorSetCount = 3;
+
+    VkDescriptorSetLayout layouts[3] = { descSetLayout, descSetLayout, descSetLayout };
+    descAlloc.pSetLayouts = layouts;
+
+    VkDescriptorSet descSets[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    vr = s_vk.vkAllocateDescriptorSets(device, &descAlloc, descSets);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkAllocateDescriptorSets failed (", vr, ")"));
+      goto cleanup_all_views;
+    }
+
+    // ---- Write descriptors for Pass 1 (MOTION) ----
+    // cur + prev (sampled) → motionRaw (storage)
+    VkDescriptorImageInfo curImgInfo  = {};
+    curImgInfo.sampler     = VK_NULL_HANDLE;
+    curImgInfo.imageView   = srcViewCur;
+    curImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo prevImgInfo = {};
+    prevImgInfo.sampler     = VK_NULL_HANDLE;
+    prevImgInfo.imageView   = srcViewPrev;
+    prevImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo motionImgInfo = {};
+    motionImgInfo.sampler     = VK_NULL_HANDLE;
+    motionImgInfo.imageView   = motionView;
+    motionImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo mfiltImgInfo = {};
+    mfiltImgInfo.sampler     = VK_NULL_HANDLE;
+    mfiltImgInfo.imageView   = motionFilteredView;
+    mfiltImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo outputImgInfo = {};
+    outputImgInfo.sampler     = VK_NULL_HANDLE;
+    outputImgInfo.imageView   = outputView;
+    outputImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkWriteDescriptorSet writes[4] = {};
+
+    // Pass 1: bind 0=cur, 1=prev, 2=motion, 3=unused
+    writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet          = descSets[0];
+    writes[0].dstBinding      = FG_BIND_CURRENT;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[0].pImageInfo      = &curImgInfo;
+
+    writes[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet          = descSets[0];
+    writes[1].dstBinding      = FG_BIND_PREVIOUS;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[1].pImageInfo      = &prevImgInfo;
+
+    writes[2].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet          = descSets[0];
+    writes[2].dstBinding      = FG_BIND_MOTION;
+    writes[2].descriptorCount = 1;
+    writes[2].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[2].pImageInfo      = &motionImgInfo;
+
+    s_vk.vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
+
+    // Pass 2 (MEDIAN): bind 2=motion, 3=motionFiltered
+    VkWriteDescriptorSet medianWrites[2] = {};
+    medianWrites[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    medianWrites[0].dstSet          = descSets[1];
+    medianWrites[0].dstBinding      = FG_BIND_MOTION;
+    medianWrites[0].descriptorCount = 1;
+    medianWrites[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    medianWrites[0].pImageInfo      = &motionImgInfo;
+
+    medianWrites[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    medianWrites[1].dstSet          = descSets[1];
+    medianWrites[1].dstBinding      = FG_BIND_OUTPUT;
+    medianWrites[1].descriptorCount = 1;
+    medianWrites[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    medianWrites[1].pImageInfo      = &mfiltImgInfo;
+
+    s_vk.vkUpdateDescriptorSets(device, 2, medianWrites, 0, nullptr);
+
+    // Pass 3 (WARP): bind 0=cur, 1=prev, 2=motionFiltered, 3=output
+    VkWriteDescriptorSet warpWrites[4] = {};
+    warpWrites[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    warpWrites[0].dstSet          = descSets[2];
+    warpWrites[0].dstBinding      = FG_BIND_CURRENT;
+    warpWrites[0].descriptorCount = 1;
+    warpWrites[0].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    warpWrites[0].pImageInfo      = &curImgInfo;
+
+    warpWrites[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    warpWrites[1].dstSet          = descSets[2];
+    warpWrites[1].dstBinding      = FG_BIND_PREVIOUS;
+    warpWrites[1].descriptorCount = 1;
+    warpWrites[1].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    warpWrites[1].pImageInfo      = &prevImgInfo;
+
+    warpWrites[2].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    warpWrites[2].dstSet          = descSets[2];
+    warpWrites[2].dstBinding      = FG_BIND_MOTION;
+    warpWrites[2].descriptorCount = 1;
+    warpWrites[2].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    warpWrites[2].pImageInfo      = &mfiltImgInfo;
+
+    warpWrites[3].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    warpWrites[3].dstSet          = descSets[2];
+    warpWrites[3].dstBinding      = FG_BIND_OUTPUT;
+    warpWrites[3].descriptorCount = 1;
+    warpWrites[3].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    warpWrites[3].pImageInfo      = &outputImgInfo;
+
+    s_vk.vkUpdateDescriptorSets(device, 4, warpWrites, 0, nullptr);
+
+    // ----------------------------------------------------------------
+    // Pass 1: Motion search
+    // ----------------------------------------------------------------
+    s_vk.vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineMotion);
+    s_vk.vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
+        pipelineLayout, 0, 1, &descSets[0], 0, nullptr);
+    {
+      float pcData[4] = { 1.0f / float(FG_TILE_SIZE), 0.0f, 0.0f, 0.0f };
+      s_vk.vkCmdPushConstants(cmdBuf, pipelineLayout,
+          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcData), pcData);
+    }
+
+    uint32_t motionGX = (extent.width  + FG_TILE_SIZE - 1) / FG_TILE_SIZE;
+    uint32_t motionGY = (extent.height + FG_TILE_SIZE - 1) / FG_TILE_SIZE;
+    s_vk.vkCmdDispatch(cmdBuf, motionGX, motionGY, 1);
+
+    // Barrier: motionRaw GENERAL (write→read for median)
+    VkImageMemoryBarrier motionBarrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    motionBarrier.srcAccessMask       = VK_ACCESS_SHADER_WRITE_BIT;
+    motionBarrier.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+    motionBarrier.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    motionBarrier.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    motionBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    motionBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    motionBarrier.image               = motionRaw;
+    motionBarrier.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    s_vk.vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &motionBarrier);
+
+    // ----------------------------------------------------------------
+    // Pass 2: Median filter
+    // ----------------------------------------------------------------
+    s_vk.vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineMedian);
+    s_vk.vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
+        pipelineLayout, 0, 1, &descSets[1], 0, nullptr);
+    // Median push constants are unused but required by layout
+    {
+      float pcData[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+      s_vk.vkCmdPushConstants(cmdBuf, pipelineLayout,
+          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcData), pcData);
+    }
+
+    uint32_t medianGX = (motionGX + FG_MEDIAN_TILE - 1) / FG_MEDIAN_TILE;
+    uint32_t medianGY = (motionGY + FG_MEDIAN_TILE - 1) / FG_MEDIAN_TILE;
+    s_vk.vkCmdDispatch(cmdBuf, medianGX, medianGY, 1);
+
+    // Barrier: motionFiltered GENERAL (write→read for warp)
+    VkImageMemoryBarrier mfiltBarrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    mfiltBarrier.srcAccessMask       = VK_ACCESS_SHADER_WRITE_BIT;
+    mfiltBarrier.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+    mfiltBarrier.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    mfiltBarrier.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    mfiltBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    mfiltBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    mfiltBarrier.image               = motionFiltered;
+    mfiltBarrier.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    s_vk.vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &mfiltBarrier);
+
+    // ----------------------------------------------------------------
+    // Pass 3: Warp + blend
+    // ----------------------------------------------------------------
+    s_vk.vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineWarp);
+    s_vk.vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
+        pipelineLayout, 0, 1, &descSets[2], 0, nullptr);
+    {
+      float blendMin     = 0.05f;
+      float blendMax     = 0.95f;
+      float blendStrength = 0.5f;
+      float motionScale   = 1.0f / float(FG_TILE_SIZE);
+      float pcData[4]    = { blendMin, blendMax, blendStrength, motionScale };
+      s_vk.vkCmdPushConstants(cmdBuf, pipelineLayout,
+          VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcData), pcData);
+    }
+
+    uint32_t warpGX = (extent.width  + FG_WARP_TILE - 1) / FG_WARP_TILE;
+    uint32_t warpGY = (extent.height + FG_WARP_TILE - 1) / FG_WARP_TILE;
+    s_vk.vkCmdDispatch(cmdBuf, warpGX, warpGY, 1);
+
+    // ----------------------------------------------------------------
+    // Post-dispatch Step 1: save curImage → prevDst (for next frame)
+    // ----------------------------------------------------------------
+    // curImage GENERAL → TRANSFER_SRC_OPTIMAL
+    VkImageMemoryBarrier curToSrc = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    curToSrc.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    curToSrc.srcAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+    curToSrc.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+    curToSrc.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    curToSrc.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    curToSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    curToSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    curToSrc.image               = actualCur;
+    curToSrc.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    // prevDst GENERAL → TRANSFER_DST_OPTIMAL
+    VkImageMemoryBarrier prevToDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    prevToDst.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    prevToDst.srcAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+    prevToDst.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+    prevToDst.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    prevToDst.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    prevToDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    prevToDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    prevToDst.image               = prevDst;
+    prevToDst.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    VkImageMemoryBarrier copyPrep[2] = { curToSrc, prevToDst };
+    s_vk.vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 2, copyPrep);
+
+    // Copy curImage → prevDst
+    VkImageCopy copyCur = {};
+    copyCur.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copyCur.srcSubresource.layerCount = 1;
+    copyCur.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copyCur.dstSubresource.layerCount = 1;
+    copyCur.extent = extent;
+
+    s_vk.vkCmdCopyImage(cmdBuf,
+        actualCur, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        prevDst,   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1, &copyCur);
+
+    // ----------------------------------------------------------------
+    // Post-dispatch Step 2: blit fgOutput → curImage (for presentation)
+    // ----------------------------------------------------------------
+    // curImage TRANSFER_SRC_OPTIMAL → TRANSFER_DST_OPTIMAL
+    VkImageMemoryBarrier curToDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    curToDst.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    curToDst.srcAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+    curToDst.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+    curToDst.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    curToDst.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    curToDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    curToDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    curToDst.image               = actualCur;
+    curToDst.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    // fgOutput GENERAL → TRANSFER_SRC_OPTIMAL (after shader write completes)
+    VkImageMemoryBarrier fgToSrc = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    fgToSrc.sType                = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    fgToSrc.srcAccessMask        = VK_ACCESS_SHADER_WRITE_BIT;
+    fgToSrc.dstAccessMask        = VK_ACCESS_TRANSFER_READ_BIT;
+    fgToSrc.oldLayout            = VK_IMAGE_LAYOUT_GENERAL;
+    fgToSrc.newLayout            = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    fgToSrc.srcQueueFamilyIndex  = VK_QUEUE_FAMILY_IGNORED;
+    fgToSrc.dstQueueFamilyIndex  = VK_QUEUE_FAMILY_IGNORED;
+    fgToSrc.image                = fgOutput;
+    fgToSrc.subresourceRange     = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    // Also transition prevDst: TRANSFER_DST → GENERAL for next frame read
+    VkImageMemoryBarrier prevToGen = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    prevToGen.sType                = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    prevToGen.srcAccessMask        = VK_ACCESS_TRANSFER_WRITE_BIT;
+    prevToGen.dstAccessMask        = VK_ACCESS_SHADER_READ_BIT;
+    prevToGen.oldLayout            = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    prevToGen.newLayout            = VK_IMAGE_LAYOUT_GENERAL;
+    prevToGen.srcQueueFamilyIndex  = VK_QUEUE_FAMILY_IGNORED;
+    prevToGen.dstQueueFamilyIndex  = VK_QUEUE_FAMILY_IGNORED;
+    prevToGen.image                = prevDst;
+    prevToGen.subresourceRange     = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    VkImageMemoryBarrier blitPrep[3] = { curToDst, fgToSrc, prevToGen };
+    s_vk.vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 3, blitPrep);
+
+    // Blit fgOutput → curImage (nearest, 1:1)
+    VkImageBlit blitFG = {};
+    blitFG.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blitFG.srcSubresource.layerCount = 1;
+    blitFG.srcOffsets[0] = { 0, 0, 0 };
+    blitFG.srcOffsets[1] = { static_cast<int32_t>(extent.width),
+                             static_cast<int32_t>(extent.height), 1 };
+    blitFG.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blitFG.dstSubresource.layerCount = 1;
+    blitFG.dstOffsets[0] = { 0, 0, 0 };
+    blitFG.dstOffsets[1] = { static_cast<int32_t>(extent.width),
+                             static_cast<int32_t>(extent.height), 1 };
+
+    s_vk.vkCmdBlitImage(cmdBuf,
+        fgOutput, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        actualCur, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1, &blitFG, VK_FILTER_NEAREST);
+
+    // ----------------------------------------------------------------
+    // Final barrier: restore curImage to PRESENT_SRC_KHR
+    // ----------------------------------------------------------------
+    VkImageMemoryBarrier curFinal = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    curFinal.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    curFinal.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+    curFinal.dstAccessMask       = 0;
+    curFinal.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    curFinal.newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    curFinal.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    curFinal.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    curFinal.image               = actualCur;
+    curFinal.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    s_vk.vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &curFinal);
+
+    // ----------------------------------------------------------------
+    // End & submit
+    // ----------------------------------------------------------------
+    vr = s_vk.vkEndCommandBuffer(cmdBuf);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkEndCommandBuffer failed (", vr, ")"));
+      goto cleanup_all_views;
+    }
+
+    VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers    = &cmdBuf;
+
+    vr = s_vk.vkQueueSubmit(queue, 1, &submitInfo, fence);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkQueueSubmit failed (", vr, ")"));
+      goto cleanup_all_views;
+    }
+
+    vr = s_vk.vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkWaitForFences failed (", vr, ")"));
+    }
+
+    // Cleanup views
+    s_vk.vkDestroyImageView(device, outputView, nullptr);
+    s_vk.vkDestroyImageView(device, motionFilteredView, nullptr);
+    s_vk.vkDestroyImageView(device, motionView, nullptr);
+    s_vk.vkDestroyImageView(device, srcViewPrev, nullptr);
+    s_vk.vkDestroyImageView(device, srcViewCur, nullptr);
+
+    s_vk.vkDestroyFence(device, fence, nullptr);
+    s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+    s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+
+    Logger::debug(str::format("Vegas FG: dispatch complete (", extent.width, "x", extent.height, ")"));
+    return true;
+
+    // ---- Error jump labels ----
+  cleanup_all_views:
+    if (outputView)        s_vk.vkDestroyImageView(device, outputView, nullptr);
+  cleanup_view_mfilt:
+    if (motionFilteredView) s_vk.vkDestroyImageView(device, motionFilteredView, nullptr);
+  cleanup_view_motion:
+    if (motionView)        s_vk.vkDestroyImageView(device, motionView, nullptr);
+  cleanup_view_prev:
+    if (srcViewPrev)       s_vk.vkDestroyImageView(device, srcViewPrev, nullptr);
+  cleanup_view_cur:
+    if (srcViewCur)        s_vk.vkDestroyImageView(device, srcViewCur, nullptr);
+  cleanup_fence:
+    s_vk.vkDestroyFence(device, fence, nullptr);
+    s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+    s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+    return false;
   }
 
 } // namespace dxvk

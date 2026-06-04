@@ -153,9 +153,25 @@ namespace dxvk {
 
     // ---- Frame Gen (baked) ----
 
+    /// Should framegen be enabled this frame?
+    /// \returns true if performance has headroom for interpolation.
+    /// Tier 1 always returns false (compute budget insufficient).
     static bool needsFrameGen(
             float                frameTime,
             uint32_t             tier);
+
+    /// Dispatch 3-pass motion-compensated framegen.
+    /// Generates interpolated frame between current and saved previous.
+    /// \param [in] curImage  Current rendered frame (VK_IMAGE_LAYOUT_GENERAL)
+    /// \param [in] prevImage Previous frame (VK_IMAGE_LAYOUT_GENERAL)
+    /// \param [in] extent    Image dimensions
+    /// \param [in] format    Image format (must be R8G8B8A8_UNORM)
+    /// \returns true if dispatch completed successfully
+    static bool framegenDispatch(
+            VkImage              curImage,
+            VkImage              prevImage,
+            VkExtent3D           extent,
+            VkFormat             format);
 
     // ---- FSR (user-facing only via Tristate config) ----
 
@@ -224,6 +240,10 @@ namespace dxvk {
             uint32_t             width,
             uint32_t             height);
 
+    /// Retrieve framegen output VkImage (interpolated intermediate frame).
+    /// The caller blits this to the swapchain backbuffer after framegenDispatch.
+    static uint64_t framegenOutputImage();
+
   private:
 
     // Baked state — set once by initializeProfile(), never user-tunable
@@ -251,6 +271,27 @@ namespace dxvk {
     static uint64_t            s_fsrInterMemory;    ///< VkDeviceMemory
     static uint32_t            s_fsrInterW;         ///< current width
     static uint32_t            s_fsrInterH;         ///< current height
+
+    // ---- Framegen resources ----
+    static uint64_t            s_fgPipeline[3];       ///< VkPipeline (motion, median, warp)
+    static uint64_t            s_fgPipelineLayout;    ///< VkPipelineLayout
+    static uint64_t            s_fgDescSetLayout;     ///< VkDescriptorSetLayout
+    static uint64_t            s_fgDescPool;          ///< VkDescriptorPool
+    static bool                s_fgInitialized;
+
+    // Framegen intermediate images
+    static uint64_t            s_fgPrevImage;         ///< VkImage (saved previous frame)
+    static uint64_t            s_fgPrevMemory;        ///< VkDeviceMemory
+    static uint32_t            s_fgPrevW;             ///< current width
+    static uint32_t            s_fgPrevH;             ///< current height
+    static uint64_t            s_fgMotionImage;       ///< VkImage (raw motion, R16G16)
+    static uint64_t            s_fgMotionMemory;      ///< VkDeviceMemory
+    static uint64_t            s_fgMotionFiltered;    ///< VkImage (filtered motion, R16G16)
+    static uint64_t            s_fgMotionFMemory;     ///< VkDeviceMemory
+    static uint64_t            s_fgOutputImage;       ///< VkImage (framegen output)
+    static uint64_t            s_fgOutputMemory;      ///< VkDeviceMemory
+    static uint32_t            s_fgMotionW;           ///< motion buffer width (blocks)
+    static uint32_t            s_fgMotionH;           ///< motion buffer height (blocks)
   };
 
 } // namespace dxvk
