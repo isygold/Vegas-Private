@@ -97,9 +97,29 @@ namespace dxvk {
       }
   }
 
-  // Self-contained overload — delegates to the 4-arg form with internal state
+  // Self-contained overload — delegates to the 4-arg form with internal state.
+  // Applies EMA smoothing and cooldown to prevent oscillation.
   void Vegas::tuneThreshold(float load, float frameTime) {
-      tuneThreshold(s_drawThreshold, load, frameTime, s_tier);
+      // 1. EMA smoothing — dampen frame-time jitter
+      thread_local float s_smoothFt = 16.6f;
+      s_smoothFt = s_smoothFt * 0.9f + frameTime * 0.1f;
+
+      // 2. Frame-count cooldown — re-evaluate at most once every 120 calls
+      //    (~2 seconds at 60 fps, ~4 seconds at 30 fps).
+      thread_local uint32_t s_framesSinceAdj = 0;
+      s_framesSinceAdj++;
+      if (s_framesSinceAdj < 120)
+          return;
+      s_framesSinceAdj = 0;
+
+      // 3. Apply and log if threshold actually changed
+      uint32_t oldThresh = s_drawThreshold;
+      tuneThreshold(s_drawThreshold, load, s_smoothFt, s_tier);
+      if (s_drawThreshold != oldThresh) {
+          Logger::debug(str::format(
+              "Vegas: tuneThreshold ", oldThresh, " -> ", s_drawThreshold,
+              " load=", load, " smoothFt=", s_smoothFt, "ms tier=", s_tier));
+      }
   }
 
   // VEGAS: ZeroInitShaders = 1 (always enable for Unity/Adreno stability)

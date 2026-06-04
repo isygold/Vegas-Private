@@ -390,15 +390,25 @@ namespace dxvk {
         now - m_lastPresentTime).count();
     if (m_presentId > 0 && frameTime > 0.0f && frameTime < 500.0f) {
       double target = (m_frameRateLimit > 0.0) ? (1000.0 / m_frameRateLimit) : 16.667;
-      // GPU load estimate — hardcoded 0.5 pending Vulkan query support
-      constexpr float kGpuLoad = 0.5f;
 
       m_lastPerfState = Vegas::analyzePerformance(
-          kGpuLoad, frameTime,
+          0.5f, frameTime,              // 0.5 is only used for Overheating check
           static_cast<float>(target));
 
+      // Derive GPU load estimate from performance state.
+      // Without real Vulkan query data this is a heuristic, but it's
+      // vastly better than the hardcoded 0.5 which always hit the
+      // "low load → raise threshold" branch and pegged it at 8000.
+      float gpuLoadEstimate;
+      switch (m_lastPerfState) {
+        case VegasPerformanceState::Overheating: gpuLoadEstimate = 0.96f; break;
+        case VegasPerformanceState::Stuttering:
+        case VegasPerformanceState::Lagging:     gpuLoadEstimate = 0.92f; break;
+        default:                                 gpuLoadEstimate = 0.50f; break;
+      }
+
       // Let the governor react to current conditions
-      Vegas::tuneThreshold(kGpuLoad, frameTime);
+      Vegas::tuneThreshold(gpuLoadEstimate, frameTime);
 
       m_needsFrameGen = Vegas::needsFrameGen(frameTime, Vegas::getTier());
 
