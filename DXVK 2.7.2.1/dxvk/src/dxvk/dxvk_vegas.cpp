@@ -260,49 +260,6 @@ namespace dxvk {
   }
 
 
-  void Vegas::applyVramSwap(VkPhysicalDeviceMemoryProperties& props, uint32_t tier) {
-    uint64_t systemRamBytes = getSystemRamMB() * 1024ULL * 1024ULL;
-
-    // VEGAS: Ratio-based VRAM swap scaled to actual device RAM
-    static constexpr float vramRatioTable[] = { 0.25f, 0.33f, 0.40f };
-    float ratio = (tier >= 1 && tier <= 3) ? vramRatioTable[tier - 1] : 0.25f;
-
-    uint64_t extraVram = static_cast<uint64_t>(systemRamBytes * ratio);
-    extraVram = std::clamp(extraVram, 1ULL << 30, 8ULL << 30);
-
-    uint64_t maxSafeVram = systemRamBytes / 2ULL;
-
-    for (uint32_t i = 0; i < props.memoryHeapCount; i++) {
-        if (props.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
-            uint64_t newSize = props.memoryHeaps[i].size + extraVram;
-            props.memoryHeaps[i].size = std::min(newSize, maxSafeVram);
-        }
-    }
-  }
-
-  void Vegas::applyGpuMask(VkPhysicalDeviceProperties& props, uint32_t persona) {
-       struct PersonaConfig {
-           uint32_t vendorID;
-           uint32_t deviceID;
-           const char* deviceName;
-       };
-
-       static constexpr PersonaConfig personas[] = {
-           {0, 0, ""},
-           {0x10DE, 0x1C82, "NVIDIA GeForce GTX 1050 Ti (Vegas)"},
-           {0x10DE, 0x2184, "NVIDIA GeForce GTX 1660 (Vegas)"},
-           {0x10DE, 0x2520, "NVIDIA GeForce RTX 3060 Laptop GPU (Vegas)"}
-       };
-
-       if (persona >= 1 && persona <= 3) {
-           const auto& config = personas[persona];
-           props.vendorID = config.vendorID;
-           props.deviceID = config.deviceID;
-           std::strncpy(props.deviceName, config.deviceName, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - 1);
-           props.deviceName[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - 1] = '\0';
-       }
-  }
-
   // VEGAS: Framegen should activate when there IS headroom (low frame times),
   // not when the GPU is saturated. Inverted from the original logic.
   // Tier 1 (Adreno 610) excluded — compute budget insufficient for 3-pass.
@@ -878,24 +835,46 @@ namespace dxvk {
       return;
     }
 
-    auto& props = device->adapter()->deviceProperties().core.properties;
-    bool isAdreno = device->adapter()->isAdreno();
-
-    if (!isAdreno) {
-      // Fallback: check device name
-      std::string dname(props.deviceName);
-      for (auto& c : dname) c = std::tolower(static_cast<unsigned char>(c));
-      isAdreno = (dname.find("adreno") != std::string::npos);
-    }
-
-    if (isAdreno) {
-      s_enabled        = true;
-      s_bindSkipEnabled = true;
-      s_tier           = device->adapter()->getStarEnginePersona();
-    } else {
+    // Master switch: dxvk.enableStarProfile
+    // Auto  → Adreno detection (current behavior)
+    // True  → force-enable all Vegas features
+    // False → force-disable all Vegas features (emergency escape)
+    Tristate master = device->config().enableStarProfile;
+    if (master == Tristate::False) {
       s_enabled        = false;
       s_bindSkipEnabled = false;
       s_tier           = 0;
+      s_initialized    = true;
+      return;
+    }
+
+    auto& props = device->adapter()->deviceProperties().core.properties;
+    bool isAdreno = device->adapter()->isAdreno();
+
+    if (master == Tristate::True) {
+      // Force-enable: skip Adreno detection, default to tier 2
+      s_enabled        = true;
+      s_bindSkipEnabled = true;
+      s_tier           = device->adapter()->getStarEnginePersona();
+      if (s_tier == 0) s_tier = 2; // safe fallback for non-Adreno
+    } else {
+      // Auto: detect Adreno
+      if (!isAdreno) {
+        // Fallback: check device name
+        std::string dname(props.deviceName);
+        for (auto& c : dname) c = std::tolower(static_cast<unsigned char>(c));
+        isAdreno = (dname.find("adreno") != std::string::npos);
+      }
+
+      if (isAdreno) {
+        s_enabled        = true;
+        s_bindSkipEnabled = true;
+        s_tier           = device->adapter()->getStarEnginePersona();
+      } else {
+        s_enabled        = false;
+        s_bindSkipEnabled = false;
+        s_tier           = 0;
+      }
     }
 
     // Bake draw thresholds based on GPU tier (D3D11 base)
@@ -1110,8 +1089,8 @@ namespace dxvk {
 
   /** Helper: init FSR pipeline & descriptor resources. Returns true on success. */
   static bool initFsrPipeline(VkDevice device) {
-    if (s_fsrInitialized)
-      return reinterpret_cast<VkPipeline>(s_fsrPipeline) != VK_NULL_HANDLE;
+    if (Vegas::s_fsrInitialized)
+      return reinterpret_cast<VkPipeline>(Vegas::s_fsrPipeline) != VK_NULL_HANDLE;
 
     VkResult vr;
 
@@ -1123,7 +1102,7 @@ namespace dxvk {
     vr = s_vk.vkCreateShaderModule(device, &smCI, nullptr, &sm);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FSR: vkCreateShaderModule failed (", vr, ")"));
-      s_fsrInitialized = true;
+      Vegas::s_fsrInitialized = true;
       return false;
     }
 
@@ -1148,7 +1127,7 @@ namespace dxvk {
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FSR: vkCreateDescriptorSetLayout failed (", vr, ")"));
       s_vk.vkDestroyShaderModule(device, sm, nullptr);
-      s_fsrInitialized = true;
+      Vegas::s_fsrInitialized = true;
       return false;
     }
 
@@ -1169,7 +1148,7 @@ namespace dxvk {
       Logger::warn(str::format("Vegas FSR: vkCreatePipelineLayout failed (", vr, ")"));
       s_vk.vkDestroyDescriptorSetLayout(device, dsl, nullptr);
       s_vk.vkDestroyShaderModule(device, sm, nullptr);
-      s_fsrInitialized = true;
+      Vegas::s_fsrInitialized = true;
       return false;
     }
 
@@ -1190,7 +1169,7 @@ namespace dxvk {
       s_vk.vkDestroyPipelineLayout(device, pl, nullptr);
       s_vk.vkDestroyDescriptorSetLayout(device, dsl, nullptr);
       s_vk.vkDestroyShaderModule(device, sm, nullptr);
-      s_fsrInitialized = true;
+      Vegas::s_fsrInitialized = true;
       return false;
     }
 
@@ -1216,16 +1195,16 @@ namespace dxvk {
       s_vk.vkDestroyPipeline(device, pipeline, nullptr);
       s_vk.vkDestroyPipelineLayout(device, pl, nullptr);
       s_vk.vkDestroyDescriptorSetLayout(device, dsl, nullptr);
-      s_fsrInitialized = true;
+      Vegas::s_fsrInitialized = true;
       return false;
     }
 
     // --- Done ---
-    s_fsrPipeline       = reinterpret_cast<uint64_t>(pipeline);
-    s_fsrPipelineLayout = reinterpret_cast<uint64_t>(pl);
-    s_fsrDescSetLayout  = reinterpret_cast<uint64_t>(dsl);
-    s_fsrDescPool       = reinterpret_cast<uint64_t>(dp);
-    s_fsrInitialized    = true;
+    Vegas::s_fsrPipeline       = reinterpret_cast<uint64_t>(pipeline);
+    Vegas::s_fsrPipelineLayout = reinterpret_cast<uint64_t>(pl);
+    Vegas::s_fsrDescSetLayout  = reinterpret_cast<uint64_t>(dsl);
+    Vegas::s_fsrDescPool       = reinterpret_cast<uint64_t>(dp);
+    Vegas::s_fsrInitialized    = true;
 
     Logger::debug("Vegas FSR: compute pipeline created successfully");
     return true;
@@ -1236,21 +1215,21 @@ namespace dxvk {
    *  Creates a private VkImage with STORAGE_BIT + TRANSFER_SRC_BIT.
    *  Destroys and recreates if dimensions changed (swapchain resize). */
   static bool ensureFsrIntermediate(VkDevice device, VkExtent3D extent) {
-    if (s_fsrInterImage != 0 && s_fsrInterW == extent.width && s_fsrInterH == extent.height) {
+    if (Vegas::s_fsrInterImage != 0 && Vegas::s_fsrInterW == extent.width && Vegas::s_fsrInterH == extent.height) {
       return true;  // already exists at correct size
     }
 
     // Destroy old intermediate if any (size mismatch or first init)
-    if (s_fsrInterImage != 0) {
-      s_vk.vkDestroyImage(device, reinterpret_cast<VkImage>(s_fsrInterImage), nullptr);
-      s_fsrInterImage = 0;
+    if (Vegas::s_fsrInterImage != 0) {
+      s_vk.vkDestroyImage(device, reinterpret_cast<VkImage>(Vegas::s_fsrInterImage), nullptr);
+      Vegas::s_fsrInterImage = 0;
     }
-    if (s_fsrInterMemory != 0) {
-      s_vk.vkFreeMemory(device, reinterpret_cast<VkDeviceMemory>(s_fsrInterMemory), nullptr);
-      s_fsrInterMemory = 0;
+    if (Vegas::s_fsrInterMemory != 0) {
+      s_vk.vkFreeMemory(device, reinterpret_cast<VkDeviceMemory>(Vegas::s_fsrInterMemory), nullptr);
+      Vegas::s_fsrInterMemory = 0;
     }
-    s_fsrInterW = 0;
-    s_fsrInterH = 0;
+    Vegas::s_fsrInterW = 0;
+    Vegas::s_fsrInterH = 0;
 
     VkImageCreateInfo imgCI = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     imgCI.imageType     = VK_IMAGE_TYPE_2D;
@@ -1275,7 +1254,7 @@ namespace dxvk {
     VkMemoryRequirements memReqs;
     s_vk.vkGetImageMemoryRequirements(device, interImage, &memReqs);
 
-    VkPhysicalDevice physDev = reinterpret_cast<VkPhysicalDevice>(s_physicalDevice);
+    VkPhysicalDevice physDev = reinterpret_cast<VkPhysicalDevice>(Vegas::s_physicalDevice);
     VkPhysicalDeviceMemoryProperties physMemProps;
     s_vk.vkGetPhysicalDeviceMemoryProperties(physDev, &physMemProps);
 
@@ -1322,10 +1301,10 @@ namespace dxvk {
       return false;
     }
 
-    s_fsrInterImage  = reinterpret_cast<uint64_t>(interImage);
-    s_fsrInterMemory = reinterpret_cast<uint64_t>(interMem);
-    s_fsrInterW      = extent.width;
-    s_fsrInterH      = extent.height;
+    Vegas::s_fsrInterImage  = reinterpret_cast<uint64_t>(interImage);
+    Vegas::s_fsrInterMemory = reinterpret_cast<uint64_t>(interMem);
+    Vegas::s_fsrInterW      = extent.width;
+    Vegas::s_fsrInterH      = extent.height;
 
     Logger::debug(str::format("Vegas FSR: intermediate image created (",
                               extent.width, "x", extent.height, ")"));
@@ -1742,8 +1721,8 @@ namespace dxvk {
 
   /** Helper: init framegen 3-pass pipeline. Call once. */
   static bool initFgPipeline(VkDevice device) {
-    if (s_fgInitialized)
-      return s_fgPipeline[0] != VK_NULL_HANDLE;
+    if (Vegas::s_fgInitialized)
+      return Vegas::s_fgPipeline[0] != VK_NULL_HANDLE;
 
     VkResult vr;
 
@@ -1764,7 +1743,7 @@ namespace dxvk {
         Logger::warn(str::format("Vegas FG: vkCreateShaderModule(pass ", i, ") failed (", vr, ")"));
         for (uint32_t j = 0; j < i; j++)
           s_vk.vkDestroyShaderModule(device, modules[j], nullptr);
-        s_fgInitialized = true;
+        Vegas::s_fgInitialized = true;
         return false;
       }
     }
@@ -1802,7 +1781,7 @@ namespace dxvk {
       Logger::warn(str::format("Vegas FG: vkCreateDescriptorSetLayout failed (", vr, ")"));
       for (uint32_t i = 0; i < 3; i++)
         s_vk.vkDestroyShaderModule(device, modules[i], nullptr);
-      s_fgInitialized = true;
+      Vegas::s_fgInitialized = true;
       return false;
     }
 
@@ -1825,7 +1804,7 @@ namespace dxvk {
       s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
       for (uint32_t i = 0; i < 3; i++)
         s_vk.vkDestroyShaderModule(device, modules[i], nullptr);
-      s_fgInitialized = true;
+      Vegas::s_fgInitialized = true;
       return false;
     }
 
@@ -1848,7 +1827,7 @@ namespace dxvk {
       s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
       for (uint32_t i = 0; i < 3; i++)
         s_vk.vkDestroyShaderModule(device, modules[i], nullptr);
-      s_fgInitialized = true;
+      Vegas::s_fgInitialized = true;
       return false;
     }
 
@@ -1877,19 +1856,19 @@ namespace dxvk {
       s_vk.vkDestroyPipeline(device, pipelines[2], nullptr);
       s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
       s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
-      s_fgInitialized = true;
+      Vegas::s_fgInitialized = true;
       return false;
     }
 
     // ---- Store as boxed uint64_t ----
-    s_fgPipeline[0]     = reinterpret_cast<uint64_t>(pipelines[0]);
-    s_fgPipeline[1]     = reinterpret_cast<uint64_t>(pipelines[1]);
-    s_fgPipeline[2]     = reinterpret_cast<uint64_t>(pipelines[2]);
-    s_fgPipelineLayout  = reinterpret_cast<uint64_t>(pipelineLayout);
-    s_fgDescSetLayout   = reinterpret_cast<uint64_t>(dsLayout);
-    s_fgDescPool        = reinterpret_cast<uint64_t>(descPool);
+    Vegas::s_fgPipeline[0]     = reinterpret_cast<uint64_t>(pipelines[0]);
+    Vegas::s_fgPipeline[1]     = reinterpret_cast<uint64_t>(pipelines[1]);
+    Vegas::s_fgPipeline[2]     = reinterpret_cast<uint64_t>(pipelines[2]);
+    Vegas::s_fgPipelineLayout  = reinterpret_cast<uint64_t>(pipelineLayout);
+    Vegas::s_fgDescSetLayout   = reinterpret_cast<uint64_t>(dsLayout);
+    Vegas::s_fgDescPool        = reinterpret_cast<uint64_t>(descPool);
 
-    s_fgInitialized = true;
+    Vegas::s_fgInitialized = true;
 
     Logger::debug("Vegas FG: 3-pass pipeline initialized");
     return true;
@@ -1907,8 +1886,8 @@ namespace dxvk {
     uint32_t mh = (h + FG_TILE_SIZE - 1) / FG_TILE_SIZE;
 
     // If dimensions match and images exist, nothing to do
-    if (s_fgPrevImage && s_fgMotionImage && s_fgMotionFiltered && s_fgOutputImage
-        && s_fgPrevW == w && s_fgPrevH == h && s_fgMotionW == mw && s_fgMotionH == mh)
+    if (Vegas::s_fgPrevImage && Vegas::s_fgMotionImage && Vegas::s_fgMotionFiltered && Vegas::s_fgOutputImage
+        && Vegas::s_fgPrevW == w && Vegas::s_fgPrevH == h && Vegas::s_fgMotionW == mw && Vegas::s_fgMotionH == mh)
       return true;
 
     // ---- Destroy old images if any ----
@@ -1923,16 +1902,16 @@ namespace dxvk {
       }
     };
 
-    destroyImage(s_fgPrevImage,       s_fgPrevMemory);
-    destroyImage(s_fgMotionImage,     s_fgMotionMemory);
-    destroyImage(s_fgMotionFiltered,  s_fgMotionFMemory);
-    destroyImage(s_fgOutputImage,     s_fgOutputMemory);
+    destroyImage(Vegas::s_fgPrevImage,       Vegas::s_fgPrevMemory);
+    destroyImage(Vegas::s_fgMotionImage,     Vegas::s_fgMotionMemory);
+    destroyImage(Vegas::s_fgMotionFiltered,  Vegas::s_fgMotionFMemory);
+    destroyImage(Vegas::s_fgOutputImage,     Vegas::s_fgOutputMemory);
 
-    s_fgPrevValid = false;
-    s_fgPrevW = 0;
-    s_fgPrevH = 0;
-    s_fgMotionW = 0;
-    s_fgMotionH = 0;
+    Vegas::s_fgPrevValid = false;
+    Vegas::s_fgPrevW = 0;
+    Vegas::s_fgPrevH = 0;
+    Vegas::s_fgMotionW = 0;
+    Vegas::s_fgMotionH = 0;
 
     // Helper to create a storage/transfer image
     auto createImage = [&](uint32_t imgW, uint32_t imgH,
@@ -1963,7 +1942,7 @@ namespace dxvk {
 
       VkPhysicalDeviceMemoryProperties memProps;
       s_vk.vkGetPhysicalDeviceMemoryProperties(
-          reinterpret_cast<VkPhysicalDevice>(s_physicalDevice), &memProps);
+          reinterpret_cast<VkPhysicalDevice>(Vegas::s_physicalDevice), &memProps);
 
       uint32_t memType = VK_MAX_MEMORY_TYPES;
       for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
@@ -2009,35 +1988,35 @@ namespace dxvk {
     if (!createImage(w, h, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-        s_fgPrevImage, s_fgPrevMemory)) {
+        Vegas::s_fgPrevImage, Vegas::s_fgPrevMemory)) {
       return false;
     }
 
     // s_fgMotionImage: raw motion vectors (R32G32_SFLOAT, storage)
     if (!createImage(mw, mh, VK_FORMAT_R32G32_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        s_fgMotionImage, s_fgMotionMemory)) {
+        Vegas::s_fgMotionImage, Vegas::s_fgMotionMemory)) {
       return false;
     }
 
     // s_fgMotionFiltered: median-filtered motion (R32G32_SFLOAT, storage)
     if (!createImage(mw, mh, VK_FORMAT_R32G32_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        s_fgMotionFiltered, s_fgMotionFMemory)) {
+        Vegas::s_fgMotionFiltered, Vegas::s_fgMotionFMemory)) {
       return false;
     }
 
     // s_fgOutputImage: interpolated frame output (UNORM)
     if (!createImage(w, h, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        s_fgOutputImage, s_fgOutputMemory)) {
+        Vegas::s_fgOutputImage, Vegas::s_fgOutputMemory)) {
       return false;
     }
 
-    s_fgPrevW   = w;
-    s_fgPrevH   = h;
-    s_fgMotionW = mw;
-    s_fgMotionH = mh;
+    Vegas::s_fgPrevW   = w;
+    Vegas::s_fgPrevH   = h;
+    Vegas::s_fgMotionW = mw;
+    Vegas::s_fgMotionH = mh;
 
     Logger::debug(str::format("Vegas FG: intermediate images created (",
                               w, "x", h, ", motion ", mw, "x", mh, ")"));

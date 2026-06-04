@@ -74,9 +74,12 @@ namespace dxvk {
     std::string deviceFilter;
 
     // --- VEGAS: ADRENO OPTIMIZATION OPTIONS ---
+    /// Master switch: enables all Vegas Adreno optimizations.
+    /// Auto = enable on Adreno, True = force-on, False = force-off.
+    Tristate enableStarProfile = Tristate::Auto;
+
     /// Enables FSR 1.0 spatial upscaler (Auto/True/False)
-    /// This is the ONLY user-facing Vegas option.
-    /// All other parameters are baked self-aware by the Vegas class.
+    /// Only effective when enableStarProfile is not False.
     Tristate vegasEnableUpscaler = Tristate::Auto;
   };
 

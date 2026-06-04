@@ -141,16 +141,6 @@ namespace dxvk {
     static void applyGpuMask(
             Config&              config);
 
-    /** Apply VRAM scaling at Vk-device-init time (tier from initializeProfile) */
-    static void applyVramSwap(
-            VkPhysicalDeviceMemoryProperties& props,
-            uint32_t             tier);
-
-    /** Apply GPU persona at Vk-device-init time (tier from initializeProfile) */
-    static void applyGpuMask(
-            VkPhysicalDeviceProperties&       props,
-            uint32_t             persona);
-
     // ---- Frame Gen (baked) ----
 
     /// Should framegen be enabled this frame?

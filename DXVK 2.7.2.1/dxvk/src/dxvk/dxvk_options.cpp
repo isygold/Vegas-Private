@@ -23,6 +23,7 @@ namespace dxvk {
     tilerMode             = config.getOption<Tristate>("dxvk.tilerMode",              Tristate::Auto);
 	enableAsync = config.getOption<bool>("dxvk.enableAsync",                          false);
 
+    enableStarProfile   = config.getOption<Tristate>("dxvk.enableStarProfile",   Tristate::Auto);
     vegasEnableUpscaler = config.getOption<Tristate>("vegas.enableUpscaler", Tristate::Auto);
 
     auto budget = config.getOption<int32_t>("dxvk.maxMemoryBudget", 0);
