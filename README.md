@@ -1,4 +1,4 @@
-# 🎰 VEGAS: DXVK v2.7.2.1
+# 🎰 VEGAS: DXVK v2.7.3
 ### **Adreno-Tuned DXVK Fork for Android Emulation (Star Emulator / Winlator)**
 
 **VEGAS** (formerly Star Engine) is a specialized performance modification of DXVK designed for **Qualcomm Adreno GPUs** in mobile environments. It brings a tier-based auto-tuning engine, FSR 1.0 compute upscaling, motion-compensated frame generation, and dynamic driver safety features — all controlled by a single master switch.
@@ -60,7 +60,7 @@ Graph coloring via `getGraphColor()`: green (normal) → yellow (lagging) → or
 ### Via Star Emulator
 1. Open Star Emulator
 2. Navigate to **Contents** menu
-3. Install the `dxvk-2.7.2.1.wcp` file
+3. Install the `dxvk-2.7.3.wcp` file
 
 ### Manual Setup
 Place `dxvk.conf` in any of these paths:
@@ -99,7 +99,7 @@ cd build
 ninja install
 ```
 
-See `DXVK 2.7.2.1/dxvk/README.md` for upstream build instructions.
+See `DXVK 2.7.3/dxvk/README.md` for upstream build instructions.
 
 ---
 

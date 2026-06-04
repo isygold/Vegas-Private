@@ -1,6 +1,6 @@
 #pragma once
 
-#define VEGAS_VERSION "DXVK v2.7.2.1-vegas"
+#define VEGAS_VERSION "DXVK v2.7.3-vegas"
 
 #include <atomic> // [Vegas] Thread-safe state
 #include <mutex>
