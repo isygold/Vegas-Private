@@ -49,6 +49,7 @@ jobs:
 
       - name: Build x64
         run: |
+          chmod +x package-release.sh
           ./package-release.sh \
             "${{ needs.setup.outputs.version }}" \
             build \
@@ -87,6 +88,7 @@ jobs:
 
       - name: Build x32
         run: |
+          chmod +x package-release.sh
           ./package-release.sh \
             "${{ needs.setup.outputs.version }}" \
             build \
