@@ -99,7 +99,7 @@ cd build
 ninja install
 ```
 
-See `DXVK 2.7.3/dxvk/README.md` for upstream build instructions.
+See `dxvk/README.md` for upstream build instructions.
 
 ---
 
