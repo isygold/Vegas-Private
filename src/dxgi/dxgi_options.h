@@ -58,6 +58,9 @@ namespace dxvk {
 
     /// Forced refresh rate, disable other modes
     uint32_t forceRefreshRate;
+
+    /// Vegas upscaler override
+    Tristate vegasEnableUpscaler;
   };
   
 }
