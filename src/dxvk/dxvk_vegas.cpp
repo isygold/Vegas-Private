@@ -1116,7 +1116,6 @@ namespace dxvk {
   static bool initFsrPipeline(VkDevice device) {
     if (Vegas::s_fsrInitialized)
       return reinterpret_cast<VkPipeline>(Vegas::s_fsrPipeline) != VK_NULL_HANDLE;
-
     VkResult vr;
 
     // --- Shader module ---
@@ -1747,7 +1746,7 @@ namespace dxvk {
   /** Helper: init framegen 3-pass pipeline. Call once. */
   static bool initFgPipeline(VkDevice device) {
     if (Vegas::s_fgInitialized)
-      return Vegas::s_fgPipeline[0] != VK_NULL_HANDLE;
+      return reinterpret_cast<VkPipeline>(Vegas::s_fgPipeline[0]) != VK_NULL_HANDLE;
 
     VkResult vr;
 
