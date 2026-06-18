@@ -335,7 +335,7 @@ namespace dxvk {
     /// large enough for the given extent. Recreates if dimensions changed.
     /// \returns true on success (image is ready for EASU dispatch).
     static bool ensureFsrIntermediate(
-            DxvkDevice*          device,
+            VkDevice             device,
             VkExtent3D           extent);
 
     /// Push frame-timing metrics for HUD consumption.

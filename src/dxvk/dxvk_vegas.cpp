@@ -881,7 +881,7 @@ namespace dxvk {
 
 
   bool Vegas::ensureFsrIntermediate(
-          DxvkDevice*          device,
+          VkDevice             device,
           VkExtent3D           extent) {
     // Stub: assume intermediate image exists (caller will create it
     // if needed).  Full implementation would manage a persistent
