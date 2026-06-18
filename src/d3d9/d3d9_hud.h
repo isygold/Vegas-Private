@@ -6,91 +6,102 @@
 namespace dxvk::hud {
 
   /**
-   * \brief HUD item to display unmappable memory
+   * \brief HUD item to display sampler count
    */
-  class HudTextureMemory : public HudItem {
-    constexpr static int64_t UpdateInterval = 500'000;
+  class HudSamplerCount : public HudItem {
+
   public:
 
-    HudTextureMemory(D3D9DeviceEx* device);
+    HudSamplerCount(D3D9DeviceEx* device);
 
     void update(dxvk::high_resolution_clock::time_point time);
 
     HudPos render(
-      const Rc<DxvkCommandList>&ctx,
-      const HudPipelineKey&     key,
-      const HudOptions&         options,
-            HudRenderer&        renderer,
-            HudPos              position);
+            HudRenderer&      renderer,
+            HudPos            position);
 
   private:
 
     D3D9DeviceEx* m_device;
 
-    uint32_t m_maxAllocated = 0;
-    uint32_t m_maxUsed      = 0;
-    uint32_t m_maxMapped    = 0;
-
-    dxvk::high_resolution_clock::time_point m_lastUpdate
-      = dxvk::high_resolution_clock::now();
-
-    std::string m_allocatedString;
-    std::string m_mappedString;
+    std::string m_samplerCount;
 
   };
 
+    /**
+     * \brief HUD item to display unmappable memory
+     */
+    class HudTextureMemory : public HudItem {
+      constexpr static int64_t UpdateInterval = 500'000;
 
-  /**
-   * \brief HUD item to display amount of generated fixed function shaders
-   */
-  class HudFixedFunctionShaders : public HudItem {
+    public:
 
-  public:
+        HudTextureMemory(D3D9DeviceEx* device);
 
-    HudFixedFunctionShaders(D3D9DeviceEx* device);
+        void update(dxvk::high_resolution_clock::time_point time);
 
-    void update(dxvk::high_resolution_clock::time_point time);
+        HudPos render(
+                HudRenderer&      renderer,
+                HudPos            position);
 
-    HudPos render(
-      const Rc<DxvkCommandList>&ctx,
-      const HudPipelineKey&     key,
-      const HudOptions&         options,
-            HudRenderer&        renderer,
-            HudPos              position);
+    private:
 
-  private:
+        D3D9DeviceEx* m_device;
 
-    D3D9DeviceEx* m_device;
+        uint32_t m_maxAllocated = 0;
+        uint32_t m_maxUsed      = 0;
+        uint32_t m_maxMapped    = 0;
 
-    std::string m_ffShaderCount;
+        dxvk::high_resolution_clock::time_point m_lastUpdate
+          = dxvk::high_resolution_clock::now();
 
-  };
+        std::string m_allocatedString;
+        std::string m_mappedString;
 
+    };
 
-  /**
-   * \brief HUD item to whether or not we're in SWVP mode
-   */
-  class HudSWVPState : public HudItem {
+    /**
+     * \brief HUD item to display amount of generated fixed function shaders
+     */
+    class HudFixedFunctionShaders : public HudItem {
+    public:
 
-  public:
+        HudFixedFunctionShaders(D3D9DeviceEx* device);
 
-    HudSWVPState(D3D9DeviceEx* device);
+        void update(dxvk::high_resolution_clock::time_point time);
 
-    void update(dxvk::high_resolution_clock::time_point time);
+        HudPos render(
+                HudRenderer&      renderer,
+                HudPos            position);
 
-    HudPos render(
-      const Rc<DxvkCommandList>&ctx,
-      const HudPipelineKey&     key,
-      const HudOptions&         options,
-            HudRenderer&        renderer,
-            HudPos              position);
+    private:
 
-  private:
+        D3D9DeviceEx* m_device;
 
-    D3D9DeviceEx* m_device;
+        std::string m_ffShaderCount;
 
-    std::string m_isSWVPText;
+    };
 
-  };
+    /**
+     * \brief HUD item to whether or not we're in SWVP mode
+     */
+    class HudSWVPState : public HudItem {
+    public:
+
+        HudSWVPState(D3D9DeviceEx* device);
+
+        void update(dxvk::high_resolution_clock::time_point time);
+
+        HudPos render(
+                HudRenderer&      renderer,
+                HudPos            position);
+
+    private:
+
+        D3D9DeviceEx* m_device;
+
+        std::string m_isSWVPText;
+
+    };
 
 }
