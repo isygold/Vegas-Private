@@ -101,11 +101,10 @@ dxvk_src = [
   'dxvk_staging.cpp',
   'dxvk_state_cache.cpp',
   'dxvk_stats.cpp',
-  'dxvk_vegas.cpp',
-
   'dxvk_swapchain_blitter.cpp',
   'dxvk_unbound.cpp',
   'dxvk_util.cpp',
+  'dxvk_vegas.cpp',
 
   'hud/dxvk_hud.cpp',
   'hud/dxvk_hud_font.cpp',

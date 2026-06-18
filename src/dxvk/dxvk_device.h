@@ -75,6 +75,21 @@ namespace dxvk {
    * Rendering commands are recorded into command lists using
    * contexts. Multiple contexts can be created for a device.
    */
+  /**
+   * \brief Vegas cross-DLL metrics (read by Vegas::getTier etc.)
+   */
+  struct VegasDeviceMetrics {
+    bool     initialized = false;
+    uint32_t tier        = 0;
+    float    gpuLoad     = 0.0f;
+    float    frameTime   = 0.0f;
+    uint32_t perfState   = 0;
+    bool     fsrActive   = false;
+    bool     fgActive    = false;
+    uint32_t ftHead      = 0;
+    float    ftHistory[60] = {};
+  };
+
   class DxvkDevice : public RcObject {
     friend class DxvkContext;
     friend class DxvkSubmissionQueue;
@@ -555,6 +570,9 @@ namespace dxvk {
     DxvkDeviceQueueSet          m_queues;
     
     DxvkRecycler<DxvkCommandList, 16> m_recycledCommandLists;
+
+    // Vegas cross-DLL metrics (used by Vegas::getTier)
+    VegasDeviceMetrics m_vegasMetrics;
     
     DxvkSubmissionQueue         m_submissionQueue;
 

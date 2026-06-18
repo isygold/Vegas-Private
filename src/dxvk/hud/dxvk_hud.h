@@ -6,7 +6,15 @@
 #include "dxvk_hud_renderer.h"
 
 namespace dxvk::hud {
-
+  
+  /**
+   * \brief HUD uniform data
+   * Shader data for the HUD.
+   */
+  struct HudUniformData {
+    VkExtent2D surfaceSize;
+  };
+  
   /**
    * \brief DXVK HUD
    * 
@@ -20,7 +28,7 @@ namespace dxvk::hud {
     Hud(const Rc<DxvkDevice>& device);
     
     ~Hud();
-
+    
     /**
      * \brief Update HUD
      * 
@@ -33,20 +41,13 @@ namespace dxvk::hud {
      * \brief Render HUD
      * 
      * Renders the HUD to the given context.
-     * \param [in] ctx Context objects for rendering
-     * \param [in] dstView Swap chain image view
+     * \param [in] ctx Device context
+     * \param [in] surfaceSize Image size, in pixels
      */
     void render(
-      const Rc<DxvkCommandList>&ctx,
-      const Rc<DxvkImageView>&  dstView);
-
-    /**
-     * \brief Checks whether the HUD is empty
-     * \returns \c true if the HUD is empty
-     */
-    bool empty() const {
-      return m_hudItems.empty();
-    }
+      const Rc<DxvkContext>&  ctx,
+            VkSurfaceFormatKHR surfaceFormat,
+            VkExtent2D        surfaceSize);
 
     /**
      * \brief Adds a HUD item if enabled
@@ -56,8 +57,8 @@ namespace dxvk::hud {
      * \param [in] args Constructor arguments
      */
     template<typename T, typename... Args>
-    Rc<T> addItem(const char* name, int32_t at, Args... args) {
-      return m_hudItems.add<T>(name, at, std::forward<Args>(args)...);
+    void addItem(const char* name, int32_t at, Args... args) {
+      m_hudItems.add<T>(name, at, std::forward<Args>(args)...);
     }
     
     /**
@@ -73,12 +74,25 @@ namespace dxvk::hud {
     
   private:
     
-    Rc<DxvkDevice>        m_device;
+    const Rc<DxvkDevice>  m_device;
     
+    DxvkRasterizerState   m_rsState;
+    DxvkBlendMode         m_blendMode;
+
+    HudUniformData        m_uniformData;
     HudRenderer           m_renderer;
     HudItemSet            m_hudItems;
 
-    HudOptions            m_options;
+    float                 m_scale;
+    float                 m_opacity;
+
+    void setupRendererState(
+      const Rc<DxvkContext>&  ctx,
+            VkSurfaceFormatKHR surfaceFormat,
+            VkExtent2D        surfaceSize);
+
+    void renderHudElements(
+      const Rc<DxvkContext>&  ctx);
     
   };
   

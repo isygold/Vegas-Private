@@ -146,7 +146,7 @@ namespace dxvk {
 
   void Vegas::initializeProfile(uint32_t& threshold, bool& enabled, bool& bindSkip, uint32_t& tier, DxvkDevice* device) {
       if (device == nullptr || device->adapter() == nullptr) return;
-      auto& props = device->adapter()->deviceProperties().core.properties;
+      auto& props = device->adapter()->deviceProperties();
 
       static constexpr const char* adrenoStr = "adreno";
       static constexpr size_t adrenoLen = 6;
@@ -455,7 +455,7 @@ namespace dxvk {
       return;
     }
 
-    auto& props = device->adapter()->deviceProperties().core.properties;
+    auto& props = device->adapter()->deviceProperties();
 #ifndef _WIN32
     bool isAdreno = device->adapter()->isAdreno();
 #else
@@ -880,6 +880,13 @@ namespace dxvk {
   }
 
 
+  bool Vegas::fsrUpscale(
+          VkImage              srcImage,
+          VkImage              dstImage,
+          VkExtent3D           srcExtent,
+          VkExtent3D           dstExtent,
+          VkFormat             swapchainFormat,
+          VegasFsrConstants&   fsrConsts) {
     // ================================================================
     // Format guard — FSR only on UNORM swapchain formats
     // ================================================================
