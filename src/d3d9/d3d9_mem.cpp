@@ -19,7 +19,6 @@ namespace dxvk {
     SYSTEM_INFO sysInfo;
     GetSystemInfo(&sysInfo);
     m_allocationGranularity = sysInfo.dwAllocationGranularity;
-    m_mappingGranularity = m_allocationGranularity * 16;
   }
 
   D3D9Memory D3D9MemoryAllocator::Alloc(uint32_t Size) {
@@ -27,7 +26,7 @@ namespace dxvk {
 
     uint32_t alignedSize = align(Size, CACHE_LINE_SIZE);
     for (auto& chunk : m_chunks) {
-      D3D9Memory memory = chunk->AllocLocked(alignedSize);
+      D3D9Memory memory = chunk->Alloc(alignedSize);
       if (memory) {
         m_usedMemory += memory.GetSize();
         return memory;
@@ -39,25 +38,15 @@ namespace dxvk {
 
     D3D9MemoryChunk* chunk = new D3D9MemoryChunk(this, chunkSize);
     std::unique_ptr<D3D9MemoryChunk> uniqueChunk(chunk);
-    D3D9Memory memory = uniqueChunk->AllocLocked(alignedSize);
+    D3D9Memory memory = uniqueChunk->Alloc(alignedSize);
     m_usedMemory += memory.GetSize();
 
     m_chunks.push_back(std::move(uniqueChunk));
     return memory;
   }
 
-  void D3D9MemoryAllocator::Free(D3D9Memory *Memory) {
-    std::lock_guard<dxvk::mutex> lock(m_mutex);
-
-    D3D9MemoryChunk* chunk = Memory->GetChunk();
-    chunk->FreeLocked(Memory);
-    m_usedMemory -= Memory->GetSize();
-    if (chunk->IsEmpty())
-      FreeChunk(chunk);
-  }
-
   void D3D9MemoryAllocator::FreeChunk(D3D9MemoryChunk *Chunk) {
-    // Has to be called in the lock
+    std::lock_guard<dxvk::mutex> lock(m_mutex);
 
     m_allocatedMemory -= Chunk->Size();
 
@@ -66,67 +55,57 @@ namespace dxvk {
     }), m_chunks.end());
   }
 
-  void* D3D9MemoryAllocator::Map(D3D9Memory* Memory) {
-    std::lock_guard<dxvk::mutex> lock(m_mutex);
-
-    D3D9MemoryChunk* chunk = Memory->GetChunk();
-    uint32_t memoryMapped;
-    void* ptr = chunk->MapLocked(Memory, memoryMapped);
-    m_mappedMemory += memoryMapped;
-    return ptr;
+  void D3D9MemoryAllocator::NotifyMapped(uint32_t Size) {
+    m_mappedMemory += Size;
   }
 
-  void D3D9MemoryAllocator::Unmap(D3D9Memory* Memory) {
-    std::lock_guard<dxvk::mutex> lock(m_mutex);
-
-    D3D9MemoryChunk* chunk = Memory->GetChunk();
-    m_mappedMemory -= chunk->UnmapLocked(Memory);
+  void D3D9MemoryAllocator::NotifyUnmapped(uint32_t Size) {
+    m_mappedMemory -= Size;
   }
 
-  uint32_t D3D9MemoryAllocator::MappedMemory() const {
+  void D3D9MemoryAllocator::NotifyFreed(uint32_t Size) {
+    m_usedMemory -= Size;
+  }
+
+  uint32_t D3D9MemoryAllocator::MappedMemory() {
     return m_mappedMemory.load();
   }
 
-  uint32_t D3D9MemoryAllocator::UsedMemory() const {
+  uint32_t D3D9MemoryAllocator::UsedMemory() {
     return m_usedMemory.load();
   }
 
-  uint32_t D3D9MemoryAllocator::AllocatedMemory() const {
+  uint32_t D3D9MemoryAllocator::AllocatedMemory() {
     return m_allocatedMemory.load();
   }
 
   D3D9MemoryChunk::D3D9MemoryChunk(D3D9MemoryAllocator* Allocator, uint32_t Size)
-    : m_allocator ( Allocator )
-    , m_size ( Size )
-    , m_mapping ( CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | SEC_COMMIT, 0, Size, nullptr) ) {
+    : m_allocator(Allocator), m_size(Size), m_mappingGranularity(m_allocator->MemoryGranularity() * 16) {
+    m_mapping = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | SEC_COMMIT, 0, Size, nullptr);
     m_freeRanges.push_back({ 0, Size });
-    uint32_t mappingGranularity = Allocator->MappingGranularity();
-    m_mappingRanges.resize(((Size + mappingGranularity - 1) / mappingGranularity));
+    m_mappingRanges.resize(((Size + m_mappingGranularity - 1) / m_mappingGranularity));
   }
 
   D3D9MemoryChunk::~D3D9MemoryChunk() {
-    // Has to be protected by the allocator lock
+    std::lock_guard<dxvk::mutex> lock(m_mutex);
 
     CloseHandle(m_mapping);
   }
 
-  void* D3D9MemoryChunk::MapLocked(D3D9Memory* Memory, uint32_t& mappedSize) {
-    // Has to be protected by the allocator lock
+  void* D3D9MemoryChunk::Map(D3D9Memory* memory) {
+    std::lock_guard<dxvk::mutex> lock(m_mutex);
 
-    mappedSize = 0;
-    uint32_t mappingGranularity = m_allocator->MappingGranularity();
-
-    uint32_t alignedOffset = alignDown(Memory->GetOffset(), mappingGranularity);
-    uint32_t alignmentDelta = Memory->GetOffset() - alignedOffset;
-    uint32_t alignedSize = Memory->GetSize() + alignmentDelta;
-    if (alignedSize > mappingGranularity) {
+    uint32_t alignedOffset = alignDown(memory->GetOffset(), m_mappingGranularity);
+    uint32_t alignmentDelta = memory->GetOffset() - alignedOffset;
+    uint32_t alignedSize = memory->GetSize() + alignmentDelta;
+    if (alignedSize > m_mappingGranularity) {
       // The allocation crosses the boundary of the internal mapping page it's a part of
       // so we map it on it's own.
-      alignedOffset = alignDown(Memory->GetOffset(), m_allocator->AllocationGranularity());
-      alignmentDelta = Memory->GetOffset() - alignedOffset;
-      alignedSize = Memory->GetSize() + alignmentDelta;
+      alignedOffset = alignDown(memory->GetOffset(), m_allocator->MemoryGranularity());
+      alignmentDelta = memory->GetOffset() - alignedOffset;
+      alignedSize = memory->GetSize() + alignmentDelta;
 
-      mappedSize = alignedSize;
+      m_allocator->NotifyMapped(alignedSize);
       uint8_t* basePtr = static_cast<uint8_t*>(MapViewOfFile(m_mapping, FILE_MAP_ALL_ACCESS, 0, alignedOffset, alignedSize));
       if (unlikely(basePtr == nullptr)) {
         DWORD error = GetLastError();
@@ -138,10 +117,10 @@ namespace dxvk {
 
     // For small allocations we map the entire mapping page to minimize the overhead from having the align the offset to 65k bytes.
     // This should hopefully also reduce the amount of MapViewOfFile calls we do for tiny allocations.
-    auto& mappingRange = m_mappingRanges[Memory->GetOffset() / mappingGranularity];
+    auto& mappingRange = m_mappingRanges[memory->GetOffset() /  m_mappingGranularity];
     if (unlikely(mappingRange.refCount == 0)) {
-      mappedSize = mappingGranularity;
-      mappingRange.ptr = static_cast<uint8_t*>(MapViewOfFile(m_mapping, FILE_MAP_ALL_ACCESS, 0, alignedOffset, m_allocator->MappingGranularity()));
+      m_allocator->NotifyMapped(m_mappingGranularity);
+      mappingRange.ptr = static_cast<uint8_t*>(MapViewOfFile(m_mapping, FILE_MAP_ALL_ACCESS, 0, alignedOffset, m_mappingGranularity));
       if (unlikely(mappingRange.ptr == nullptr)) {
         DWORD error = GetLastError();
         LPTSTR buffer = nullptr;
@@ -157,36 +136,34 @@ namespace dxvk {
     return basePtr + alignmentDelta;
   }
 
-  uint32_t D3D9MemoryChunk::UnmapLocked(D3D9Memory* Memory) {
-    // Has to be protected by the allocator lock
+  void D3D9MemoryChunk::Unmap(D3D9Memory* memory) {
+    std::lock_guard<dxvk::mutex> lock(m_mutex);
 
-    uint32_t mappingGranularity = m_allocator->MappingGranularity();
-
-    uint32_t alignedOffset = alignDown(Memory->GetOffset(), mappingGranularity);
-    uint32_t alignmentDelta = Memory->GetOffset() - alignedOffset;
-    uint32_t alignedSize = Memory->GetSize() + alignmentDelta;
-    if (alignedSize > mappingGranularity) {
+    uint32_t alignedOffset = alignDown(memory->GetOffset(), m_mappingGranularity);
+    uint32_t alignmentDelta = memory->GetOffset() - alignedOffset;
+    uint32_t alignedSize = memory->GetSize() + alignmentDelta;
+    if (alignedSize > m_mappingGranularity) {
       // Single use mapping
-      alignedOffset = alignDown(Memory->GetOffset(), m_allocator->AllocationGranularity());
-      alignmentDelta = Memory->GetOffset() - alignedOffset;
-      alignedSize = Memory->GetSize() + alignmentDelta;
+      alignedOffset = alignDown(memory->GetOffset(), m_allocator->MemoryGranularity());
+      alignmentDelta = memory->GetOffset() - alignedOffset;
+      alignedSize = memory->GetSize() + alignmentDelta;
 
-      uint8_t* basePtr = static_cast<uint8_t*>(Memory->Ptr()) - alignmentDelta;
+      uint8_t* basePtr = static_cast<uint8_t*>(memory->Ptr()) - alignmentDelta;
       UnmapViewOfFile(basePtr);
-      return alignedSize;
+      m_allocator->NotifyUnmapped(alignedSize);
+      return;
     }
-    auto& mappingRange = m_mappingRanges[Memory->GetOffset() / mappingGranularity];
+    auto& mappingRange = m_mappingRanges[memory->GetOffset() /  m_mappingGranularity];
     mappingRange.refCount--;
     if (unlikely(mappingRange.refCount == 0)) {
       UnmapViewOfFile(mappingRange.ptr);
       mappingRange.ptr = nullptr;
-      return mappingGranularity;
+      m_allocator->NotifyUnmapped(m_mappingGranularity);
     }
-    return 0;
   }
 
-  D3D9Memory D3D9MemoryChunk::AllocLocked(uint32_t Size) {
-    // Has to be protected by the allocator lock
+  D3D9Memory D3D9MemoryChunk::Alloc(uint32_t Size) {
+    std::lock_guard<dxvk::mutex> lock(m_mutex);
 
     uint32_t offset = 0;
     uint32_t size = 0;
@@ -211,8 +188,8 @@ namespace dxvk {
     return {};
   }
 
-  void D3D9MemoryChunk::FreeLocked(D3D9Memory *Memory) {
-    // Has to be protected by the allocator lock
+  void D3D9MemoryChunk::Free(D3D9Memory *Memory) {
+    std::lock_guard<dxvk::mutex> lock(m_mutex);
 
     uint32_t offset = Memory->GetOffset();
     uint32_t size = Memory->GetSize();
@@ -234,10 +211,11 @@ namespace dxvk {
     }
 
     m_freeRanges.push_back({ offset, size });
+    m_allocator->NotifyFreed(Memory->GetSize());
   }
 
-  bool D3D9MemoryChunk::IsEmpty() const {
-    // Has to be protected by the allocator lock
+  bool D3D9MemoryChunk::IsEmpty() {
+    std::lock_guard<dxvk::mutex> lock(m_mutex);
 
     return m_freeRanges.size() == 1
         && m_freeRanges[0].length == m_size;
@@ -245,6 +223,10 @@ namespace dxvk {
 
   D3D9MemoryAllocator* D3D9MemoryChunk::Allocator() const {
     return m_allocator;
+  }
+
+  HANDLE D3D9MemoryChunk::FileHandle() const {
+    return m_mapping;
   }
 
 
@@ -278,7 +260,11 @@ namespace dxvk {
     if (m_ptr != nullptr)
       Unmap();
 
-    m_chunk->Allocator()->Free(this);
+    m_chunk->Free(this);
+    if (m_chunk->IsEmpty()) {
+      D3D9MemoryAllocator* allocator = m_chunk->Allocator();
+      allocator->FreeChunk(m_chunk);
+    }
     m_chunk = nullptr;
   }
 
@@ -289,14 +275,14 @@ namespace dxvk {
     if (unlikely(m_chunk == nullptr))
       return;
 
-    m_ptr = m_chunk->Allocator()->Map(this);
+    m_ptr = m_chunk->Map(this);
   }
 
   void D3D9Memory::Unmap() {
     if (unlikely(m_ptr == nullptr))
       return;
 
-    m_chunk->Allocator()->Unmap(this);
+    m_chunk->Unmap(this);
     m_ptr = nullptr;
   }
 
@@ -312,15 +298,15 @@ namespace dxvk {
     return memory;
   }
 
-  uint32_t D3D9MemoryAllocator::MappedMemory() const {
+  uint32_t D3D9MemoryAllocator::MappedMemory() {
     return m_allocatedMemory.load();
   }
 
-  uint32_t D3D9MemoryAllocator::UsedMemory() const {
+  uint32_t D3D9MemoryAllocator::UsedMemory() {
     return m_allocatedMemory.load();
   }
 
-  uint32_t D3D9MemoryAllocator::AllocatedMemory() const {
+  uint32_t D3D9MemoryAllocator::AllocatedMemory() {
     return m_allocatedMemory.load();
   }
 

@@ -11,16 +11,15 @@ namespace dxvk {
   
   class D3D11Device;
   
-  class D3D11BlendState : public D3D11StateObject<ID3D11BlendState1, D3D11BlendState> {
-    using Container = D3D11StateObjectSet<D3D11BlendState>;
+  class D3D11BlendState : public D3D11StateObject<ID3D11BlendState1> {
+    
   public:
     
     using DescType = D3D11_BLEND_DESC1;
     
     D3D11BlendState(
             D3D11Device*       device,
-      const D3D11_BLEND_DESC1& desc,
-            Container*         container);
+      const D3D11_BLEND_DESC1& desc);
     ~D3D11BlendState();
 
     HRESULT STDMETHODCALLTYPE QueryInterface(
@@ -33,24 +32,10 @@ namespace dxvk {
     void STDMETHODCALLTYPE GetDesc1(
             D3D11_BLEND_DESC1* pDesc) final;
     
-    const D3D11_BLEND_DESC1& Desc() const {
-      return m_desc;
-    }
-
-    DxvkMultisampleState GetMsState(uint32_t SampleMask) const {
-      DxvkMultisampleState msState = m_msState;
-      msState.setSampleMask(SampleMask);
-      return msState;
-    }
-
-    DxvkLogicOpState GetLoState() const {
-      return m_loState;
-    }
-
-    std::array<DxvkBlendMode, 8> GetBlendState() const {
-      return m_blendModes;
-    }
-
+    void BindToContext(
+            DxvkContext*      ctx,
+            UINT              sampleMask) const;
+    
     D3D10BlendState* GetD3D10Iface() {
       return &m_d3d10;
     }
@@ -65,14 +50,12 @@ namespace dxvk {
     
     D3D11_BLEND_DESC1             m_desc;
     
-    std::array<DxvkBlendMode, 8>  m_blendModes = { };
-    DxvkMultisampleState          m_msState = { };
-    DxvkLogicOpState              m_loState = { };
+    std::array<DxvkBlendMode, 8>  m_blendModes;
+    DxvkMultisampleState          m_msState;
+    DxvkLogicOpState              m_loState;
 
     D3D10BlendState               m_d3d10;
-
-    D3DDestructionNotifier        m_destructionNotifier;
-
+    
     static DxvkBlendMode DecodeBlendMode(
       const D3D11_RENDER_TARGET_BLEND_DESC1& BlendDesc);
     

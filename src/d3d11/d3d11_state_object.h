@@ -39,8 +39,6 @@ namespace dxvk {
 
     D3D11ContextState m_state;
 
-    D3DDestructionNotifier m_destructionNotifier;
-
   };
 
 }

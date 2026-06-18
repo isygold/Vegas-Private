@@ -5,8 +5,6 @@
 
 namespace dxvk {
 
-    class D3D9DeviceEx;
-
   /**
    * \brief Resource initialization context
    * 
@@ -20,37 +18,28 @@ namespace dxvk {
   public:
 
     D3D9Initializer(
-      D3D9DeviceEx*           pParent);
-
+      const Rc<DxvkDevice>&             Device);
+    
     ~D3D9Initializer();
 
-    void FlushCsChunk() {
-      std::lock_guard<dxvk::mutex> lock(m_csMutex);
-
-    if (!m_csChunk->empty())
-        FlushCsChunkLocked();
-    }
-
-    void NotifyContextFlush();
+    void Flush();
 
     void InitBuffer(
             D3D9CommonBuffer*  pBuffer);
-
+    
     void InitTexture(
             D3D9CommonTexture* pTexture,
             void*              pInitialData = nullptr);
-
+    
   private:
 
     dxvk::mutex       m_mutex;
 
-    D3D9DeviceEx*     m_parent;
     Rc<DxvkDevice>    m_device;
+    Rc<DxvkContext>   m_context;
 
     size_t            m_transferCommands  = 0;
-
-    dxvk::mutex       m_csMutex;
-    DxvkCsChunkRef    m_csChunk;
+    size_t            m_transferMemory    = 0;
 
     void InitDeviceLocalBuffer(
             DxvkBufferSlice    Slice);
@@ -65,30 +54,9 @@ namespace dxvk {
             D3D9CommonTexture* pTexture,
             void*              pInitialData,
             void*              mapPtr);
-
-    void ThrottleAllocationLocked();
-
-    void ExecuteFlush();
-
-    void ExecuteFlushLocked();
-
-    void SyncSharedTexture(
-            D3D9CommonTexture* pResource);
-
-    void FlushCsChunkLocked();
-
-    void NotifyContextFlushLocked();
-
-    template<typename Cmd>
-    void EmitCs(Cmd&& command) {
-      std::lock_guard<dxvk::mutex> lock(m_csMutex);
-
-      if (unlikely(!m_csChunk->push(command))) {
-        FlushCsChunkLocked();
-
-        m_csChunk->push(command);
-      }
-    }
+    
+    void FlushImplicit();
+    void FlushInternal();
 
   };
 

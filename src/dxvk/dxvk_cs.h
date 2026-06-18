@@ -11,9 +11,7 @@
 #include "dxvk_context.h"
 
 namespace dxvk {
-
-  constexpr static size_t DxvkCsChunkSize = 16384;
-
+  
   /**
    * \brief Command stream operation
    * 
@@ -21,14 +19,14 @@ namespace dxvk {
    * that can be recorded into a command list.
    */
   class DxvkCsCmd {
-
+    
   public:
-
+    
     virtual ~DxvkCsCmd() { }
-
+    
     /**
      * \brief Retrieves next command in a command chain
-     *
+     * 
      * This can be used to quickly iterate
      * over commands within a chunk.
      * \returns Pointer the next command
@@ -36,27 +34,25 @@ namespace dxvk {
     DxvkCsCmd* next() const {
       return m_next;
     }
-
+    
     /**
-     * \brief Retrieves pointer to next chain
-     *
-     * Used to chain commands.
-     * \returns Pointer the next command
+     * \brief Sets next command in a command chain
+     * \param [in] next Next command
      */
-    DxvkCsCmd** chain() {
-      return &m_next;
+    void setNext(DxvkCsCmd* next) {
+      m_next = next;
     }
-
+    
     /**
      * \brief Executes embedded commands
      * \param [in] ctx The target context
      */
     virtual void exec(DxvkContext* ctx) = 0;
-
+    
   private:
-
+    
     DxvkCsCmd* m_next = nullptr;
-
+    
   };
   
   
@@ -67,7 +63,7 @@ namespace dxvk {
    * used to execute an embedded command.
    */
   template<typename T>
-  class DxvkCsTypedCmd : public DxvkCsCmd {
+  class alignas(16) DxvkCsTypedCmd : public DxvkCsCmd {
     
   public:
     
@@ -89,51 +85,6 @@ namespace dxvk {
 
 
   /**
-   * \brief Command data block
-   *
-   * Provides functionality to allocate a potentially growing
-   * array of structures for a command to traverse.
-   */
-  class DxvkCsDataBlock {
-    friend class DxvkCsChunk;
-  public:
-
-    /**
-     * \brief Number of structures allocated
-     * \returns Number of structures allocated
-     */
-    size_t count() const {
-      return m_structCount;
-    }
-
-    /**
-     * \brief Retrieves pointer to first structure
-     * \returns Untyped pointer to first structure
-     */
-    void* first() {
-      return reinterpret_cast<char*>(this) + m_dataOffset;
-    }
-
-    /**
-     * \brief Retrieves pointer to given structure
-     *
-     * \param [in] idx Structure index
-     * \returns Untyped pointer to given structure
-     */
-    void* at(uint32_t idx) {
-      return reinterpret_cast<char*>(this) + m_dataOffset + idx * uint32_t(m_structSize);
-    }
-
-  private:
-
-    uint32_t m_dataOffset  = 0u;
-    uint16_t m_structSize  = 0u;
-    uint16_t m_structCount = 0u;
-
-  };
-
-
-  /**
    * \brief Typed command with metadata
    * 
    * Stores a function object and an arbitrary
@@ -141,37 +92,30 @@ namespace dxvk {
    * submitting the command to a cs chunk.
    */
   template<typename T, typename M>
-  class DxvkCsDataCmd : public DxvkCsCmd {
+  class alignas(16) DxvkCsDataCmd : public DxvkCsCmd {
 
   public:
 
-    DxvkCsDataCmd(T&& cmd)
-    : m_command(std::move(cmd)) { }
-
-    ~DxvkCsDataCmd() {
-      auto data = reinterpret_cast<M*>(m_data.first());
-
-      for (size_t i = 0; i < m_data.count(); i++)
-        data[i].~M();
-    }
-
+    template<typename... Args>
+    DxvkCsDataCmd(T&& cmd, Args&&... args)
+    : m_command (std::move(cmd)),
+      m_data    (std::forward<Args>(args)...) { }
+    
     DxvkCsDataCmd             (DxvkCsDataCmd&&) = delete;
     DxvkCsDataCmd& operator = (DxvkCsDataCmd&&) = delete;
 
     void exec(DxvkContext* ctx) {
-      // No const here so that the function can move objects efficiently
-      m_command(ctx, reinterpret_cast<M*>(m_data.first()), m_data.count());
+      m_command(ctx, &m_data);
     }
 
-    DxvkCsDataBlock* data() {
+    M* data() {
       return &m_data;
     }
 
   private:
 
-    alignas(std::max(alignof(T), alignof(M)))
-    T               m_command;
-    DxvkCsDataBlock m_data;
+    T m_command;
+    M m_data;
 
   };
   
@@ -194,12 +138,12 @@ namespace dxvk {
    * Stores a list of commands.
    */
   class DxvkCsChunk : public RcObject {
-
+    constexpr static size_t MaxBlockSize = 16384;
   public:
-
+    
     DxvkCsChunk();
     ~DxvkCsChunk();
-
+    
     /**
      * \brief Checks whether the chunk is empty
      * \returns \c true if the chunk is empty
@@ -221,79 +165,51 @@ namespace dxvk {
     template<typename T>
     bool push(T& command) {
       using FuncType = DxvkCsTypedCmd<T>;
-      void* ptr = alloc<FuncType>(0u);
-
-      if (unlikely(!ptr))
+      
+      if (unlikely(m_commandOffset > MaxBlockSize - sizeof(FuncType)))
         return false;
-
-      auto next = new (ptr) FuncType(std::move(command));
-      append(next);
+      
+      DxvkCsCmd* tail = m_tail;
+      
+      m_tail = new (m_data + m_commandOffset)
+        FuncType(std::move(command));
+      
+      if (likely(tail != nullptr))
+        tail->setNext(m_tail);
+      else
+        m_head = m_tail;
+      
+      m_commandOffset += sizeof(FuncType);
       return true;
-    }
-
-    template<typename T>
-    bool push(T&& command) {
-      return push(command);
     }
 
     /**
      * \brief Adds a command with data to the chunk 
      * 
      * \param [in] command The command to add
-     * \param [in] count Number of items to allocate. Should be at least
-     *    1 in order to avoid the possibility of an empty command. Note
-     *    that all allocated structures \e must be initialized before
-     *    handing off the command to the worker thread.
+     * \param [in] args Constructor args for the data object
      * \returns Pointer to the data object, or \c nullptr
      */
-    template<typename M, typename T>
-    DxvkCsDataBlock* pushCmd(T& command, size_t count) {
-      size_t dataSize = count * sizeof(M);
-
-      // DxvkCsDataCmd is aligned to M
+    template<typename M, typename T, typename... Args>
+    M* pushCmd(T& command, Args&&... args) {
       using FuncType = DxvkCsDataCmd<T, M>;
-      void* ptr = alloc<FuncType>(dataSize);
-
-      if (unlikely(!ptr))
+      
+      if (unlikely(m_commandOffset > MaxBlockSize - sizeof(FuncType)))
         return nullptr;
+      
+      FuncType* func = new (m_data + m_commandOffset)
+        FuncType(std::move(command), std::forward<Args>(args)...);
+      
+      if (likely(m_tail != nullptr))
+        m_tail->setNext(func);
+      else
+        m_head = func;
+      m_tail = func;
 
-      // Command data is always packed tightly after the function object
-      auto next = new (ptr) FuncType(std::move(command));
-      append(next);
-
-      // Do some cursed pointer math here so that the block can figure out
-      // where its data is stored based on its own address. This saves a
-      // decent amount of CS chunk memory compared to storing a pointer.
-      auto block = next->data();
-      block->m_dataOffset = reinterpret_cast<uintptr_t>(&m_data[m_commandOffset - dataSize])
-                          - reinterpret_cast<uintptr_t>(block);
-      block->m_structSize = sizeof(M);
-      block->m_structCount = count;
-      return block;
+      m_commandOffset += sizeof(FuncType);
+      return func->data();
     }
-
-    /**
-     * \brief Allocates more storage for a data block
-     *
-     * The data bock \e must be owned by the last command added to
-     * the CS chunk, or this may override subsequent command data.
-     * \param [in] block Data block
-     * \param [in] count Number of structures to allocate
-     * \returns Pointer to first allocated structure, or \c nullptr
-     */
-    void* pushData(DxvkCsDataBlock* block, uint32_t count) {
-      uint32_t dataSize = block->m_structSize * count;
-
-      if (unlikely(m_commandOffset + dataSize > DxvkCsChunkSize))
-        return nullptr;
-
-      void* ptr = &m_data[m_commandOffset];
-      m_commandOffset += dataSize;
-
-      block->m_structCount += count;
-      return ptr;
-    }
-
+    
     /**
      * \brief Initializes chunk for recording
      * \param [in] flags Chunk flags
@@ -322,31 +238,13 @@ namespace dxvk {
     
     size_t m_commandOffset = 0;
     
-    DxvkCsCmd*  m_head = nullptr;
-    DxvkCsCmd** m_next = &m_head;
+    DxvkCsCmd* m_head = nullptr;
+    DxvkCsCmd* m_tail = nullptr;
 
     DxvkCsChunkFlags m_flags;
     
     alignas(64)
-    char m_data[DxvkCsChunkSize];
-
-    template<typename T>
-    void* alloc(size_t extra) {
-      if (alignof(T) > alignof(DxvkCsCmd))
-        m_commandOffset = dxvk::align(m_commandOffset, alignof(T));
-
-      if (unlikely(m_commandOffset + sizeof(T) + extra > DxvkCsChunkSize))
-        return nullptr;
-
-      void* result = &m_data[m_commandOffset];
-      m_commandOffset += sizeof(T) + extra;
-      return result;
-    }
-
-    void append(DxvkCsCmd* cmd) {
-      *m_next = cmd;
-      m_next = cmd->chain();
-    }
+    char m_data[MaxBlockSize];
     
   };
   
@@ -475,43 +373,13 @@ namespace dxvk {
 
 
   /**
-   * \brief Queue type
-   */
-  enum class DxvkCsQueue : uint32_t {
-    Ordered       = 0,  /// Normal queue with ordering guarantees
-    HighPriority  = 1,  /// High-priority queue
-  };
-
-
-  /**
-   * \brief Queued chunk entry
-   */
-  struct DxvkCsQueuedChunk {
-    DxvkCsChunkRef  chunk;
-    uint64_t        seq;
-  };
-
-
-  /**
-   * \brief Chunk queue
-   *
-   * Stores queued chunks as well as the sequence
-   * counters for synchronization.
-   */
-  struct DxvkCsChunkQueue {
-    std::vector<DxvkCsQueuedChunk> queue;
-    uint64_t                       seqDispatch = 0u;
-  };
-
-
-  /**
    * \brief Command stream thread
    * 
    * Spawns a thread that will execute
    * commands on a DXVK context. 
    */
   class DxvkCsThread {
-
+    
   public:
 
     constexpr static uint64_t SynchronizeAll = ~0ull;
@@ -530,24 +398,7 @@ namespace dxvk {
      * \returns Sequence number of the submission
      */
     uint64_t dispatchChunk(DxvkCsChunkRef&& chunk);
-
-    /**
-     * \brief Injects chunk into the command stream
-     *
-     * This is meant to be used when serialized execution is required
-     * from a thread other than the main thread recording rendering
-     * commands. The context can still be safely accessed, but chunks
-     * will not be executed in any particular oder. These chunks also
-     * do not contribute to the main timeline.
-     * \param [in] queue Which queue to add the chunk to
-     * \param [in] chunk The chunk to dispatch
-     * \param [in] synchronize Whether to wait for execution to complete
-     */
-    void injectChunk(
-            DxvkCsQueue       queue,
-            DxvkCsChunkRef&&  chunk,
-            bool              synchronize);
-
+    
     /**
      * \brief Synchronizes with the thread
      * 
@@ -566,45 +417,27 @@ namespace dxvk {
      * \returns Sequence number of last executed chunk
      */
     uint64_t lastSequenceNumber() const {
-      return m_seqOrdered.load(std::memory_order_acquire);
+      return m_chunksExecuted.load();
     }
 
   private:
-
+    
     Rc<DxvkDevice>              m_device;
     Rc<DxvkContext>             m_context;
 
-    alignas(CACHE_LINE_SIZE)
     dxvk::mutex                 m_counterMutex;
-
-    std::atomic<uint64_t>       m_seqHighPrio = { 0u };
-    std::atomic<uint64_t>       m_seqOrdered  = { 0u };
-
-    std::atomic<bool>           m_stopped     = { false };
-    std::atomic<bool>           m_hasHighPrio = { false };
-
-    alignas(CACHE_LINE_SIZE)
+    std::atomic<uint64_t>       m_chunksDispatched = { 0ull };
+    std::atomic<uint64_t>       m_chunksExecuted   = { 0ull };
+    
+    std::atomic<bool>           m_stopped = { false };
     dxvk::mutex                 m_mutex;
     dxvk::condition_variable    m_condOnAdd;
     dxvk::condition_variable    m_condOnSync;
-
-    DxvkCsChunkQueue            m_queueOrdered;
-    DxvkCsChunkQueue            m_queueHighPrio;
-
+    std::vector<DxvkCsChunkRef> m_chunksQueued;
     dxvk::thread                m_thread;
-
-    auto& getQueue(DxvkCsQueue which) {
-      return which == DxvkCsQueue::Ordered
-        ? m_queueOrdered : m_queueHighPrio;
-    }
-
-    auto& getCounter(DxvkCsQueue which) {
-      return which == DxvkCsQueue::Ordered
-        ? m_seqOrdered : m_seqHighPrio;
-    }
-
+    
     void threadFunc();
     
   };
-
+  
 }

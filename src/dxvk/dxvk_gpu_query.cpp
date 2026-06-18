@@ -1,4 +1,4 @@
-#include <utility>
+#include <algorithm>
 
 #include "dxvk_cmdlist.h"
 #include "dxvk_device.h"
@@ -6,42 +6,40 @@
 
 namespace dxvk {
 
-  void DxvkGpuQuery::free() {
-    m_allocator->freeQuery(this);
-  }
-
-
-
-
-  DxvkQuery::DxvkQuery(
-    const Rc<DxvkDevice>&             device,
-          VkQueryType                 type,
-          VkQueryControlFlags         flags,
-          uint32_t                    index)
-  : m_device(device), m_type(type), m_flags(flags), m_index(index) {
-
+  DxvkGpuQuery::DxvkGpuQuery(
+    const Rc<vk::DeviceFn>&   vkd,
+          VkQueryType         type,
+          VkQueryControlFlags flags,
+          uint32_t            index)
+  : m_vkd(vkd), m_type(type), m_flags(flags),
+    m_index(index), m_ended(false) {
+    
   }
   
   
-  DxvkQuery::~DxvkQuery() {
-
+  DxvkGpuQuery::~DxvkGpuQuery() {
+    for (size_t i = 0; i < m_handles.size(); i++)
+      m_handles[i].allocator->freeQuery(m_handles[i]);
   }
 
 
-  DxvkGpuQueryStatus DxvkQuery::getData(DxvkQueryData& queryData) {
+  bool DxvkGpuQuery::isIndexed() const {
+    return m_type == VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT;
+  }
+
+
+  DxvkGpuQueryStatus DxvkGpuQuery::getData(DxvkQueryData& queryData) {
     queryData = DxvkQueryData();
 
     // Callers must ensure that no begin call is pending when
     // calling this. Given that, once the query is ended, we
     // know that no other thread will access query state.
-    std::lock_guard lock(m_mutex);
-
-    if (!m_ended)
+    if (!m_ended.load(std::memory_order_acquire))
       return DxvkGpuQueryStatus::Invalid;
 
     // Accumulate query data from all available queries
-    DxvkGpuQueryStatus status = accumulateQueryDataLocked();
-
+    DxvkGpuQueryStatus status = this->accumulateQueryData();
+    
     // Treat non-precise occlusion queries as available
     // if we already know the result will be non-zero
     if ((status == DxvkGpuQueryStatus::Pending)
@@ -58,61 +56,64 @@ namespace dxvk {
   }
 
 
-  void DxvkQuery::begin() {
-    std::lock_guard lock(m_mutex);
-    m_queries.clear();
-    m_queryData = { };
-    m_ended = false;
+  void DxvkGpuQuery::begin(const Rc<DxvkCommandList>& cmd) {
+    // Not useful to enforce a memory order here since
+    // only the false->true transition is defined.
+    m_ended.store(false, std::memory_order_relaxed);
+
+    // Ideally we should have no queries left at this point,
+    // if we do, lifetime-track them with the command list.
+    for (size_t i = 0; i < m_handles.size(); i++)
+      cmd->trackGpuQuery(m_handles[i]);
+
+    m_handles.clear();
+
+    // Reset accumulated query data
+    m_queryData = DxvkQueryData();
+  }
+
+  
+  void DxvkGpuQuery::end() {
+    // Ensure that all prior writes are made available
+    m_ended.store(true, std::memory_order_release);
   }
 
 
-  void DxvkQuery::end() {
-    std::lock_guard lock(m_mutex);
-    m_ended = true;
-  }
-
-
-  void DxvkQuery::addGpuQuery(Rc<DxvkGpuQuery> query) {
+  void DxvkGpuQuery::addQueryHandle(const DxvkGpuQueryHandle& handle) {
     // Already accumulate available queries here in case
     // we already allocated a large number of queries
-    std::lock_guard lock(m_mutex);
+    if (m_handles.size() >= m_handles.MinCapacity)
+      this->accumulateQueryData();
 
-    if (m_queries.size() >= m_queries.EmbeddedCapacity)
-      accumulateQueryDataLocked();
-
-    m_queries.push_back(std::move(query));
+    m_handles.push_back(handle);
   }
 
 
-  DxvkGpuQueryStatus DxvkQuery::accumulateQueryDataForGpuQueryLocked(
-    const Rc<DxvkGpuQuery>&           query) {
-    auto vk = m_device->vkd();
-
+  DxvkGpuQueryStatus DxvkGpuQuery::accumulateQueryDataForHandle(
+    const DxvkGpuQueryHandle& handle) {
     DxvkQueryData tmpData = { };
 
     // Try to copy query data to temporary structure
-    std::pair<VkQueryPool, uint32_t> handle = query->getQuery();
-
-    VkResult result = vk->vkGetQueryPoolResults(
-      vk->device(), handle.first, handle.second, 1,
+    VkResult result = m_vkd->vkGetQueryPoolResults(m_vkd->device(),
+      handle.queryPool, handle.queryId, 1,
       sizeof(DxvkQueryData), &tmpData,
       sizeof(DxvkQueryData), VK_QUERY_RESULT_64_BIT);
-
+    
     if (result == VK_NOT_READY)
       return DxvkGpuQueryStatus::Pending;
     else if (result != VK_SUCCESS)
       return DxvkGpuQueryStatus::Failed;
-
+    
     // Add numbers to the destination structure
     switch (m_type) {
       case VK_QUERY_TYPE_OCCLUSION:
         m_queryData.occlusion.samplesPassed += tmpData.occlusion.samplesPassed;
         break;
-
+      
       case VK_QUERY_TYPE_TIMESTAMP:
         m_queryData.timestamp.time = tmpData.timestamp.time;
         break;
-
+      
       case VK_QUERY_TYPE_PIPELINE_STATISTICS:
         m_queryData.statistic.iaVertices       += tmpData.statistic.iaVertices;
         m_queryData.statistic.iaPrimitives     += tmpData.statistic.iaPrimitives;
@@ -141,7 +142,7 @@ namespace dxvk {
   }
 
 
-  DxvkGpuQueryStatus DxvkQuery::accumulateQueryDataLocked() {
+  DxvkGpuQueryStatus DxvkGpuQuery::accumulateQueryData() {
     DxvkGpuQueryStatus status = DxvkGpuQueryStatus::Available;
 
     // Process available queries and return them to the
@@ -149,8 +150,8 @@ namespace dxvk {
     // number of Vulkan queries in flight.
     size_t queriesAvailable = 0;
 
-    while (queriesAvailable < m_queries.size()) {
-      status = accumulateQueryDataForGpuQueryLocked(m_queries[queriesAvailable]);
+    while (queriesAvailable < m_handles.size()) {
+      status = this->accumulateQueryDataForHandle(m_handles[queriesAvailable]);
 
       if (status != DxvkGpuQueryStatus::Available)
         break;
@@ -159,10 +160,13 @@ namespace dxvk {
     }
 
     if (queriesAvailable) {
-      for (size_t i = queriesAvailable; i < m_queries.size(); i++)
-        m_queries[i - queriesAvailable] = m_queries[i];
+      for (size_t i = 0; i < queriesAvailable; i++)
+        m_handles[i].allocator->freeQuery(m_handles[i]);
 
-      m_queries.resize(m_queries.size() - queriesAvailable);
+      for (size_t i = queriesAvailable; i < m_handles.size(); i++)
+        m_handles[i - queriesAvailable] = m_handles[i];
+
+      m_handles.resize(m_handles.size() - queriesAvailable);
     }
 
     return status;
@@ -172,10 +176,11 @@ namespace dxvk {
   
   
   DxvkGpuQueryAllocator::DxvkGpuQueryAllocator(
-          DxvkDevice*                 device,
-          VkQueryType                 queryType,
-          uint32_t                    queryPoolSize)
+          DxvkDevice*         device,
+          VkQueryType         queryType,
+          uint32_t            queryPoolSize)
   : m_device        (device),
+    m_vkd           (device->vkd()),
     m_queryType     (queryType),
     m_queryPoolSize (queryPoolSize) {
 
@@ -183,34 +188,35 @@ namespace dxvk {
 
   
   DxvkGpuQueryAllocator::~DxvkGpuQueryAllocator() {
-    auto vk = m_device->vkd();
-
-    for (auto& p : m_pools) {
-      vk->vkDestroyQueryPool(vk->device(), p.pool, nullptr);
-      delete[] p.queries;
+    for (VkQueryPool pool : m_pools) {
+      m_vkd->vkDestroyQueryPool(
+        m_vkd->device(), pool, nullptr);
     }
   }
 
   
-  Rc<DxvkGpuQuery> DxvkGpuQueryAllocator::allocQuery() {
+  DxvkGpuQueryHandle DxvkGpuQueryAllocator::allocQuery() {
     std::lock_guard<dxvk::mutex> lock(m_mutex);
 
-    if (!m_free)
-      createQueryPool();
+    if (m_handles.size() == 0)
+      this->createQueryPool();
 
-    return std::exchange(m_free, m_free->m_next);
+    if (m_handles.size() == 0)
+      return DxvkGpuQueryHandle();
+    
+    DxvkGpuQueryHandle result = m_handles.back();
+    m_handles.pop_back();
+    return result;
   }
 
 
-  void DxvkGpuQueryAllocator::freeQuery(DxvkGpuQuery* query) {
+  void DxvkGpuQueryAllocator::freeQuery(DxvkGpuQueryHandle handle) {
     std::lock_guard<dxvk::mutex> lock(m_mutex);
-    query->m_next = std::exchange(m_free, query);
+    m_handles.push_back(handle);
   }
 
-
+  
   void DxvkGpuQueryAllocator::createQueryPool() {
-    auto vk = m_device->vkd();
-
     VkQueryPoolCreateInfo info = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
     info.queryType  = m_queryType;
     info.queryCount = m_queryPoolSize;
@@ -232,26 +238,15 @@ namespace dxvk {
 
     VkQueryPool queryPool = VK_NULL_HANDLE;
 
-    if (vk->vkCreateQueryPool(vk->device(), &info, nullptr, &queryPool)) {
+    if (m_vkd->vkCreateQueryPool(m_vkd->device(), &info, nullptr, &queryPool)) {
       Logger::err(str::format("DXVK: Failed to create query pool (", m_queryType, "; ", m_queryPoolSize, ")"));
       return;
     }
 
-    auto& pool = m_pools.emplace_back();
-    pool.pool = queryPool;
-    pool.queries = new DxvkGpuQuery [m_queryPoolSize];
+    m_pools.push_back(queryPool);
 
-    for (uint32_t i = 0; i < m_queryPoolSize; i++) {
-      auto& query = pool.queries[i];
-      query.m_allocator = this;
-      query.m_pool = queryPool;
-      query.m_index = i;
-
-      if (i + 1u < m_queryPoolSize)
-        query.m_next = &pool.queries[i + 1u];
-    }
-
-    m_free = &pool.queries[0u];
+    for (uint32_t i = 0; i < m_queryPoolSize; i++)
+      m_handles.push_back({ this, queryPool, i });
   }
 
 
@@ -271,7 +266,7 @@ namespace dxvk {
   }
 
   
-  Rc<DxvkGpuQuery> DxvkGpuQueryPool::allocQuery(VkQueryType type) {
+  DxvkGpuQueryHandle DxvkGpuQueryPool::allocQuery(VkQueryType type) {
     switch (type) {
       case VK_QUERY_TYPE_OCCLUSION:
         return m_occlusion.allocQuery();
@@ -283,7 +278,7 @@ namespace dxvk {
         return m_xfbStream.allocQuery();
       default:
         Logger::err(str::format("DXVK: Unhandled query type: ", type));
-        return nullptr;
+        return DxvkGpuQueryHandle();
     }
   }
 
@@ -291,7 +286,7 @@ namespace dxvk {
 
 
   DxvkGpuQueryManager::DxvkGpuQueryManager(DxvkGpuQueryPool& pool)
-  : m_pool(&pool) {
+  : m_pool(&pool), m_activeTypes(0) {
 
   }
 
@@ -303,56 +298,53 @@ namespace dxvk {
 
   void DxvkGpuQueryManager::enableQuery(
     const Rc<DxvkCommandList>&  cmd,
-    const Rc<DxvkQuery>&        query) {
-    query->begin();
+    const Rc<DxvkGpuQuery>&     query) {
+    query->begin(cmd);
 
-    uint32_t index = getQueryTypeIndex(query->type(), query->index());
-
-    m_activeQueries[index].queries.push_back(query);
+    m_activeQueries.push_back(query);
 
     if (m_activeTypes & getQueryTypeBit(query->type()))
-      restartQueries(cmd, query->type(), query->index());
+      beginSingleQuery(cmd, query);
   }
 
   
   void DxvkGpuQueryManager::disableQuery(
     const Rc<DxvkCommandList>&  cmd,
-    const Rc<DxvkQuery>&        query) {
-    uint32_t index = getQueryTypeIndex(query->type(), query->index());
-
-    for (auto& q : m_activeQueries[index].queries) {
-      if (q == query) {
-        q = std::move(m_activeQueries[index].queries.back());
-        m_activeQueries[index].queries.pop_back();
-        break;
-      }
+    const Rc<DxvkGpuQuery>&     query) {
+    auto iter = std::find(
+      m_activeQueries.begin(),
+      m_activeQueries.end(),
+      query);
+    
+    if (iter != m_activeQueries.end()) {
+      if (m_activeTypes & getQueryTypeBit((*iter)->type()))
+        endSingleQuery(cmd, query);
+      m_activeQueries.erase(iter);
+      
+      query->end();
     }
-
-    if (m_activeTypes & getQueryTypeBit(query->type()))
-      restartQueries(cmd, query->type(), query->index());
-
-    query->end();
   }
 
 
   void DxvkGpuQueryManager::writeTimestamp(
     const Rc<DxvkCommandList>&  cmd,
-    const Rc<DxvkQuery>&        query) {
-    Rc<DxvkGpuQuery> q = m_pool->allocQuery(query->type());
-
-    query->begin();
-    query->addGpuQuery(q);
+    const Rc<DxvkGpuQuery>&     query) {
+    DxvkGpuQueryHandle handle = m_pool->allocQuery(query->type());
+    
+    query->begin(cmd);
+    query->addQueryHandle(handle);
     query->end();
 
-    std::pair<VkQueryPool, uint32_t> handle = q->getQuery();
-
-    cmd->resetQuery(handle.first, handle.second);
-
-    cmd->cmdWriteTimestamp(DxvkCmdBuffer::ExecBuffer,
+    cmd->resetQuery(
+      handle.queryPool,
+      handle.queryId);
+    
+    cmd->cmdWriteTimestamp(
       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-      handle.first, handle.second);
-
-    cmd->track(std::move(q));
+      handle.queryPool,
+      handle.queryId);
+    
+    cmd->trackResource<DxvkAccess::None>(query);
   }
 
 
@@ -361,11 +353,9 @@ namespace dxvk {
           VkQueryType           type) {
     m_activeTypes |= getQueryTypeBit(type);
 
-    if (likely(type != VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT)) {
-      restartQueries(cmd, type, 0);
-    } else {
-      for (uint32_t i = 0; i < 4; i++)
-        restartQueries(cmd, type, i);
+    for (size_t i = 0; i < m_activeQueries.size(); i++) {
+      if (m_activeQueries[i]->type() == type)
+        beginSingleQuery(cmd, m_activeQueries[i]);
     }
   }
 
@@ -375,76 +365,88 @@ namespace dxvk {
           VkQueryType           type) {
     m_activeTypes &= ~getQueryTypeBit(type);
 
-    if (likely(type != VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT)) {
-      restartQueries(cmd, type, 0);
-    } else {
-      for (uint32_t i = 0; i < 4; i++)
-        restartQueries(cmd, type, i);
+    for (size_t i = 0; i < m_activeQueries.size(); i++) {
+      if (m_activeQueries[i]->type() == type)
+        endSingleQuery(cmd, m_activeQueries[i]);
     }
   }
 
 
-  void DxvkGpuQueryManager::restartQueries(
+  void DxvkGpuQueryManager::beginSingleQuery(
     const Rc<DxvkCommandList>&  cmd,
-          VkQueryType           type,
-          uint32_t              index) {
-    auto& array = m_activeQueries[getQueryTypeIndex(type, index)];
-
-    // End active GPU query for the given type and index
-    if (array.gpuQuery) {
-      auto handle = array.gpuQuery->getQuery();
-
-      if (type == VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT)
-        cmd->cmdEndQueryIndexed(handle.first, handle.second, index);
-      else
-        cmd->cmdEndQuery(handle.first, handle.second);
-
-      array.gpuQuery = nullptr;
+    const Rc<DxvkGpuQuery>&     query) {
+    DxvkGpuQueryHandle handle = m_pool->allocQuery(query->type());
+    
+    cmd->resetQuery(
+      handle.queryPool,
+      handle.queryId);
+    
+    if (query->isIndexed()) {
+      cmd->cmdBeginQueryIndexed(
+        handle.queryPool,
+        handle.queryId,
+        query->flags(),
+        query->index());
+    } else {
+      cmd->cmdBeginQuery(
+        handle.queryPool,
+        handle.queryId,
+        query->flags());
     }
-
-    // If the query type is still active, allocate, reset and begin
-    // a new GPU query and assign it to all virtual queries.
-    if ((m_activeTypes & getQueryTypeBit(type)) && !array.queries.empty()) {
-      array.gpuQuery = m_pool->allocQuery(type);
-      auto handle = array.gpuQuery->getQuery();
-
-      // If any active occlusion query has the precise flag set, we need
-      // to respect it, otherwise just use a regular occlusion query.
-      VkQueryControlFlags flags = 0u;
-
-      for (const auto& q : array.queries) {
-        flags |= q->flags();
-        q->addGpuQuery(array.gpuQuery);
-      }
-
-      // Actually reset and begin the query
-      cmd->resetQuery(handle.first, handle.second);
-
-      if (type == VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT)
-        cmd->cmdBeginQueryIndexed(handle.first, handle.second, flags, index);
-      else
-        cmd->cmdBeginQuery(handle.first, handle.second, flags);
-
-      cmd->track(array.gpuQuery);
-    }
+    
+    query->addQueryHandle(handle);
   }
 
 
+  void DxvkGpuQueryManager::endSingleQuery(
+    const Rc<DxvkCommandList>&  cmd,
+    const Rc<DxvkGpuQuery>&     query) {
+    DxvkGpuQueryHandle handle = query->handle();
+    
+    if (query->isIndexed()) {
+      cmd->cmdEndQueryIndexed(
+        handle.queryPool,
+        handle.queryId,
+        query->index());
+    } else {
+      cmd->cmdEndQuery(
+        handle.queryPool,
+        handle.queryId);
+    }
+
+    cmd->trackResource<DxvkAccess::None>(query);
+  }
+  
+  
   uint32_t DxvkGpuQueryManager::getQueryTypeBit(
           VkQueryType           type) {
-    return 1u << getQueryTypeIndex(type, 0u);
+    switch (type) {
+      case VK_QUERY_TYPE_OCCLUSION:                     return 0x01;
+      case VK_QUERY_TYPE_PIPELINE_STATISTICS:           return 0x02;
+      case VK_QUERY_TYPE_TIMESTAMP:                     return 0x04;
+      case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT: return 0x08;
+      default:                                          return 0;
+    }
   }
 
 
-  uint32_t DxvkGpuQueryManager::getQueryTypeIndex(
-          VkQueryType           type,
-          uint32_t              index) {
-    switch (type) {
-      case VK_QUERY_TYPE_OCCLUSION:                     return 0u;
-      case VK_QUERY_TYPE_PIPELINE_STATISTICS:           return 1u;
-      case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT: return 2u + index;
-      default:                                          return 0u;
-    }
+
+
+  DxvkGpuQueryTracker::DxvkGpuQueryTracker() { }
+  DxvkGpuQueryTracker::~DxvkGpuQueryTracker() { }
+  
+
+  void DxvkGpuQueryTracker::trackQuery(DxvkGpuQueryHandle handle) {
+    if (handle.queryPool)
+      m_handles.push_back(handle);
+  }
+
+
+  void DxvkGpuQueryTracker::reset() {
+    for (DxvkGpuQueryHandle handle : m_handles)
+      handle.allocator->freeQuery(handle);
+    
+    m_handles.clear();
   }
 
 }

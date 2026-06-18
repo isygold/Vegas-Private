@@ -4,8 +4,7 @@ namespace dxvk {
 
   D3D11DeviceContextState::D3D11DeviceContextState(
           D3D11Device*         pDevice)
-  : D3D11DeviceChild<ID3DDeviceContextState>(pDevice),
-    m_destructionNotifier(this) {
+  : D3D11DeviceChild<ID3DDeviceContextState>(pDevice) {
 
   }
 
@@ -27,11 +26,6 @@ namespace dxvk {
      || riid == __uuidof(ID3D11DeviceChild)
      || riid == __uuidof(ID3DDeviceContextState)) {
       *ppvObject = ref(this);
-      return S_OK;
-    }
-
-    if (riid == __uuidof(ID3DDestructionNotifier)) {
-      *ppvObject = ref(&m_destructionNotifier);
       return S_OK;
     }
 

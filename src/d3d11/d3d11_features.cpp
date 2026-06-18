@@ -15,7 +15,7 @@ namespace dxvk {
     const D3D11Options&         Options,
           D3D_FEATURE_LEVEL     FeatureLevel)
   : m_features    (Adapter->features()),
-    m_properties  (Adapter->deviceProperties()) {
+    m_properties  (Adapter->devicePropertiesExt()) {
     // Assume no TBDR. DXVK does not optimize for TBDR architectures
     // anyway, and D3D11 does not really provide meaningful support.
     m_architectureInfo.TileBasedDeferredRenderer          = FALSE;
@@ -108,20 +108,16 @@ namespace dxvk {
     m_gpuVirtualAddress.MaxGPUVirtualAddressBitsPerProcess = 40;
 
     // Marker support only depends on the debug utils extension
-    m_marker.Profile = !Instance->debugFlags().isClear();
+    m_marker.Profile = static_cast<bool>(Instance->extensions().extDebugUtils);
 
     // DXVK will keep all shaders in memory once created, and all Vulkan
     // drivers that we know of that can run DXVK have an on-disk cache.
     m_shaderCache.SupportFlags = D3D11_SHADER_CACHE_SUPPORT_AUTOMATIC_INPROC_CACHE
                                | D3D11_SHADER_CACHE_SUPPORT_AUTOMATIC_DISK_CACHE;
 
-    // 16-bit precision is supported on capable devices
-    auto minPrecision = Adapter->features().core.features.shaderInt16 && Adapter->features().vk12.shaderFloat16
-      ? D3D11_SHADER_MIN_PRECISION_16_BIT
-      : D3D11_SHADER_MIN_PRECISION_SUPPORT(0u);
-
-    m_shaderMinPrecision.PixelShaderMinPrecision          = minPrecision;
-    m_shaderMinPrecision.AllOtherShaderStagesMinPrecision = minPrecision;
+    // DXVK does not support min precision
+    m_shaderMinPrecision.PixelShaderMinPrecision          = 0;
+    m_shaderMinPrecision.AllOtherShaderStagesMinPrecision = 0;
 
     // Report native support for command lists by default. Deferred context
     // usage can be beneficial for us as ExecuteCommandList has low overhead,

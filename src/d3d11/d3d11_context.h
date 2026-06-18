@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <type_traits>
 #include <vector>
 
@@ -73,12 +72,7 @@ namespace dxvk {
     template<typename T> friend class D3D11DeviceContextExt;
     template<typename T> friend class D3D11UserDefinedAnnotation;
 
-    // Use a local staging buffer to handle tiny uploads, most
-    // of the time we're fine with hitting the global allocator
-    constexpr static VkDeviceSize StagingBufferSize = 256ull << 10;
-  protected:
-    // Compile-time debug flag to force lazy binding on (True) or off (False)
-    constexpr static Tristate DebugLazyBinding = Tristate::Auto;
+    constexpr static VkDeviceSize StagingBufferSize = 4ull << 20;
   public:
     
     D3D11CommonContext(
@@ -108,11 +102,6 @@ namespace dxvk {
       const D3D11_RECT*                      pRects,
             UINT                             NumRects);
 
-    void STDMETHODCALLTYPE DiscardViewBase(
-            ID3D11View*                      pResourceView,
-      const D3D11_RECT*                      pRects,
-            UINT                             NumRects);
-
     void STDMETHODCALLTYPE CopySubresourceRegion(
             ID3D11Resource*                   pDstResource,
             UINT                              DstSubresource,
@@ -124,17 +113,6 @@ namespace dxvk {
       const D3D11_BOX*                        pSrcBox);
 
     void STDMETHODCALLTYPE CopySubresourceRegion1(
-            ID3D11Resource*                   pDstResource,
-            UINT                              DstSubresource,
-            UINT                              DstX,
-            UINT                              DstY,
-            UINT                              DstZ,
-            ID3D11Resource*                   pSrcResource,
-            UINT                              SrcSubresource,
-      const D3D11_BOX*                        pSrcBox,
-            UINT                              CopyFlags);
-
-    void STDMETHODCALLTYPE CopySubresourceRegionBase(
             ID3D11Resource*                   pDstResource,
             UINT                              DstSubresource,
             UINT                              DstX,
@@ -790,50 +768,19 @@ namespace dxvk {
     D3D11ContextState           m_state;
     UINT                        m_flags;
 
-    uint32_t                    m_maxTessFactor = 0u;
-
     DxvkStagingBuffer           m_staging;
-
-    D3D11CmdType                m_csDataType = D3D11CmdType::None;
+    Rc<DxvkDataBuffer>          m_updateBuffer;
 
     DxvkCsChunkFlags            m_csFlags;
     DxvkCsChunkRef              m_csChunk;
-    DxvkCsDataBlock*            m_csData = nullptr;
-
-    uint64_t                    m_estimatedCost = 0u;
-
-    DxvkLocalAllocationCache    m_allocationCache;
-
-    D3D11ShaderStageState<Rc<DxvkBuffer>> m_instanceData;
+    D3D11CmdData*               m_cmdData;
 
     DxvkCsChunkRef AllocCsChunk();
     
+    DxvkDataSlice AllocUpdateBufferSlice(size_t Size);
+    
     DxvkBufferSlice AllocStagingBuffer(
             VkDeviceSize                      Size);
-
-    void ApplyDirtyConstantBuffers(
-            D3D11ShaderType                   Stage,
-      const D3D11BindingMask&                 BoundMask,
-            D3D11BindingMask&                 DirtyMask);
-
-    void ApplyDirtySamplers(
-            D3D11ShaderType                   Stage,
-      const D3D11BindingMask&                 BoundMask,
-            D3D11BindingMask&                 DirtyMask);
-
-    void ApplyDirtyShaderResources(
-            D3D11ShaderType                   Stage,
-      const D3D11BindingMask&                 BoundMask,
-            D3D11BindingMask&                 DirtyMask);
-
-    void ApplyDirtyUnorderedAccessViews(
-            D3D11ShaderType                   Stage,
-      const D3D11BindingMask&                 BoundMask,
-            D3D11BindingMask&                 DirtyMask);
-
-    void ApplyDirtyGraphicsBindings();
-
-    void ApplyDirtyComputeBindings();
 
     void ApplyInputLayout();
     
@@ -853,13 +800,7 @@ namespace dxvk {
 
     void ApplyViewportState();
 
-    void BatchDraw(
-      const VkDrawIndirectCommand&            draw);
-
-    void BatchDrawIndexed(
-      const VkDrawIndexedIndirectCommand&     draw);
-
-    template<D3D11ShaderType ShaderStage>
+    template<DxbcProgramType ShaderStage>
     void BindShader(
       const D3D11CommonShader*                pShaderModule);
 
@@ -896,54 +837,40 @@ namespace dxvk {
             D3D11Buffer*                      pBuffer,
             UINT                              Offset);
 
+    template<DxbcProgramType ShaderStage>
     void BindConstantBuffer(
-            D3D11ShaderType                   ShaderStage,
             UINT                              Slot,
             D3D11Buffer*                      pBuffer,
             UINT                              Offset,
             UINT                              Length);
 
+    template<DxbcProgramType ShaderStage>
     void BindConstantBufferRange(
-            D3D11ShaderType                   ShaderStage,
             UINT                              Slot,
             UINT                              Offset,
             UINT                              Length);
 
+    template<DxbcProgramType ShaderStage>
     void BindSampler(
-            D3D11ShaderType                   ShaderStage,
             UINT                              Slot,
             D3D11SamplerState*                pSampler);
 
+    template<DxbcProgramType ShaderStage>
     void BindShaderResource(
-            D3D11ShaderType                   ShaderStage,
             UINT                              Slot,
             D3D11ShaderResourceView*          pResource);
 
+    template<DxbcProgramType ShaderStage>
     void BindUnorderedAccessView(
-            D3D11ShaderType                   ShaderStage,
-            UINT                              Slot,
-            D3D11UnorderedAccessView*         pUav);
-
-    void ClearImageView(
-            Rc<DxvkImageView>                 View,
-      const FLOAT                             Color[4],
-      const D3D11_RECT*                       pRects,
-            UINT                              NumRects);
-
-    void ClearBufferView(
-            Rc<DxvkBufferView>                View,
-      const FLOAT                             Color[4],
-      const D3D11_RECT*                       pRects,
-            UINT                              NumRects);
+            UINT                              UavSlot,
+            D3D11UnorderedAccessView*         pUav,
+            UINT                              CtrSlot,
+            UINT                              Counter);
 
     VkClearValue ConvertColorValue(
       const FLOAT                             Color[4],
       const DxvkFormatInfo*                   pFormatInfo);
-
-    VkRect2D ConvertRect(
-            D3D11_RECT                        Rect,
-            VkExtent2D                        Extent);
-
+    
     void CopyBuffer(
             D3D11Buffer*                      pDstBuffer,
             VkDeviceSize                      DstOffset,
@@ -967,36 +894,6 @@ namespace dxvk {
             DxvkBufferSlice                   BufferSlice,
             UINT                              Flags);
 
-    template<typename T>
-    bool DirtyBindingGeneric(
-            D3D11ShaderType                   ShaderStage,
-            T                                 BoundMask,
-            T&                                DirtyMask,
-            T                                 DirtyBit,
-            bool                              IsNull);
-
-    bool DirtyConstantBuffer(
-            D3D11ShaderType                   ShaderStage,
-            uint32_t                          Slot,
-            bool                              IsNull);
-
-    bool DirtySampler(
-            D3D11ShaderType                   ShaderStage,
-            uint32_t                          Slot,
-            bool                              IsNull);
-
-    bool DirtyShaderResource(
-            D3D11ShaderType                   ShaderStage,
-            uint32_t                          Slot,
-            bool                              IsNull);
-
-    bool DirtyComputeUnorderedAccessView(
-            uint32_t                          Slot,
-            bool                              IsNull);
-
-    bool DirtyGraphicsUnorderedAccessView(
-            uint32_t                          Slot);
-
     void DiscardBuffer(
             ID3D11Resource*                   pResource);
 
@@ -1004,7 +901,7 @@ namespace dxvk {
             ID3D11Resource*                   pResource,
             UINT                              Subresource);
 
-    template<D3D11ShaderType ShaderStage>
+    template<DxbcProgramType ShaderStage>
     void GetConstantBuffers(
             UINT                              StartSlot,
             UINT                              NumBuffers,
@@ -1012,13 +909,13 @@ namespace dxvk {
             UINT*                             pFirstConstant,
             UINT*                             pNumConstants);
 
-    template<D3D11ShaderType ShaderStage>
+    template<DxbcProgramType ShaderStage>
     void GetShaderResources(
             UINT                              StartSlot,
             UINT                              NumViews,
             ID3D11ShaderResourceView**        ppShaderResourceViews);
 
-    template<D3D11ShaderType ShaderStage>
+    template<DxbcProgramType ShaderStage>
     void GetSamplers(
             UINT                              StartSlot,
             UINT                              NumSamplers,
@@ -1029,19 +926,13 @@ namespace dxvk {
 
     D3D11MaxUsedBindings GetMaxUsedBindings();
 
-    bool HasDirtyComputeBindings();
-
-    bool HasDirtyGraphicsBindings();
-
     void ResetCommandListState();
 
     void ResetContextState();
 
-    void ResetDirtyTracking();
-
     void ResetStagingBuffer();
 
-    template<D3D11ShaderType ShaderStage, typename T>
+    template<DxbcProgramType ShaderStage, typename T>
     void ResolveSrvHazards(
             T*                                pView);
 
@@ -1061,25 +952,25 @@ namespace dxvk {
 
     void RestoreCommandListState();
     
-    void RestoreConstantBuffers(
-            D3D11ShaderType                   Stage);
+    template<DxbcProgramType Stage>
+    void RestoreConstantBuffers();
     
-    void RestoreSamplers(
-            D3D11ShaderType                   Stage);
-
-    void RestoreShaderResources(
-            D3D11ShaderType                   Stage);
-
-    void RestoreUnorderedAccessViews(
-            D3D11ShaderType                   Stage);
-
-    template<D3D11ShaderType ShaderStage>
+    template<DxbcProgramType Stage>
+    void RestoreSamplers();
+    
+    template<DxbcProgramType Stage>
+    void RestoreShaderResources();
+    
+    template<DxbcProgramType Stage>
+    void RestoreUnorderedAccessViews();
+    
+    template<DxbcProgramType ShaderStage>
     void SetConstantBuffers(
             UINT                              StartSlot,
             UINT                              NumBuffers,
             ID3D11Buffer* const*              ppConstantBuffers);
 
-    template<D3D11ShaderType ShaderStage>
+    template<DxbcProgramType ShaderStage>
     void SetConstantBuffers1(
             UINT                              StartSlot,
             UINT                              NumBuffers,
@@ -1087,13 +978,13 @@ namespace dxvk {
       const UINT*                             pFirstConstant,
       const UINT*                             pNumConstants);
 
-    template<D3D11ShaderType ShaderStage>
+    template<DxbcProgramType ShaderStage>
     void SetShaderResources(
             UINT                              StartSlot,
             UINT                              NumResources,
             ID3D11ShaderResourceView* const*  ppResources);
 
-    template<D3D11ShaderType ShaderStage>
+    template<DxbcProgramType ShaderStage>
     void SetSamplers(
             UINT                              StartSlot,
             UINT                              NumSamplers,
@@ -1112,19 +1003,13 @@ namespace dxvk {
             ID3D11Buffer*                     pBufferForArgs,
             ID3D11Buffer*                     pBufferForCount);
 
-    void SyncImage(
-      const Rc<DxvkImage>&                    DstImage,
-      const VkImageSubresourceLayers&         DstLayers,
-      const Rc<DxvkImage>&                    SrcImage,
-      const VkImageSubresourceLayers&         SrcLayers);
-
     bool TestRtvUavHazards(
             UINT                              NumRTVs,
             ID3D11RenderTargetView* const*    ppRTVs,
             UINT                              NumUAVs,
             ID3D11UnorderedAccessView* const* ppUAVs);
 
-    template<D3D11ShaderType ShaderStage>
+    template<DxbcProgramType ShaderStage>
     bool TestSrvHazards(
             D3D11ShaderResourceView*          pView);
 
@@ -1161,89 +1046,68 @@ namespace dxvk {
             UINT                              SrcDepthPitch,
             UINT                              CopyFlags);
 
-    void UpdateUnorderedAccessViewCounter(
-            D3D11UnorderedAccessView*         pUav,
-            uint32_t                          CounterValue);
-
     bool ValidateRenderTargets(
             UINT                              NumViews,
             ID3D11RenderTargetView* const*    ppRenderTargetViews,
             ID3D11DepthStencilView*           pDepthStencilView);
 
-    template<D3D11ShaderType ShaderStage>
-    void SetClassInstances(
-      const D3D11CommonShader*                pShader,
-            ID3D11ClassInstance* const*       ppClassInstances,
-            UINT                              NumClassInstances);
+    static void InitDefaultPrimitiveTopology(
+            DxvkInputAssemblyState*           pIaState);
 
-    template<D3D11ShaderType ShaderStage>
-    void GetClassInstances(
-            ID3D11ClassInstance**             ppClassInstances,
-            UINT*                             pNumClassInstances);
+    static void InitDefaultRasterizerState(
+            DxvkRasterizerState*              pRsState);
 
-    Rc<DxvkBuffer> AllocInstanceDataBuffer(
-            D3D11ShaderType                   ShaderStage);
+    static void InitDefaultDepthStencilState(
+            DxvkDepthStencilState*            pDsState);
 
-    force_inline void AddCost(uint64_t Value) {
-      m_estimatedCost += Value;
-    }
-
-    static DxvkInputAssemblyState InitDefaultPrimitiveTopology();
-
-    static DxvkRasterizerState InitDefaultRasterizerState();
-
-    static DxvkDepthStencilState InitDefaultDepthStencilState();
-
-    static DxvkMultisampleState InitDefaultMultisampleState(
+    static void InitDefaultBlendState(
+            DxvkBlendMode*                    pCbState,
+            DxvkLogicOpState*                 pLoState,
+            DxvkMultisampleState*             pMsState,
             UINT                              SampleMask);
 
-    static DxvkLogicOpState InitDefaultLogicOpState();
-
-    static DxvkBlendMode InitDefaultBlendState();
-
-    template<bool AllowFlush = true, typename Cmd>
+    template<bool AllowFlush = !IsDeferred, typename Cmd>
     void EmitCs(Cmd&& command) {
-      if (unlikely(m_csDataType != D3D11CmdType::None)) {
-        m_csData = nullptr;
-        m_csDataType = D3D11CmdType::None;
-      }
+      m_cmdData = nullptr;
 
       if (unlikely(!m_csChunk->push(command))) {
         GetTypedContext()->EmitCsChunk(std::move(m_csChunk));
         m_csChunk = AllocCsChunk();
 
-        if constexpr (!IsDeferred && AllowFlush)
+        if constexpr (AllowFlush)
           GetTypedContext()->ConsiderFlush(GpuFlushType::ImplicitWeakHint);
 
         m_csChunk->push(command);
       }
     }
 
-    template<typename M, bool AllowFlush = true, typename Cmd>
-    void EmitCsCmd(D3D11CmdType type, size_t count, Cmd&& command) {
-      m_csDataType = type;
-      m_csData = m_csChunk->pushCmd<M, Cmd>(command, count);
+    template<typename M, bool AllowFlush = !IsDeferred, typename Cmd, typename... Args>
+    M* EmitCsCmd(Cmd&& command, Args&&... args) {
+      M* data = m_csChunk->pushCmd<M, Cmd, Args...>(
+        command, std::forward<Args>(args)...);
 
-      if (unlikely(!m_csData)) {
+      if (unlikely(!data)) {
         GetTypedContext()->EmitCsChunk(std::move(m_csChunk));
         m_csChunk = AllocCsChunk();
 
-        if constexpr (!IsDeferred && AllowFlush)
+        if constexpr (AllowFlush)
           GetTypedContext()->ConsiderFlush(GpuFlushType::ImplicitWeakHint);
 
         // We must record this command after the potential
         // flush since the caller may still access the data
-        m_csData = m_csChunk->pushCmd<M, Cmd>(command, count);
+        data = m_csChunk->pushCmd<M, Cmd, Args...>(
+          command, std::forward<Args>(args)...);
       }
+
+      m_cmdData = data;
+      return data;
     }
 
     void FlushCsChunk() {
       if (likely(!m_csChunk->empty())) {
-        m_csData = nullptr;
-        m_csDataType = D3D11CmdType::None;
-
         GetTypedContext()->EmitCsChunk(std::move(m_csChunk));
         m_csChunk = AllocCsChunk();
+        m_cmdData = nullptr;
       }
     }
 

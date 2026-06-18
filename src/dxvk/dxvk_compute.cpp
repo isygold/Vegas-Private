@@ -8,6 +8,7 @@
 #include "dxvk_device.h"
 #include "dxvk_graphics.h"
 #include "dxvk_pipemanager.h"
+#include "dxvk_state_cache.h"
 
 namespace dxvk {
   
@@ -15,39 +16,40 @@ namespace dxvk {
           DxvkDevice*                 device,
           DxvkPipelineManager*        pipeMgr,
           DxvkComputePipelineShaders  shaders,
+          DxvkBindingLayoutObjects*   layout,
           DxvkShaderPipelineLibrary*  library)
   : m_device        (device),
+    m_stateCache    (&pipeMgr->m_stateCache),
     m_stats         (&pipeMgr->m_stats),
     m_library       (library),
+    m_libraryHandle (VK_NULL_HANDLE),
     m_shaders       (std::move(shaders)),
-    m_layout        (device, pipeMgr, m_shaders.cs->getLayout()),
-    m_debugName     (createDebugName()) {
+    m_bindings      (layout) {
 
   }
   
   
   DxvkComputePipeline::~DxvkComputePipeline() {
-    m_library->releasePipelineHandle();
+    if (m_libraryHandle)
+      m_library->releasePipelineHandle();
 
-    m_pipelines.forEach([this] (const DxvkComputePipelineInstance& instance) {
+    for (const auto& instance : m_pipelines)
       this->destroyPipeline(instance.handle);
-    });
   }
   
   
   VkPipeline DxvkComputePipeline::getPipelineHandle(
     const DxvkComputePipelineStateInfo& state) {
-    if (!m_libraryHandle) {
+    if (m_libraryHandle) {
+      // Compute pipelines without spec constants are always
+      // pre-compiled, so we'll almost always hit this path
+      return m_libraryHandle;
+    } else if (m_library) {
       // Retrieve actual pipeline handle on first use. This
       // may wait for an ongoing compile job to finish, or
       // compile the pipeline immediately on the calling thread.
       m_libraryHandle = m_library->acquirePipelineHandle().handle;
-    }
-
-    if (*m_libraryHandle) {
-      // Compute pipelines without spec constants are always
-      // pre-compiled, so we'll almost always hit this path
-      return *m_libraryHandle;
+      return m_libraryHandle;
     } else {
       // Slow path for compute shaders that do use spec constants
       DxvkComputePipelineInstance* instance = this->findInstance(state);
@@ -81,13 +83,18 @@ namespace dxvk {
     VkPipeline newPipelineHandle = this->createPipeline(state);
 
     m_stats->numComputePipelines += 1;
-    return m_pipelines.add(state, newPipelineHandle);
+    return &(*m_pipelines.emplace(state, newPipelineHandle));
   }
 
   
   DxvkComputePipelineInstance* DxvkComputePipeline::findInstance(
     const DxvkComputePipelineStateInfo& state) {
-    return m_pipelines.find(state);
+    for (auto& instance : m_pipelines) {
+      if (instance.state == state)
+        return &instance;
+    }
+    
+    return nullptr;
   }
   
   
@@ -95,25 +102,17 @@ namespace dxvk {
     const DxvkComputePipelineStateInfo& state) const {
     auto vk = m_device->vkd();
 
-    DxvkPipelineSpecConstantState scState(m_shaders.cs->metadata().specConstantMask, state.sc);
+    DxvkPipelineSpecConstantState scState(m_shaders.cs->getSpecConstantMask(), state.sc);
     
     DxvkShaderStageInfo stageInfo(m_device);
     stageInfo.addStage(VK_SHADER_STAGE_COMPUTE_BIT, 
-      m_shaders.cs->getCode(m_layout.getBindingMap(DxvkPipelineLayoutType::Merged), nullptr),
+      m_shaders.cs->getCode(m_bindings, DxvkShaderModuleCreateInfo()),
       &scState.scInfo);
-
-    VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO };
-
-    if (m_device->canUseDescriptorBuffer())
-      flags.flags |= VK_PIPELINE_CREATE_2_DESCRIPTOR_BUFFER_BIT_EXT;
 
     VkComputePipelineCreateInfo info = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
     info.stage                = *stageInfo.getStageInfos();
-    info.layout               = m_layout.getLayout(DxvkPipelineLayoutType::Merged)->getPipelineLayout();
+    info.layout               = m_bindings->getPipelineLayout(false);
     info.basePipelineIndex    = -1;
-
-    if (flags.flags)
-      flags.pNext = std::exchange(info.pNext, &flags);
 
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkResult vr = vk->vkCreateComputePipelines(vk->device(),
@@ -156,14 +155,6 @@ namespace dxvk {
     }
 
     Logger::log(level, sstr.str());
-  }
-
-
-  std::string DxvkComputePipeline::createDebugName() const {
-    std::string shaderName = m_shaders.cs->debugName();
-    size_t len = std::min(shaderName.size(), size_t(10));
-
-    return str::format("[", shaderName.substr(0, len), "]");
   }
 
 }

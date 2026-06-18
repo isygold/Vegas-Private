@@ -23,9 +23,9 @@ namespace dxvk {
 
     std::string_view getName();
 
-    DxvkExtensionList getInstanceExtensions();
+    DxvkNameSet getInstanceExtensions();
 
-    DxvkExtensionList getDeviceExtensions(
+    DxvkNameSet getDeviceExtensions(
             uint32_t      adapterId);
     
     void initInstanceExtensions();
@@ -44,14 +44,14 @@ namespace dxvk {
     bool m_initializedInsExt = false;
     bool m_initializedDevExt = false;
 
-    DxvkExtensionList m_insExtensions;
-    DxvkExtensionList m_devExtensions;
+    DxvkNameSet              m_insExtensions;
+    DxvkNameSet              m_devExtensions;
     
-    DxvkExtensionList queryInstanceExtensions() const;
+    DxvkNameSet queryInstanceExtensions() const;
 
-    DxvkExtensionList queryDeviceExtensions() const;
+    DxvkNameSet queryDeviceExtensions() const;
 
-    DxvkExtensionList parseExtensionList(
+    DxvkNameSet parseExtensionList(
       const std::string&              str) const;
     
     bool loadFunctions();

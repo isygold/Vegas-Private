@@ -2,8 +2,6 @@
 
 #include <vector>
 
-#include "../util/util_small_vector.h"
-
 #include "dxvk_meta_blit.h"
 
 namespace dxvk {
@@ -15,14 +13,15 @@ namespace dxvk {
    * a render pass object for mip map generation.
    * This must be created per image view.
    */
-  class DxvkMetaMipGenViews {
+  class DxvkMetaMipGenRenderPass : public DxvkResource {
     
   public:
     
-    DxvkMetaMipGenViews(
+    DxvkMetaMipGenRenderPass(
+      const Rc<vk::DeviceFn>&   vkd,
       const Rc<DxvkImageView>&  view);
     
-    ~DxvkMetaMipGenViews();
+    ~DxvkMetaMipGenRenderPass();
     
     /**
      * \brief Source image view type
@@ -51,8 +50,8 @@ namespace dxvk {
      * \param [in] pass Render pass index
      * \returns Source image view handle for the given pass
      */
-    Rc<DxvkImageView> getSrcView(uint32_t passId) const {
-      return m_passes[passId].src;
+    VkImageView getSrcView(uint32_t passId) const {
+      return m_passes.at(passId).src;
     }
 
     /**
@@ -61,8 +60,8 @@ namespace dxvk {
      * \param [in] pass Render pass index
      * \returns Destination image view handle for the given pass
      */
-    Rc<DxvkImageView> getDstView(uint32_t passId) const {
-      return m_passes[passId].dst;
+    VkImageView getDstView(uint32_t passId) const {
+      return m_passes.at(passId).dst;
     }
 
     /**
@@ -131,16 +130,17 @@ namespace dxvk {
   private:
 
     struct PassViews {
-      Rc<DxvkImageView> src;
-      Rc<DxvkImageView> dst;
+      VkImageView src;
+      VkImageView dst;
     };
 
+    Rc<vk::DeviceFn>  m_vkd;
     Rc<DxvkImageView> m_view;
     
-    VkImageViewType m_srcViewType = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
-    VkImageViewType m_dstViewType = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
+    VkImageViewType m_srcViewType;
+    VkImageViewType m_dstViewType;
     
-    small_vector<PassViews, 16> m_passes;
+    std::vector<PassViews> m_passes;
     
     PassViews createViews(uint32_t pass) const;
     

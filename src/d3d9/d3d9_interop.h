@@ -3,16 +3,13 @@
 #include "d3d9_interfaces.h"
 #include "d3d9_multithread.h"
 
-#include "../dxvk/dxvk_extension_provider.h"
-
 namespace dxvk {
 
   class D3D9InterfaceEx;
   class D3D9CommonTexture;
   class D3D9DeviceEx;
-  struct D3D9_COMMON_TEXTURE_DESC;
 
-  class D3D9VkInteropInterface final : public ID3D9VkInteropInterface1 {
+  class D3D9VkInteropInterface final : public ID3D9VkInteropInterface {
 
   public:
 
@@ -36,14 +33,9 @@ namespace dxvk {
             UINT                  Adapter,
             VkPhysicalDevice*     pPhysicalDevice);
 
-    HRESULT STDMETHODCALLTYPE GetInstanceExtensions(
-            UINT*                 pExtensionCount,
-      const char**                ppExtensions);
-
   private:
 
     D3D9InterfaceEx* m_interface;
-    DxvkExtensionList m_extensions = { };
 
   };
 
@@ -126,38 +118,10 @@ namespace dxvk {
             IDirect3DResource9*  pResource,
             DWORD                MapFlags);
 
-    HRESULT STDMETHODCALLTYPE CreateImage(
-            const D3D9VkExtImageDesc* desc,
-            IDirect3DResource9**      ppResult);
-
   private:
-
-    template <typename ResourceType>
-    HRESULT CreateTextureResource(
-            const D3D9_COMMON_TEXTURE_DESC& desc,
-            IDirect3DResource9**            ppResult);
 
     D3D9DeviceEx*  m_device;
     D3D9DeviceLock m_lock;
-
-  };
-
-  class D3D9VkExtInterface final : public ID3D9VkExtInterface {
-
-  public:
-
-    D3D9VkExtInterface(D3D9InterfaceEx *pInterface);
-
-    ULONG STDMETHODCALLTYPE AddRef();
-
-    ULONG STDMETHODCALLTYPE Release();
-
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject);
-
-    void STDMETHODCALLTYPE UnlockAdditionalFormats();
-
-  private:
-    D3D9InterfaceEx *m_interface;
 
   };
 

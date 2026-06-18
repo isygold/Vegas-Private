@@ -61,8 +61,6 @@ namespace dxvk {
     void STDMETHODCALLTYPE GetDesc(
             D3D11_BUFFER_DESC *pDesc) final;
     
-    void STDMETHODCALLTYPE SetDebugName(const char* pName) final;
-
     bool CheckViewCompatibility(
             UINT                BindFlags,
             DXGI_FORMAT         Format) const;
@@ -77,10 +75,6 @@ namespace dxvk {
 
     D3D11_COMMON_BUFFER_MAP_MODE GetMapMode() const {
       return m_mapMode;
-    }
-
-    uint64_t GetCookie() const {
-      return m_cookie;
     }
 
     Rc<DxvkBuffer> GetBuffer() const {
@@ -119,18 +113,17 @@ namespace dxvk {
         : DxvkBufferSlice();
     }
     
-    Rc<DxvkResourceAllocation> AllocSlice(DxvkLocalAllocationCache* cache) {
-      return m_buffer->allocateStorage(cache);
+    DxvkBufferSliceHandle AllocSlice() {
+      return m_buffer->allocSlice();
     }
     
-    Rc<DxvkResourceAllocation> DiscardSlice(DxvkLocalAllocationCache* cache) {
-      auto allocation = m_buffer->allocateStorage(cache);
-      m_mapPtr = allocation->mapPtr();
-      return allocation;
+    DxvkBufferSliceHandle DiscardSlice() {
+      m_mapped = m_buffer->allocSlice();
+      return m_mapped;
     }
 
-    void* GetMapPtr() const {
-      return m_mapPtr;
+    DxvkBufferSliceHandle GetMappedSlice() const {
+      return m_mapped;
     }
 
     D3D10Buffer* GetD3D10Iface() {
@@ -189,18 +182,13 @@ namespace dxvk {
     D3D11_COMMON_BUFFER_MAP_MODE  m_mapMode;
     
     Rc<DxvkBuffer>                m_buffer;
-    uint64_t                      m_cookie = 0u;
-
     Rc<DxvkBuffer>                m_soCounter;
     Rc<DxvkSparsePageAllocator>   m_sparseAllocator;
+    DxvkBufferSliceHandle         m_mapped;
     uint64_t                      m_seq = 0ull;
-
-    void*                         m_mapPtr = nullptr;
 
     D3D11DXGIResource             m_resource;
     D3D10Buffer                   m_d3d10;
-
-    D3DDestructionNotifier        m_destructionNotifier;
 
     BOOL CheckFormatFeatureSupport(
             VkFormat              Format,

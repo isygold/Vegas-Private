@@ -2,8 +2,6 @@
 
 #include <cstddef>
 
-#include "../util/util_env.h"
-
 namespace dxvk {
 
   struct DxvkEq {
@@ -21,28 +19,23 @@ namespace dxvk {
   };
   
   class DxvkHashState {
-    static constexpr size_t Offset = env::is32BitHostPlatform()
-      ? size_t(0x811c9dc5u)
-      : size_t(0xcbf29ce484222325ull);
-
-    static constexpr size_t Prime = env::is32BitHostPlatform()
-      ? size_t(0x01000193u)
-      : size_t(0x00000100000001b3ull);
+    
   public:
-
+    
     void add(size_t hash) {
-      m_value ^= hash;
-      m_value *= Prime;
+      m_value ^= hash + 0x9e3779b9
+               + (m_value << 6)
+               + (m_value >> 2);
     }
-
+    
     operator size_t () const {
       return m_value;
     }
-
+    
   private:
-
-    size_t m_value = Offset;
-
+    
+    size_t m_value = 0;
+    
   };
 
 }

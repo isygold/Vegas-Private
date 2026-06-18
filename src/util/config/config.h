@@ -3,13 +3,6 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
-// --- VEGAS: HARDWARE BRIDGE ---
-#ifdef _WIN32
-#include <windows.h>  // For MEMORYSTATUSEX on your PC
-#else
-#include <unistd.h>   // For sysconf on android devices
-#endif
-// ------------------------------------
 
 namespace dxvk {
 
@@ -76,20 +69,6 @@ namespace dxvk {
      * \returns Parsed option value
      * \returns The parsed option value
      */
-	 
-	 // --- VEGAS: Custom Definitions ---
-     // These allow other files (like the Swapchain) to read your new settings.
-	 /** * --- VEGAS: API DEFINITIONS ---
-     * These allow the engine to read our custom Bionic-Ready settings.
-     */
-    
-    // Priority 3: Spatial Upscaler Toggle (Tristate: Auto/True/False)
-    /// This is the ONLY user-facing Vegas option.
-    /// All other parameters are baked self-aware by the Vegas class.
-    Tristate getVegasUpscaleEnabled() const {
-      return this->getOption<Tristate>("vegas.enableUpscaler", Tristate::Auto);
-    }
-	
     template<typename T>
     T getOption(const char* option, T fallback = T()) const {
       const std::string& value = getOptionValue(option);

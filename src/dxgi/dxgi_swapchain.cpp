@@ -1,10 +1,9 @@
 #include "dxgi_factory.h"
 #include "dxgi_output.h"
 #include "dxgi_swapchain.h"
+#include "../dxvk/dxvk_vegas.h"
 
 #include "../util/util_misc.h"
-#include "../dxvk/dxvk_device.h"
-#include "../dxvk/dxvk_vegas.h"
 
 #include <d3d12.h>
 
@@ -24,9 +23,7 @@ namespace dxvk {
     m_presentId (0u),
     m_presenter (pPresenter),
     m_monitor   (wsi::getWindowMonitor(m_window)),
-    m_is_d3d12(SUCCEEDED(pDevice->QueryInterface(__uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&Com<ID3D12CommandQueue>())))),
-    m_lastPresentTime(dxvk::high_resolution_clock::now()),
-    m_destructionNotifier(this) {
+    m_is_d3d12(SUCCEEDED(pDevice->QueryInterface(__uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&Com<ID3D12CommandQueue>())))) {
 
     if (FAILED(m_presenter->GetAdapter(__uuidof(IDXGIAdapter), reinterpret_cast<void**>(&m_adapter))))
       throw DxvkError("DXGI: Failed to get adapter for present device");
@@ -47,14 +44,6 @@ namespace dxvk {
 
     // Ensure that RGBA16 swap chains are scRGB if supported
     UpdateColorSpace(m_desc.Format, m_colorSpace);
-
-    // Somewhat hacky way to determine whether to forward the
-    // display refresh rate in windowed mode even with a sync
-    // interval of 1.
-    if (!m_is_d3d12) {
-      auto instance = pFactory->GetDXVKInstance();
-      m_hasLatencyControl = instance->options().latencySleep == Tristate::True;
-    }
   }
   
   
@@ -89,11 +78,6 @@ namespace dxvk {
      || riid == __uuidof(IDXGISwapChain3)
      || riid == __uuidof(IDXGISwapChain4)) {
       *ppvObject = ref(this);
-      return S_OK;
-    }
-
-    if (riid == __uuidof(ID3DDestructionNotifier)) {
-      *ppvObject = ref(&m_destructionNotifier);
       return S_OK;
     }
     
@@ -336,125 +320,15 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE DxgiSwapChain::Present1(
           UINT                      SyncInterval,
           UINT                      PresentFlags,
-    const DXGI_PRESENT_PARAMETERS* pPresentParameters) {
-    // All logic (FSR decision + dispatch) is now consolidated in PresentBase.
-    return this->PresentBase(SyncInterval, PresentFlags, pPresentParameters);
+    const DXGI_PRESENT_PARAMETERS*  pPresentParameters) {
+
+    return PresentBase(SyncInterval, PresentFlags, pPresentParameters);
   }
 
   HRESULT STDMETHODCALLTYPE DxgiSwapChain::PresentBase(
           UINT                      SyncInterval,
           UINT                      PresentFlags,
     const DXGI_PRESENT_PARAMETERS*  pPresentParameters) {
-
-    // --- VEGAS: Frame timing and performance analysis ---
-    auto now = dxvk::high_resolution_clock::now();
-    float frameTime = std::chrono::duration<float, std::milli>(
-        now - m_lastPresentTime).count();
-    bool   frameGenReady  = Vegas::isFrameGenReady();
-    bool   frameValid     = m_presentId > 0 && frameTime > 0.0f && frameTime < 500.0f;
-
-    // Default metrics (used when frameValid is false)
-    float gpuLoadEstimate = 0.0f;
-    float targetFt        = 16.667f;
-    bool  fsrActive       = false;
-
-    if (frameValid) {
-      double target = (m_frameRateLimit > 0.0) ? (1000.0 / m_frameRateLimit) : 16.667;
-      targetFt = static_cast<float>(target);
-
-      // Lazy init: resolve DxvkDevice pointer from the presenter for
-      // cross-DLL metrics sharing. In dxgi.dll, Vegas::s_dxvkDevice is
-      // NULL because initializeProfile() only runs in d3d11.dll. We
-      // retrieve it here through the private IDXGIDXVKDevice interface.
-      // Also propagate Vulkan handles so that FSR/framegen dispatch
-      // (which use s_device) work correctly from dxgi.dll.
-      if (Vegas::s_dxvkDevice == nullptr && m_presenter != nullptr) {
-        Com<IDXGIDXVKDevice> metaDevice;
-        if (SUCCEEDED(m_presenter->GetDevice(__uuidof(IDXGIDXVKDevice),
-                reinterpret_cast<void**>(&metaDevice)))) {
-          Vegas::s_dxvkDevice = static_cast<DxvkDevice*>(
-              metaDevice->GetDXVKDevice());
-          // Propagate Vulkan handles for FSR/framegen
-          if (Vegas::s_device == nullptr && Vegas::s_dxvkDevice != nullptr) {
-            Vegas::s_device         = reinterpret_cast<void*>(
-                Vegas::s_dxvkDevice->handle());
-            Vegas::s_physicalDevice = reinterpret_cast<uint64_t>(
-                Vegas::s_dxvkDevice->adapter()->handle());
-            Vegas::s_vkQueue        = reinterpret_cast<uint64_t>(
-                Vegas::s_dxvkDevice->queues().graphics.queueHandle);
-            Vegas::s_queueFamily    =
-                Vegas::s_dxvkDevice->queues().graphics.queueFamily;
-          }
-        }
-      }
-
-      // Fix 3: Real GPU load from gpuIdleTicks delta.
-      //   Replaces the old ftRatio-based proxy with true GPU idle
-      //   accumulation from the submission queue. Follows the same
-      //   pattern as DXVK's built-in HudGpuLoadItem.
-      //
-      //   gpuLoad = (wallTime - gpuIdleTime) / wallTime
-      //
-      //   Falls back to ftRatio proxy when device stats are unavailable
-      //   (first frame, or s_dxvkDevice not yet initialized).
-      if (Vegas::s_dxvkDevice != nullptr) {
-        DxvkStatCounters counters = Vegas::s_dxvkDevice->getStatCounters();
-        uint64_t currGpuIdleTicks = counters.getCtr(DxvkStatCounter::GpuIdleTicks);
-
-        if (m_gpuLoadValid) {
-          uint64_t diffIdle = currGpuIdleTicks - m_prevGpuIdleTicks;
-          uint64_t wallUs   = static_cast<uint64_t>(frameTime * 1000.0f);  // ms → μs
-
-          if (wallUs > 0) {
-            uint64_t busyUs  = (wallUs > diffIdle) ? (wallUs - diffIdle) : 0u;
-            gpuLoadEstimate = std::min(
-                static_cast<float>(busyUs) / static_cast<float>(wallUs), 1.0f);
-          } else {
-            gpuLoadEstimate = 0.0f;
-          }
-        }
-
-        m_prevGpuIdleTicks = currGpuIdleTicks;
-      }
-
-      // Fallback (first frame or device unavailable): ftRatio-based proxy.
-      // m_gpuLoadValid is set to true here (not in the gpuIdleTicks block)
-      // so the ftRatio fallback still runs on frame 1 when gpuIdleTicks
-      // has no previous tick to compute a delta from.
-      if (!m_gpuLoadValid) {
-        float ftRatio = (targetFt > 0.0f) ? (frameTime / targetFt) : 1.0f;
-        if      (ftRatio > 2.0f) gpuLoadEstimate = 0.96f;
-        else if (ftRatio > 1.5f) gpuLoadEstimate = 0.92f;
-        else if (ftRatio > 1.2f) gpuLoadEstimate = 0.85f;
-        else if (ftRatio > 0.9f) gpuLoadEstimate = 0.65f;
-        else if (ftRatio > 0.5f) gpuLoadEstimate = 0.40f;
-        else                      gpuLoadEstimate = 0.25f;
-
-        // Mark valid AFTER ftRatio fallback so frame 2+ use real gpuIdleTicks
-        m_gpuLoadValid = true;
-      }
-
-      m_lastPerfState = Vegas::analyzePerformance(
-          gpuLoadEstimate, frameTime,
-          targetFt);
-
-      // Let the governor react to current conditions (only when FG-ready)
-      if (frameGenReady)
-        Vegas::tuneThreshold(gpuLoadEstimate, frameTime);
-
-      m_needsFrameGen = frameGenReady && Vegas::needsFrameGen(frameTime, Vegas::getTier());
-
-      Logger::debug(str::format(
-          "Vegas: Perf=", Vegas::getStatusString(m_lastPerfState),
-          " load=", gpuLoadEstimate,
-          " frameTime=", frameTime, "ms",
-          " ftRatio=", (targetFt > 0.0f) ? (frameTime / targetFt) : 1.0f,
-          " frameGen=", m_needsFrameGen ? "yes" : "no"));
-    } else {
-      m_needsFrameGen = false;
-    }
-    m_lastPresentTime = now;
-    // --- END VEGAS ---
 
     if (SyncInterval > 4)
       return DXGI_ERROR_INVALID_CALL;
@@ -471,103 +345,27 @@ namespace dxvk {
     UpdateGlobalHDRState();
     UpdateTargetFrameRate(SyncInterval);
 
-    // --- VEGAS: FSR 1.0 UPSCALE DISPATCH ---
-    // (Outside swapchain lock — uses independent Vulkan submit)
-    {
-      Tristate upscaleState = options->vegasEnableUpscaler;
-      if (upscaleState != Tristate::False && m_presenter != nullptr && m_presentId > 0) {
-        Com<IDXGIDXVKDevice> dxvkDevice;
-        if (SUCCEEDED(m_presenter->GetDevice(__uuidof(IDXGIDXVKDevice),
-                reinterpret_cast<void**>(&dxvkDevice)))) {
-          Com<IDXGIVkInteropSurface> srcSurface;
-          Com<IDXGIVkInteropSurface> dstSurface;
-          m_presenter->GetImage(0, __uuidof(IDXGIVkInteropSurface),
-              reinterpret_cast<void**>(&srcSurface));
-          m_presenter->GetImage(1, __uuidof(IDXGIVkInteropSurface),
-              reinterpret_cast<void**>(&dstSurface));
-          if (srcSurface != nullptr && dstSurface != nullptr) {
-            VkImage srcHandle, dstHandle;
-            VkImageCreateInfo srcInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-            VkImageCreateInfo dstInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-            srcSurface->GetVulkanImageInfo(&srcHandle, nullptr, &srcInfo);
-            dstSurface->GetVulkanImageInfo(&dstHandle, nullptr, &dstInfo);
-            if (Vegas::shouldUpscale(upscaleState, srcInfo.extent, dstInfo.extent)) {
-              VegasFsrConstants fsrConsts = {};
-              Vegas::calculateFsrConstants(fsrConsts,
-                  srcInfo.extent, dstInfo.extent);
-
-              // Phase 1 — non-blocking blit of previous async FSR result.
-              // Returns true if the previous frame's FSR compute completed
-              // and the upscaled result was blitted to the swapchain.
-              bool blitDone = Vegas::fsrTryBlitResult(
-                  dstHandle, dstInfo.extent);
-
-              // Phase 2 — submit new async FSR compute if inter is free.
-              // Only starts a new compute if the previous one finished
-              // (blitDone) or this is the very first FSR frame.
-              bool computed = false;
-              if (blitDone || !Vegas::isFsrActive()) {
-                computed = Vegas::fsrUpscaleAsync(
-                    srcHandle,
-                    srcInfo.extent, dstInfo.extent,
-                    dstInfo.format, fsrConsts);
-              }
-
-              if (blitDone || computed)
-                fsrActive = true;
-            }
-          }
-        }
-      }
-    }
-
-    // --- VEGAS: FRAMEGEN DISPATCH (Tier 2-3, after FSR) ---
-    // Uses the swapchain presentation image (index 1 if FSR ran, else index 0).
-    if (Vegas::isFrameGenReady() && m_needsFrameGen && m_presenter != nullptr && m_presentId > 0) {
-      Com<IDXGIDXVKDevice> dxvkDevice;
-      if (SUCCEEDED(m_presenter->GetDevice(__uuidof(IDXGIDXVKDevice),
-              reinterpret_cast<void**>(&dxvkDevice)))) {
-        // Prefer image 1 (FSR output destination) when available.
-        // image 0 is the render target which may be lower resolution.
-        const uint32_t fgImgIdx = 1;
-        Com<IDXGIVkInteropSurface> fgSurface;
-        m_presenter->GetImage(fgImgIdx, __uuidof(IDXGIVkInteropSurface),
-            reinterpret_cast<void**>(&fgSurface));
-        if (fgSurface == nullptr) {
-          // Fallback to image 0 if image 1 doesn't exist (single-buffered).
-          m_presenter->GetImage(0, __uuidof(IDXGIVkInteropSurface),
-              reinterpret_cast<void**>(&fgSurface));
-        }
-        if (fgSurface != nullptr) {
-          VkImage curHandle;
-          VkImageCreateInfo curInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-          fgSurface->GetVulkanImageInfo(&curHandle, nullptr, &curInfo);
-          Logger::debug(str::format(
-              "Vegas FG: attempting dispatch ",
-              curInfo.extent.width, "x", curInfo.extent.height));
-          bool dispatched = Vegas::framegenDispatch(
-              curHandle, VK_NULL_HANDLE,
-              curInfo.extent, curInfo.format);
-          Logger::debug(str::format(
-              "Vegas FG: ", dispatched ? "OK (interpolated)" : "first frame / skipped"));
-        }
-      }
-    }
-    // --- END VEGAS ---
-
-    // Push metrics for VegasHud (always, even if frame was invalid)
-    Vegas::pushMetrics(
-        frameValid ? gpuLoadEstimate : 0.0f,
-        frameValid ? frameTime : 0.0f,
-        m_lastPerfState,
-        fsrActive,
-        m_needsFrameGen);
-
     std::lock_guard<dxvk::recursive_mutex> lockWin(m_lockWindow);
     HRESULT hr = S_OK;
 
-    if (wsi::isWindow(m_window) || !m_window) {
+    if (wsi::isWindow(m_window)) {
       std::lock_guard<dxvk::mutex> lockBuf(m_lockBuffer);
+
+      // === VEGAS ===
+      if (Vegas::isEnabled()) {
+        auto now = std::chrono::steady_clock::now();
+        float frameTime = std::chrono::duration_cast<
+          std::chrono::duration<float, std::milli>>(
+            now - m_lastPresentTime).count();
+        m_lastPresentTime = now;
+        float gpuLoad = (frameTime > 0.001f)
+          ? std::min(frameTime / 16.667f, 1.0f) : 0.0f;
+        Vegas::tuneThreshold(gpuLoad, frameTime);
+        Vegas::pushMetrics(gpuLoad, frameTime,
+          VegasPerformanceState::Normal,
+          Vegas::isFsrActive(), false);
+      }
+      // === END VEGAS ===
       hr = m_presenter->Present(SyncInterval, PresentFlags, nullptr);
     }
 
@@ -625,7 +423,7 @@ namespace dxvk {
           UINT                      SwapChainFlags,
     const UINT*                     pCreationNodeMask,
           IUnknown* const*          ppPresentQueue) {
-    if (m_window && !wsi::isWindow(m_window))
+    if (!wsi::isWindow(m_window))
       return DXGI_ERROR_INVALID_CALL;
 
     constexpr UINT PreserveFlags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
@@ -637,20 +435,9 @@ namespace dxvk {
     m_desc.Width  = Width;
     m_desc.Height = Height;
     
-    if (m_window) {
-      wsi::getWindowSize(m_window,
-        m_desc.Width  ? nullptr : &m_desc.Width,
-        m_desc.Height ? nullptr : &m_desc.Height);
-    }
-
-    // --- VEGAS: compute letterbox scale factors ---
-    Vegas::calculateAspectRatio(m_desc.Width, m_desc.Height,
-        m_aspectRatioX, m_aspectRatioY);
-    Logger::debug(str::format(
-        "Vegas: LetterboxScale=", m_aspectRatioX, "x", m_aspectRatioY,
-        " @ ", m_desc.Width, "x", m_desc.Height,
-        " (AR=", (m_desc.Height ? static_cast<float>(m_desc.Width) / static_cast<float>(m_desc.Height) : 0.0f), ":1)"));
-    // --- END VEGAS ---
+    wsi::getWindowSize(m_window,
+      m_desc.Width  ? nullptr : &m_desc.Width,
+      m_desc.Height ? nullptr : &m_desc.Height);
     
     if (BufferCount != 0)
       m_desc.BufferCount = BufferCount;
@@ -705,23 +492,12 @@ namespace dxvk {
         Logger::err("DXGI: ResizeTarget: Failed to query containing output");
         return E_FAIL;
       }
-
-      RECT bounds = { };
-      wsi::getDesktopCoordinates(m_monitor, &bounds);
-
-      uint32_t width = 0u;
-      uint32_t height = 0u;
-
-      wsi::getWindowSize(m_window, &width, &height);
-
-      // Window bounds were changed behind our back, update saved state
-      if (uint32_t(bounds.right - bounds.left) != width || uint32_t(bounds.bottom - bounds.top) != height)
-        wsi::saveWindowState(m_window, &m_windowState, false);
-
+      
       ChangeDisplayMode(output.ptr(), &newDisplayMode);
+
       wsi::updateFullscreenWindow(m_monitor, m_window, false);
     }
-
+    
     return S_OK;
   }
   
@@ -767,11 +543,7 @@ namespace dxvk {
   
   HRESULT STDMETHODCALLTYPE DxgiSwapChain::SetRotation(
           DXGI_MODE_ROTATION        Rotation) {
-
-    if (Rotation == DXGI_MODE_ROTATION_IDENTITY)
-      return S_OK;
-
-    Logger::err(str::format("DxgiSwapChain::SetRotation(", Rotation,"): Not implemented"));
+    Logger::err("DxgiSwapChain::SetRotation: Not implemented");
     return E_NOTIMPL;
   }
   
@@ -961,8 +733,6 @@ namespace dxvk {
     DXGI_OUTPUT_DESC desc;
     output->GetDesc(&desc);
 
-    wsi::saveWindowState(m_window, &m_windowState, true);
-
     if (!wsi::enterFullscreenMode(desc.Monitor, m_window, &m_windowState, modeSwitch)) {
       Logger::err("DXGI: EnterFullscreenMode: Failed to enter fullscreen mode");
       return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
@@ -1015,11 +785,10 @@ namespace dxvk {
     if (!wsi::isWindow(m_window))
       return S_OK;
     
-    if (!wsi::leaveFullscreenMode(m_window, &m_windowState)) {
+    if (!wsi::leaveFullscreenMode(m_window, &m_windowState, true)) {
       Logger::err("DXGI: LeaveFullscreenMode: Failed to exit fullscreen mode");
       return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
     }
-    wsi::restoreWindowState(m_window, &m_windowState, true);
     
     return S_OK;
   }
@@ -1061,7 +830,7 @@ namespace dxvk {
     if (!selectedMode.RefreshRate.Denominator)
       selectedMode.RefreshRate.Denominator = 1;
 
-    if (!wsi::setWindowMode(outputDesc.Monitor, m_window, &m_windowState, ConvertDisplayMode(selectedMode)))
+    if (!wsi::setWindowMode(outputDesc.Monitor, m_window, ConvertDisplayMode(selectedMode)))
       return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
 
     DXGI_VK_MONITOR_DATA* monitorData = nullptr;
@@ -1245,41 +1014,16 @@ namespace dxvk {
     if (m_presenter2 == nullptr)
       return;
 
-    // Engage the frame limiter with large sync intervals even in windowed
-    // mode since we want to avoid double-presenting to the swap chain.
-    if (SyncInterval != m_frameRateSyncInterval && m_descFs.Windowed) {
-      bool engageLimiter = (SyncInterval > 1u) || (SyncInterval && m_hasLatencyControl);
-
-      m_frameRateSyncInterval = SyncInterval;
-      m_frameRateRefresh = 0.0f;
-
-      if (engageLimiter && wsi::isWindow(m_window)) {
-        wsi::WsiMode mode = { };
-
-        if (wsi::getCurrentDisplayMode(wsi::getWindowMonitor(m_window), &mode)) {
-          if (mode.refreshRate.numerator && mode.refreshRate.denominator) {
-            m_frameRateRefresh = double(mode.refreshRate.numerator)
-                               / double(mode.refreshRate.denominator);
-          }
-        }
-      }
-    } else if (!m_descFs.Windowed) {
-      // Reset tracking when in fullscreen mode
-      m_frameRateSyncInterval = 0;
-    }
-
     // Use a negative number to indicate that the limiter should only
     // be engaged if the target frame rate is actually exceeded
-    double frameRate = m_frameRateOption;
+    double frameRate = std::max(m_frameRateOption, 0.0);
 
-    if (frameRate != -1.0) {
-      if (SyncInterval && frameRate == 0.0)
-        frameRate = -m_frameRateRefresh / double(SyncInterval);
+    if (SyncInterval && m_frameRateOption == 0.0)
+      frameRate = -m_frameRateRefresh / double(SyncInterval);
 
-      if (m_frameRateLimit != frameRate) {
-        m_frameRateLimit = frameRate;
-        m_presenter2->SetTargetFrameRate(frameRate);
-      }
+    if (m_frameRateLimit != frameRate) {
+      m_frameRateLimit = frameRate;
+      m_presenter2->SetTargetFrameRate(frameRate);
     }
   }
 

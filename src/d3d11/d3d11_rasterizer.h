@@ -10,16 +10,15 @@ namespace dxvk {
   
   class D3D11Device;
   
-  class D3D11RasterizerState : public D3D11StateObject<ID3D11RasterizerState2, D3D11RasterizerState> {
-    using Container = D3D11StateObjectSet<D3D11RasterizerState>;
+  class D3D11RasterizerState : public D3D11StateObject<ID3D11RasterizerState2> {
+    
   public:
     
     using DescType = D3D11_RASTERIZER_DESC2;
     
     D3D11RasterizerState(
             D3D11Device*                    device,
-      const D3D11_RASTERIZER_DESC2&         desc,
-            Container*                      container);
+      const D3D11_RASTERIZER_DESC2&         desc);
     ~D3D11RasterizerState();
 
     HRESULT STDMETHODCALLTYPE QueryInterface(
@@ -35,17 +34,11 @@ namespace dxvk {
     void STDMETHODCALLTYPE GetDesc2(
             D3D11_RASTERIZER_DESC2* pDesc) final;
     
-    const D3D11_RASTERIZER_DESC2& Desc() const {
-      return m_desc;
+    const D3D11_RASTERIZER_DESC2* Desc() const {
+      return &m_desc;
     }
     
-    DxvkRasterizerState GetState() const {
-      return m_state;
-    }
-
-    DxvkDepthBias GetDepthBias() const {
-      return m_depthBias;
-    }
+    void BindToContext(DxvkContext* ctx);
     
     D3D10RasterizerState* GetD3D10Iface() {
       return &m_d3d10;
@@ -63,11 +56,9 @@ namespace dxvk {
   private:
     
     D3D11_RASTERIZER_DESC2 m_desc;
-    DxvkRasterizerState    m_state      = { };
-    DxvkDepthBias          m_depthBias  = { };
+    DxvkRasterizerState    m_state;
+    DxvkDepthBias          m_depthBias;
     D3D10RasterizerState   m_d3d10;
-
-    D3DDestructionNotifier m_destructionNotifier;
     
   };
   

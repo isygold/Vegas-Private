@@ -39,7 +39,6 @@ namespace dxvk {
     friend D3D9MemoryAllocator;
 
     public:
-      D3D9MemoryChunk(D3D9MemoryAllocator* Allocator, uint32_t Size);
       ~D3D9MemoryChunk();
 
       D3D9MemoryChunk             (const D3D9MemoryChunk&) = delete;
@@ -48,27 +47,29 @@ namespace dxvk {
       D3D9MemoryChunk             (D3D9MemoryChunk&& other) = delete;
       D3D9MemoryChunk& operator = (D3D9MemoryChunk&& other) = delete;
 
+      D3D9Memory Alloc(uint32_t Size);
+      void Free(D3D9Memory* Memory);
+      bool IsEmpty();
+      uint32_t Size() const { return m_size; }
       D3D9MemoryAllocator* Allocator() const;
+      HANDLE FileHandle() const;
+      void* Map(D3D9Memory* memory);
+      void Unmap(D3D9Memory* memory);
 
     private:
-      bool IsEmpty() const;
-      uint32_t Size() const { return m_size; }
+      D3D9MemoryChunk(D3D9MemoryAllocator* Allocator, uint32_t Size);
 
-      D3D9Memory AllocLocked(uint32_t Size);
-      void FreeLocked(D3D9Memory* Memory);
-      void* MapLocked(D3D9Memory* memory, uint32_t& mappedSize);
-      uint32_t UnmapLocked(D3D9Memory* memory);
-
+      dxvk::mutex m_mutex;
       D3D9MemoryAllocator* m_allocator;
-      uint32_t m_size;
       HANDLE m_mapping;
+      uint32_t m_size;
+      uint32_t m_mappingGranularity;
       std::vector<D3D9MemoryRange> m_freeRanges;
       std::vector<D3D9MappingRange> m_mappingRanges;
   };
 
   class D3D9Memory {
     friend D3D9MemoryChunk;
-    friend D3D9MemoryAllocator;
 
     public:
       D3D9Memory() {}
@@ -85,13 +86,13 @@ namespace dxvk {
       void Map();
       void Unmap();
       void* Ptr();
+      D3D9MemoryChunk* GetChunk() const { return m_chunk; }
+      size_t GetOffset() const { return m_offset; }
+      size_t GetSize() const { return m_size; }
 
     private:
       D3D9Memory(D3D9MemoryChunk* Chunk, size_t Offset, size_t Size);
       void Free();
-      D3D9MemoryChunk* GetChunk() const { return m_chunk; }
-      size_t GetOffset() const { return m_offset; }
-      size_t GetSize() const { return m_size; }
 
       D3D9MemoryChunk* m_chunk = nullptr;
       void* m_ptr              = nullptr;
@@ -106,26 +107,22 @@ namespace dxvk {
       D3D9MemoryAllocator();
       ~D3D9MemoryAllocator() = default;
       D3D9Memory Alloc(uint32_t Size);
-      D3D9Memory AllocFromChunk(D3D9MemoryChunk* Chunk, uint32_t Size);
-      void Free(D3D9Memory* Memory);
-      void* Map(D3D9Memory* Memory);
-      void Unmap(D3D9Memory* Memory);
-      uint32_t MappedMemory() const;
-      uint32_t UsedMemory() const;
-      uint32_t AllocatedMemory() const;
-      uint32_t AllocationGranularity() const { return m_allocationGranularity; }
-      uint32_t MappingGranularity() const { return m_mappingGranularity; }
+      void FreeChunk(D3D9MemoryChunk* Chunk);
+      void NotifyMapped(uint32_t Size);
+      void NotifyUnmapped(uint32_t Size);
+      void NotifyFreed(uint32_t Size);
+      uint32_t MappedMemory();
+      uint32_t UsedMemory();
+      uint32_t AllocatedMemory();
+      uint32_t MemoryGranularity() { return m_allocationGranularity; }
 
     private:
-      void FreeChunk(D3D9MemoryChunk* Chunk);
-
       dxvk::mutex m_mutex;
       std::vector<std::unique_ptr<D3D9MemoryChunk>> m_chunks;
       std::atomic<size_t> m_mappedMemory = 0;
       std::atomic<size_t> m_allocatedMemory = 0;
       std::atomic<size_t> m_usedMemory = 0;
       uint32_t m_allocationGranularity;
-      uint32_t m_mappingGranularity;
   };
 
 #else
@@ -147,6 +144,7 @@ namespace dxvk {
       void Map() {}
       void Unmap() {}
       void* Ptr() { return m_ptr; }
+      size_t GetSize() const { return m_size; }
 
     private:
       D3D9Memory(D3D9MemoryAllocator* pAllocator, size_t Size);
@@ -161,9 +159,9 @@ namespace dxvk {
 
     public:
       D3D9Memory Alloc(uint32_t Size);
-      uint32_t MappedMemory() const;
-      uint32_t UsedMemory() const;
-      uint32_t AllocatedMemory() const;
+      uint32_t MappedMemory();
+      uint32_t UsedMemory();
+      uint32_t AllocatedMemory();
       void NotifyFreed(uint32_t Size) {
         m_allocatedMemory -= Size;
       }

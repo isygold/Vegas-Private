@@ -1,7 +1,5 @@
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
 #include <vector>
 
 #include "com_include.h"
@@ -11,7 +9,7 @@ namespace dxvk {
   /**
    * \brief COM private data entry type
    */
-  enum class ComPrivateDataType : uint32_t {
+  enum ComPrivateDataType {
     None,
     Data,
     Iface,

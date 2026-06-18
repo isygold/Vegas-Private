@@ -10,12 +10,20 @@ namespace dxvk {
    * Used to identify the type of command
    * data most recently added to a CS chunk.
    */
-  enum class D3D11CmdType : uint32_t {
-    None,
+  enum class D3D11CmdType {
     DrawIndirect,
     DrawIndirectIndexed,
-    Draw,
-    DrawIndexed,
+  };
+
+
+  /**
+   * \brief Command data header
+   * 
+   * Stores the command type. All command
+   * data structs must inherit this struct.
+   */
+  struct D3D11CmdData {
+    D3D11CmdType        type;
   };
 
 
@@ -26,7 +34,7 @@ namespace dxvk {
    * the first draw, as well as the number of
    * draws to execute.
    */
-  struct D3D11CmdDrawIndirectData {
+  struct D3D11CmdDrawIndirectData : public D3D11CmdData {
     uint32_t            offset;
     uint32_t            count;
     uint32_t            stride;

@@ -74,9 +74,9 @@ namespace dxvk {
     VkDeviceSize          m_offset  = 0ull;
 
     Rc<DxvkBuffer>        m_buffer  = nullptr;
-    Rc<DxvkResourceAllocation> m_slice = nullptr;
+    DxvkBufferSliceHandle m_slice   = { };
 
-    Rc<DxvkResourceAllocation> createBuffer();
+    void createBuffer();
 
     VkDeviceSize getAlignment(const Rc<DxvkDevice>& device) const;
 

@@ -1,8 +1,5 @@
 {
   global:
-    ValidatePixelShader;
-    ValidateVertexShader;
-    DebugSetMute;
     Direct3DCreate8;
 
   local:

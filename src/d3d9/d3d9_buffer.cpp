@@ -8,9 +8,8 @@ namespace dxvk {
 
   D3D9VertexBuffer::D3D9VertexBuffer(
           D3D9DeviceEx*      pDevice,
-    const D3D9_BUFFER_DESC*  pDesc,
-    const bool               Extended)
-  : D3D9VertexBufferBase(pDevice, pDesc, Extended) {
+    const D3D9_BUFFER_DESC*  pDesc)
+  : D3D9VertexBufferBase(pDevice, pDesc) {
 
   }
 
@@ -69,9 +68,8 @@ namespace dxvk {
 
   D3D9IndexBuffer::D3D9IndexBuffer(
           D3D9DeviceEx*      pDevice,
-    const D3D9_BUFFER_DESC*  pDesc,
-    const bool               Extended)
-  : D3D9IndexBufferBase(pDevice, pDesc, Extended) {
+    const D3D9_BUFFER_DESC*  pDesc)
+  : D3D9IndexBufferBase(pDevice, pDesc) {
 
   }
 

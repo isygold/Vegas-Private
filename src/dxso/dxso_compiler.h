@@ -102,11 +102,10 @@ namespace dxvk {
   struct DxsoSamplerInfo {
     uint32_t dimensions = 0;
 
-    uint32_t imageVarId = 0;
-    uint32_t imageTypeId = 0;
+    uint32_t varId = 0;
+    uint32_t typeId = 0;
 
-    uint32_t sampledTypeId = 0u;
-    uint32_t samplerIndex = 0u;
+    uint32_t imageTypeId = 0;
   };
 
   enum DxsoSamplerType : uint32_t {
@@ -248,10 +247,7 @@ namespace dxvk {
     const DxsoDefinedConstants& constants() { return m_constants; }
     uint32_t usedSamplers() const { return m_usedSamplers; }
     uint32_t usedRTs() const { return m_usedRTs; }
-    int32_t  maxDefinedFloatConstant() const { return m_maxDefinedFloatConstant; }
-    int32_t  maxDefinedIntConstant() const { return m_maxDefinedIntConstant; }
-    int32_t  maxDefinedBoolConstant() const { return m_maxDefinedBoolConstant; }
-    uint32_t textureTypes() const { return m_textureTypes; }
+    uint32_t maxDefinedConstant() const { return m_maxDefinedConstant; }
 
   private:
 
@@ -262,9 +258,7 @@ namespace dxvk {
 
     DxsoShaderMetaInfo         m_meta;
     DxsoDefinedConstants       m_constants;
-    int32_t                    m_maxDefinedFloatConstant = -1;
-    int32_t                    m_maxDefinedIntConstant = -1;
-    int32_t                    m_maxDefinedBoolConstant = -1;
+    uint32_t                   m_maxDefinedConstant;
 
     SpirvModule                m_module;
 
@@ -284,7 +278,7 @@ namespace dxvk {
     // Predicate registers
     std::array<
       DxsoRegisterPointer,
-      1> m_pRegs = { };
+      1> m_pRegs;
 
     //////////////////////////////////////////////////////////////////
     // Array of input values. Since v# and o# registers are indexable
@@ -318,7 +312,7 @@ namespace dxvk {
     // Working tex/coord registers (PS)
     std::array<
       DxsoRegisterPointer,
-      DxsoMaxTextureRegs> m_tRegs = { };
+      DxsoMaxTextureRegs> m_tRegs;
 
     ///////////////////////////////////////////////
     // Control flow information. Stores labels for
@@ -332,7 +326,7 @@ namespace dxvk {
 
     ////////////
     // Samplers
-    std::array<DxsoSampler, 17> m_samplers = { };
+    std::array<DxsoSampler, 17> m_samplers;
 
     ////////////////////////////////////////////
     // What io regswe need to
@@ -364,18 +358,10 @@ namespace dxvk {
     uint32_t m_usedSamplers;
     uint32_t m_usedRTs;
 
-    uint32_t m_textureTypes;
-
     uint32_t m_specUbo = 0;
 
     uint32_t m_rsBlock = 0;
-    uint32_t m_rsFirstSampler = 0u;
-
-    uint32_t m_samplerArray = 0u;
-
     uint32_t m_mainFuncLabel = 0;
-
-    DxvkPushDataBlock m_samplerPushData;
 
     //////////////////////////////////////
     // Common function definition methods
@@ -557,7 +543,7 @@ namespace dxvk {
             DxsoRegisterValue       a,
             DxsoRegisterValue       b);
 
-    DxsoRegisterValue emitMad(
+    DxsoRegisterValue emitFma(
             DxsoRegisterValue       a,
             DxsoRegisterValue       b,
             DxsoRegisterValue       c);
@@ -692,7 +678,7 @@ namespace dxvk {
     void emitInputSetup();
 
     void emitVsClipping();
-    void setupRenderStateInfo(uint32_t samplerCount);
+    void setupRenderStateInfo();
     void emitFog();
     void emitPsProcessing();
     void emitOutputDepthClamp();

@@ -37,8 +37,8 @@ namespace dxvk {
   D3D11UserDefinedAnnotation<ContextType>::D3D11UserDefinedAnnotation(
           ContextType*          container,
     const Rc<DxvkDevice>&       dxvkDevice)
-  : m_container(container),
-    m_annotationsEnabled(dxvkDevice->debugFlags().test(DxvkDebugFlag::Markers)) {
+  : m_container(container), m_eventDepth(0),
+    m_annotationsEnabled(dxvkDevice->instance()->extensions().extDebugUtils) {
     if (!IsDeferred && m_annotationsEnabled)
       RegisterUserDefinedAnnotation<true>(this);
   }
@@ -75,16 +75,19 @@ namespace dxvk {
   INT STDMETHODCALLTYPE D3D11UserDefinedAnnotation<ContextType>::BeginEvent(
           D3DCOLOR                Color,
           LPCWSTR                 Name) {
-    if (!m_annotationsEnabled || !Name)
+    if (!m_annotationsEnabled)
       return -1;
 
     D3D10DeviceLock lock = m_container->LockContext();
 
-    m_container->EmitCs([
-      cColor = Color,
-      cLabel = dxvk::str::fromws(Name)
-    ] (DxvkContext* ctx) {
-      ctx->beginDebugLabel(vk::makeLabel(cColor, cLabel.c_str()));
+    m_container->EmitCs([color = Color, labelName = dxvk::str::fromws(Name)](DxvkContext *ctx) {
+      VkDebugUtilsLabelEXT label;
+      label.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+      label.pNext = nullptr;
+      label.pLabelName = labelName.c_str();
+      DecodeD3DCOLOR(color, label.color);
+
+      ctx->beginDebugLabel(&label);
     });
 
     return m_eventDepth++;
@@ -98,14 +101,11 @@ namespace dxvk {
 
     D3D10DeviceLock lock = m_container->LockContext();
 
-    if (!m_eventDepth)
-      return 0;
-
-    m_container->EmitCs([] (DxvkContext* ctx) {
+    m_container->EmitCs([](DxvkContext *ctx) {
       ctx->endDebugLabel();
     });
 
-    return --m_eventDepth;
+    return m_eventDepth--;
   }
 
 
@@ -113,16 +113,19 @@ namespace dxvk {
   void STDMETHODCALLTYPE D3D11UserDefinedAnnotation<ContextType>::SetMarker(
           D3DCOLOR                Color,
           LPCWSTR                 Name) {
-    if (!m_annotationsEnabled || !Name)
+    if (!m_annotationsEnabled)
       return;
 
     D3D10DeviceLock lock = m_container->LockContext();
 
-    m_container->EmitCs([
-      cColor = Color,
-      cLabel = dxvk::str::fromws(Name)
-    ] (DxvkContext* ctx) {
-      ctx->insertDebugLabel(vk::makeLabel(cColor, cLabel.c_str()));
+    m_container->EmitCs([color = Color, labelName = dxvk::str::fromws(Name)](DxvkContext *ctx) {
+      VkDebugUtilsLabelEXT label;
+      label.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+      label.pNext = nullptr;
+      label.pLabelName = labelName.c_str();
+      DecodeD3DCOLOR(color, label.color);
+
+      ctx->insertDebugLabel(&label);
     });
   }
 

@@ -9,17 +9,15 @@ namespace dxvk {
           UINT64              InitialValue,
           D3D11_FENCE_FLAG    Flags,
           HANDLE              hFence)
-  : D3D11DeviceChild<ID3D11Fence>(pDevice),
-    m_flags(Flags), m_destructionNotifier(this) {
-    DxvkFenceCreateInfo fenceInfo = { };
+  : D3D11DeviceChild<ID3D11Fence>(pDevice) {
+    DxvkFenceCreateInfo fenceInfo;
     fenceInfo.initialValue = InitialValue;
+    m_flags = Flags;
 
     if (Flags & D3D11_FENCE_FLAG_SHARED) {
       fenceInfo.sharedType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D11_FENCE_BIT;
-
-      if (!hFence)
+      if (hFence == nullptr)
         hFence = INVALID_HANDLE_VALUE;
-
       fenceInfo.sharedHandle = hFence;
     }
 
@@ -50,11 +48,6 @@ namespace dxvk {
       return S_OK;
     }
 
-    if (riid == __uuidof(ID3DDestructionNotifier)) {
-      *ppvObject = ref(&m_destructionNotifier);
-      return S_OK;
-    }
-
     if (logQueryInterfaceError(__uuidof(ID3D11Fence), riid)) {
       Logger::warn("D3D11Fence: Unknown interface query");
       Logger::warn(str::format(riid));
@@ -69,35 +62,8 @@ namespace dxvk {
           DWORD               dwAccess,
           LPCWSTR             lpName,
           HANDLE*             pHandle) {
-    InitReturnPtr(pHandle);
     if (!(m_flags & D3D11_FENCE_FLAG_SHARED))
       return E_INVALIDARG;
-
-    OBJECT_ATTRIBUTES attr = { };
-    attr.Length = sizeof(attr);
-    attr.SecurityDescriptor = const_cast<SECURITY_ATTRIBUTES*>(pAttributes);
-
-    WCHAR buffer[MAX_PATH];
-    UNICODE_STRING name_str;
-    if (lpName) {
-        DWORD session, len, name_len = wcslen(lpName);
-
-        ProcessIdToSessionId(GetCurrentProcessId(), &session);
-        len = swprintf(buffer, ARRAYSIZE(buffer), L"\\Sessions\\%u\\BaseNamedObjects\\", session);
-        memcpy(buffer + len, lpName, (name_len + 1) * sizeof(WCHAR));
-        name_str.MaximumLength = name_str.Length = (len + name_len) * sizeof(WCHAR);
-        name_str.MaximumLength += sizeof(WCHAR);
-        name_str.Buffer = buffer;
-
-        attr.ObjectName = &name_str;
-        attr.Attributes = OBJ_CASE_INSENSITIVE;
-    }
-
-    D3DKMT_HANDLE local = m_fence->kmtLocal();
-    if (!D3DKMTShareObjects(1, &local, &attr, dwAccess, pHandle))
-      return S_OK;
-
-    /* try legacy Proton shared resource implementation */
 
     if (pAttributes)
       Logger::warn(str::format("CreateSharedHandle: attributes ", pAttributes, " not handled"));

@@ -57,20 +57,9 @@ namespace dxvk::wsi {
             uint32_t         width,
             uint32_t         weight) = 0;
 
-    virtual void saveWindowState(
-            HWND             hWindow,
-            DxvkWindowState* pState,
-            bool             saveStyle) = 0;
-
-    virtual void restoreWindowState(
-            HWND             hWindow,
-            DxvkWindowState* pState,
-            bool             restoreCoordinates) = 0;
-
     virtual bool setWindowMode(
             HMONITOR         hMonitor,
             HWND             hWindow,
-            DxvkWindowState* pState,
       const WsiMode&         mode) = 0;
 
     virtual bool enterFullscreenMode(
@@ -82,7 +71,8 @@ namespace dxvk::wsi {
 
     virtual bool leaveFullscreenMode(
             HWND             hWindow,
-            DxvkWindowState* pState) = 0;
+            DxvkWindowState* pState,
+            bool             restoreCoordinates) = 0;
 
     virtual bool restoreDisplayMode() = 0;
 
@@ -113,9 +103,6 @@ namespace dxvk::wsi {
 
 #if defined(DXVK_WSI_WIN32)
   extern WsiBootstrap Win32WSI;
-#endif
-#if defined(DXVK_WSI_SDL3)
-  extern WsiBootstrap Sdl3WSI;
 #endif
 #if defined(DXVK_WSI_SDL2)
   extern WsiBootstrap Sdl2WSI;

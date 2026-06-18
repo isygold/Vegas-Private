@@ -20,18 +20,14 @@ namespace dxvk {
   static constexpr uint32_t SamplerStateCount = D3DSAMP_DMAPOFFSET + 1;
   static constexpr uint32_t SamplerCount      = caps::MaxTexturesPS + caps::MaxTexturesVS + 1;
   static constexpr uint32_t TextureStageStateCount = DXVK_TSS_COUNT;
-  static constexpr uint32_t PaletteEntryCount = 256;
+
+  namespace hacks::PointSize {
+    static constexpr DWORD AlphaToCoverageDisabled = MAKEFOURCC('A', '2', 'M', '0');
+    static constexpr DWORD AlphaToCoverageEnabled  = MAKEFOURCC('A', '2', 'M', '1');
+  }
   
   struct D3D9ClipPlane {
     float coeff[4] = {};
-
-    bool operator == (const D3D9ClipPlane& other) {
-      return std::memcmp(this, &other, sizeof(D3D9ClipPlane)) == 0;
-    }
-
-    bool operator != (const D3D9ClipPlane& other) {
-      return !this->operator == (other);
-    }
   };
 
   struct D3D9RenderStateInfo {
@@ -77,20 +73,24 @@ namespace dxvk {
   };
 
   struct D3D9Light {
-    D3D9Light(const D3DLIGHT9& light, Matrix4 viewMtx)
-      : Diffuse      ( Vector4(light.Diffuse.r,  light.Diffuse.g,  light.Diffuse.b,  light.Diffuse.a) )
-      , Specular     ( Vector4(light.Specular.r, light.Specular.g, light.Specular.b, light.Specular.a) )
-      , Ambient      ( Vector4(light.Ambient.r,  light.Ambient.g,  light.Ambient.b,  light.Ambient.a) )
-      , Position     ( viewMtx * Vector4(light.Position.x,  light.Position.y,  light.Position.z,  1.0f) )
-      , Direction    ( normalize(viewMtx * Vector4(light.Direction.x, light.Direction.y, light.Direction.z, 0.0f)) )
-      , Type         ( light.Type )
-      , Range        ( light.Range )
-      , Falloff      ( light.Falloff )
-      , Attenuation0 ( light.Attenuation0 )
-      , Attenuation1 ( light.Attenuation1 )
-      , Attenuation2 ( light.Attenuation2 )
-      , Theta        ( cosf(light.Theta / 2.0f) )
-      , Phi          ( cosf(light.Phi / 2.0f) ) { }
+    D3D9Light(const D3DLIGHT9& light, Matrix4 viewMtx) {
+      Diffuse  = Vector4(light.Diffuse.r,  light.Diffuse.g,  light.Diffuse.b,  light.Diffuse.a);
+      Specular = Vector4(light.Specular.r, light.Specular.g, light.Specular.b, light.Specular.a);
+      Ambient  = Vector4(light.Ambient.r,  light.Ambient.g,  light.Ambient.b,  light.Ambient.a);
+
+      Position  = viewMtx * Vector4(light.Position.x,  light.Position.y,  light.Position.z,  1.0f);
+      Direction = Vector4(light.Direction.x, light.Direction.y, light.Direction.z, 0.0f);
+      Direction = normalize(viewMtx * Direction);
+
+      Type         = light.Type;
+      Range        = light.Range;
+      Falloff      = light.Falloff;
+      Attenuation0 = light.Attenuation0;
+      Attenuation1 = light.Attenuation1;
+      Attenuation2 = light.Attenuation2;
+      Theta        = cosf(light.Theta / 2.0f);
+      Phi          = cosf(light.Phi / 2.0f);
+    }
 
     Vector4 Diffuse;
     Vector4 Specular;
@@ -109,66 +109,6 @@ namespace dxvk {
     float Phi;
   };
 
-  struct D3D9FFShaderKeyVSData {
-    union {
-      struct {
-        uint32_t TexcoordIndices : 24;
-
-        uint32_t VertexHasPositionT : 1;
-
-        uint32_t VertexHasColor0 : 1; // Diffuse
-        uint32_t VertexHasColor1 : 1; // Specular
-
-        uint32_t VertexHasPointSize : 1;
-
-        uint32_t UseLighting : 1;
-
-        uint32_t NormalizeNormals : 1;
-        uint32_t LocalViewer : 1;
-        uint32_t RangeFog : 1;
-
-        // End of uint32_t
-
-        uint32_t TexcoordFlags : 24;
-
-        uint32_t DiffuseSource : 2;
-        uint32_t AmbientSource : 2;
-        uint32_t SpecularSource : 2;
-        uint32_t EmissiveSource : 2;
-
-        // Next uint32_t
-
-        uint32_t TransformFlags : 24;
-
-        uint32_t LightCount : 4;
-        uint32_t SpecularEnabled : 1;
-
-        // End of uint32_t
-
-        uint32_t VertexTexcoordDeclMask : 24;
-        uint32_t VertexHasFog : 1;
-
-        uint32_t VertexBlendMode    : 2;
-        uint32_t VertexBlendIndexed : 1;
-        uint32_t VertexBlendCount   : 2;
-
-        uint32_t VertexClipping     : 1;
-
-        // End of uint32_t
-      } Contents;
-
-      uint32_t Primitive[5];
-    };
-  };
-
-  struct D3D9FFShaderKeyVS {
-    D3D9FFShaderKeyVS() {
-      // memcmp safety
-      std::memset(&Data, 0, sizeof(Data));
-    }
-
-    D3D9FFShaderKeyVSData Data;
-  };
 
   struct D3D9FixedFunctionVS {
     Matrix4 WorldView;
@@ -184,8 +124,6 @@ namespace dxvk {
     std::array<D3D9Light, caps::MaxEnabledLights> Lights;
     D3DMATERIAL9 Material;
     float TweenFactor;
-
-    D3D9FFShaderKeyVSData Key;
   };
 
 
@@ -199,48 +137,8 @@ namespace dxvk {
   };
 
 
-  struct D3D9FFShaderStage {
-    union {
-      struct {
-        uint32_t     ColorOp   : 5;
-        uint32_t     ColorArg0 : 6;
-        uint32_t     ColorArg1 : 6;
-        uint32_t     ColorArg2 : 6;
-
-        uint32_t     AlphaOp   : 5;
-        uint32_t     AlphaArg0 : 6;
-        uint32_t     AlphaArg1 : 6;
-        uint32_t     AlphaArg2 : 6;
-
-        uint32_t     ResultIsTemp : 1;
-
-        // Included in here, read from Stage 0 for packing reasons
-        // Affects all stages.
-        uint32_t     GlobalSpecularEnable : 1;
-      } Contents;
-
-      uint32_t Primitive[2];
-    };
-  };
-
-  struct D3D9FFShaderKeyFS {
-    D3D9FFShaderKeyFS() {
-      // memcmp safety
-      std::memset(Stages, 0, sizeof(Stages));
-
-      // Normalize this. DISABLE != 0.
-      for (uint32_t i = 0; i < caps::TextureStageCount; i++) {
-        Stages[i].Contents.ColorOp = D3DTOP_DISABLE;
-        Stages[i].Contents.AlphaOp = D3DTOP_DISABLE;
-      }
-    }
-
-    D3D9FFShaderStage Stages[caps::TextureStageCount];
-  };
-
   struct D3D9FixedFunctionPS {
     Vector4 textureFactor;
-    D3D9FFShaderKeyFS Key;
   };
 
   enum D3D9SharedPSStages {
@@ -329,31 +227,6 @@ namespace dxvk {
     T m_data;
   };
 
-  struct D3D9SamplerInfo {
-    D3D9SamplerInfo(const std::array<DWORD, SamplerStateCount>& state)
-    : addressU(D3DTEXTUREADDRESS(state[D3DSAMP_ADDRESSU]))
-    , addressV(D3DTEXTUREADDRESS(state[D3DSAMP_ADDRESSV]))
-    , addressW(D3DTEXTUREADDRESS(state[D3DSAMP_ADDRESSW]))
-    , borderColor(D3DCOLOR(state[D3DSAMP_BORDERCOLOR]))
-    , magFilter(D3DTEXTUREFILTERTYPE(state[D3DSAMP_MAGFILTER]))
-    , minFilter(D3DTEXTUREFILTERTYPE(state[D3DSAMP_MINFILTER]))
-    , mipFilter(D3DTEXTUREFILTERTYPE(state[D3DSAMP_MIPFILTER]))
-    , mipLodBias(bit::cast<float>(state[D3DSAMP_MIPMAPLODBIAS]))
-    , maxMipLevel(state[D3DSAMP_MAXMIPLEVEL])
-    , maxAnisotropy(state[D3DSAMP_MAXANISOTROPY]) { }
-
-    D3DTEXTUREADDRESS addressU;
-    D3DTEXTUREADDRESS addressV;
-    D3DTEXTUREADDRESS addressW;
-    D3DCOLOR borderColor;
-    D3DTEXTUREFILTERTYPE magFilter;
-    D3DTEXTUREFILTERTYPE minFilter;
-    D3DTEXTUREFILTERTYPE mipFilter;
-    float mipLodBias;
-    DWORD maxMipLevel;
-    DWORD maxAnisotropy;
-  };
-
   template <template <typename T> typename ItemType>
   struct D3D9State {
     D3D9State();
@@ -380,8 +253,6 @@ namespace dxvk {
     D3DVIEWPORT9                                        viewport = {};
     RECT                                                scissorRect = {};
 
-    D3DCLIPSTATUS9                                      clipStatus = {0, 0xffffffff};
-
     ItemType<std::array<
       D3D9ClipPlane,
       caps::MaxClipPlanes>>                             clipPlanes = {};
@@ -389,11 +260,6 @@ namespace dxvk {
     ItemType<std::array<
       std::array<DWORD, TextureStageStateCount>,
       caps::TextureStageCount>>                         textureStages = {};
-
-    std::unordered_map<
-       UINT,
-       std::array<PALETTEENTRY, PaletteEntryCount>>     texturePalettes;
-    UINT                                                texturePaletteNumber = 0u;
 
     ItemType<D3D9ShaderConstantsVSSoftware>             vsConsts;
     ItemType<D3D9ShaderConstantsPS>                     psConsts;
@@ -407,11 +273,9 @@ namespace dxvk {
     std::vector<std::optional<D3DLIGHT9>>               lights;
     std::array<DWORD, caps::MaxEnabledLights>           enabledLightIndices;
 
-    float                                               nPatchSegments = 0.0f;
-
     bool IsLightEnabled(DWORD Index) const {
-      const auto& enabledIndices = enabledLightIndices;
-      return std::find(enabledIndices.begin(), enabledIndices.end(), Index) != enabledIndices.end();
+      const auto& indices = enabledLightIndices;
+      return std::find(indices.begin(), indices.end(), Index) != indices.end();
     }
   };
 

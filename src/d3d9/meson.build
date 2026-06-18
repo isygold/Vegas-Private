@@ -7,10 +7,7 @@ d3d9_shaders = files([
   'shaders/d3d9_convert_a2w10v10u10.comp',
   'shaders/d3d9_convert_w11v11u10.comp',
   'shaders/d3d9_convert_nv12.comp',
-  'shaders/d3d9_convert_yv12.comp',
-  'shaders/d3d9_fixed_function_vert.vert',
-  'shaders/d3d9_fixed_function_frag.frag',
-  'shaders/d3d9_fixed_function_frag_sample.frag',
+  'shaders/d3d9_convert_yv12.comp'
 ])
 
 d3d9_src = [
@@ -33,10 +30,10 @@ d3d9_src = [
   'd3d9_shader.cpp',
   'd3d9_vertex_declaration.cpp',
   'd3d9_query.cpp',
-  'd3d9_shader_validator.cpp',
   'd3d9_multithread.cpp',
   'd3d9_options.cpp',
   'd3d9_stateblock.cpp',
+  'd3d9_sampler.cpp',
   'd3d9_util.cpp',
   'd3d9_initializer.cpp',
   'd3d9_fixed_function.cpp',

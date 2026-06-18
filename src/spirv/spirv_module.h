@@ -174,10 +174,6 @@ namespace dxvk {
             bool                    z,
             bool                    w);
     
-    uint32_t constvec2u32(
-            uint32_t                x,
-            uint32_t                y);
-
     uint32_t constvec4u32(
             uint32_t                x,
             uint32_t                y,
@@ -604,11 +600,7 @@ namespace dxvk {
     uint32_t opConvertUtoF(
             uint32_t                resultType,
             uint32_t                operand);
-
-    uint32_t opUConvert(
-            uint32_t                resultType,
-            uint32_t                operand);
-
+    
     uint32_t opCompositeConstruct(
             uint32_t                resultType,
             uint32_t                valueCount,
@@ -890,7 +882,7 @@ namespace dxvk {
             uint32_t                vector1,
             uint32_t                vector2);
     
-    uint32_t opFUnordNotEqual(
+    uint32_t opFOrdNotEqual(
             uint32_t                resultType,
             uint32_t                vector1,
             uint32_t                vector2);
@@ -1285,10 +1277,6 @@ namespace dxvk {
 
     void opEndInvocationInterlock();
 
-    uint32_t opSinCos(
-            uint32_t                x,
-            bool                    useBuiltIn);
-
   private:
     
     uint32_t m_version;
@@ -1308,7 +1296,6 @@ namespace dxvk {
     SpirvCodeBuffer m_variables;
     SpirvCodeBuffer m_code;
 
-    std::unordered_set<uint32_t> m_uniqueTypes;
     std::unordered_set<uint32_t> m_lateConsts;
 
     std::vector<uint32_t> m_interfaceVars;
@@ -1344,15 +1331,6 @@ namespace dxvk {
     void classifyBlocks(
             std::unordered_set<uint32_t>& reachableBlocks,
             std::unordered_set<uint32_t>& mergeBlocks);
-
-    static constexpr double sincosTaylorFactor(uint32_t power) {
-      double result = 1.0;
-
-      for (uint32_t i = 1; i <= power; i++)
-        result *= pi * 0.25f / double(i);
-
-      return result;
-    }
 
   };
   

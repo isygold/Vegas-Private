@@ -10,20 +10,20 @@ namespace dxvk {
   }
 
 
-  DxvkExtensionList DxvkPlatformExts::getInstanceExtensions() {
+  DxvkNameSet DxvkPlatformExts::getInstanceExtensions() {
     std::vector<const char *> extensionNames = wsi::getInstanceExtensions();
 
-    DxvkExtensionList names;
+    DxvkNameSet names;
     for (const char* name : extensionNames)
-      names.push_back(vk::makeExtension(name));
+      names.add(name);
 
     return names;
   }
 
 
-  DxvkExtensionList DxvkPlatformExts::getDeviceExtensions(
+  DxvkNameSet DxvkPlatformExts::getDeviceExtensions(
           uint32_t      adapterId) {
-    return DxvkExtensionList();
+    return DxvkNameSet();
   }
 
 

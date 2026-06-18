@@ -46,12 +46,6 @@ namespace dxvk {
 
 
   HRESULT STDMETHODCALLTYPE D3D9StateBlock::Capture() {
-    D3D9DeviceLock lock = m_parent->LockDevice();
-
-    // A state block can't capture state while another is being recorded.
-    if (unlikely(m_parent->ShouldRecord()))
-      return D3DERR_INVALIDCALL;
-
     if (m_captures.flags.test(D3D9CapturedStateFlag::VertexDecl))
       SetVertexDeclaration(m_deviceState->vertexDecl.ptr());
 
@@ -62,16 +56,13 @@ namespace dxvk {
 
 
   HRESULT STDMETHODCALLTYPE D3D9StateBlock::Apply() {
-    D3D9DeviceLock lock = m_parent->LockDevice();
-
-    // A state block can't be applied while another is being recorded.
-    if (unlikely(m_parent->ShouldRecord()))
-      return D3DERR_INVALIDCALL;
+    m_applying = true;
 
     if (m_captures.flags.test(D3D9CapturedStateFlag::VertexDecl) && m_state.vertexDecl != nullptr)
       m_parent->SetVertexDeclaration(m_state.vertexDecl.ptr());
 
     ApplyOrCapture<D3D9StateFunction::Apply, false>();
+    m_applying = false;
 
     return D3D_OK;
   }
@@ -208,7 +199,7 @@ namespace dxvk {
     if (m_state.IsLightEnabled(Index) == !!Enable)
       return D3D_OK;
 
-    uint32_t searchIndex = std::numeric_limits<uint32_t>::max();
+    uint32_t searchIndex = UINT32_MAX;
     uint32_t setIndex    = Index;
 
     if (!Enable)
@@ -248,6 +239,15 @@ namespace dxvk {
     m_captures.flags.set(D3D9CapturedStateFlag::TextureStages);
     m_captures.textureStages.set(Stage, true);
     m_captures.textureStageStates[Stage].set(Type, true);
+    return D3D_OK;
+  }
+
+
+  HRESULT D3D9StateBlock::MultiplyStateTransform(uint32_t idx, const D3DMATRIX* pMatrix) {
+    m_state.transforms[idx] = m_state.transforms[idx] * ConvertMatrix(pMatrix);
+
+    m_captures.flags.set(D3D9CapturedStateFlag::Transforms);
+    m_captures.transforms.set(idx, true);
     return D3D_OK;
   }
 
@@ -440,7 +440,7 @@ namespace dxvk {
   void D3D9StateBlock::CapturePixelSamplerStates() {
     m_captures.flags.set(D3D9CapturedStateFlag::SamplerStates);
 
-    for (uint32_t i = 0; i < FirstVSSamplerSlot; i++) {
+    for (uint32_t i = 0; i < caps::MaxTexturesPS + 1; i++) {
       m_captures.samplers.set(i, true);
 
       m_captures.samplerStates[i].set(D3DSAMP_ADDRESSU, true);
@@ -523,7 +523,7 @@ namespace dxvk {
   void D3D9StateBlock::CaptureVertexSamplerStates() {
     m_captures.flags.set(D3D9CapturedStateFlag::SamplerStates);
 
-    for (uint32_t i = FirstVSSamplerSlot; i < SamplerCount; i++) {
+    for (uint32_t i = caps::MaxTexturesPS + 1; i < SamplerCount; i++) {
       m_captures.samplers.set(i, true);
       m_captures.samplerStates[i].set(D3DSAMP_DMAPOFFSET, true);
     }

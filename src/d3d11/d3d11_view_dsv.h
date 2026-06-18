@@ -49,8 +49,25 @@ namespace dxvk {
       return m_view;
     }
     
+    VkImageLayout GetRenderLayout() const {
+      if (m_view->imageInfo().tiling == VK_IMAGE_TILING_OPTIMAL) {
+        switch (m_desc.Flags & (D3D11_DSV_READ_ONLY_DEPTH | D3D11_DSV_READ_ONLY_STENCIL)) {
+          default:  // case 0
+            return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+          case D3D11_DSV_READ_ONLY_DEPTH:
+            return VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL_KHR;
+          case D3D11_DSV_READ_ONLY_STENCIL:
+            return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL_KHR;
+          case D3D11_DSV_READ_ONLY_DEPTH | D3D11_DSV_READ_ONLY_STENCIL:
+            return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        }
+      } else {
+        return VK_IMAGE_LAYOUT_GENERAL;
+      }
+    }
+
     UINT GetSampleCount() const {
-      return UINT(m_view->image()->info().sampleCount);
+      return UINT(m_view->imageInfo().sampleCount);
     }
 
     VkImageAspectFlags GetWritableAspectMask() const {
@@ -83,11 +100,7 @@ namespace dxvk {
     D3D11_VK_VIEW_INFO                m_info;
     Rc<DxvkImageView>                 m_view;
     D3D10DepthStencilView             m_d3d10;
-
-    D3DDestructionNotifier            m_destructionNotifier;
-
-    VkImageLayout GetViewLayout() const;
-
+    
   };
   
 }

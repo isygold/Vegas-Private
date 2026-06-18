@@ -26,8 +26,7 @@ namespace dxvk::sync {
         #elif defined(DXVK_ARCH_ARM64)
         __asm__ __volatile__ ("yield");
         #else
-        /* Do nothing (busy-loop). Please add more #elif above here if
-         * your CPU architecture has a suitable pause/yield instruction */
+        #error "Pause/Yield not implemented for this architecture."
         #endif
         if (fn())
           return;

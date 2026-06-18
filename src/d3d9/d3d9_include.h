@@ -44,14 +44,16 @@
 #define D3DPRESENT_FORCEIMMEDIATE              0x00000100L
 #endif
 
-// Missing in some versions of mingw headers
+#ifndef D3DSWAPEFFECT_COPY_VSYNC
+#define D3DSWAPEFFECT_COPY_VSYNC 4
+#endif
+
+// MinGW headers are broken. Who'dve guessed?
 #ifndef _MSC_VER
-namespace dxvk {
-  typedef struct _D3DDEVINFO_RESOURCEMANAGER
-  {
-    char dummy;
-  } D3DDEVINFO_RESOURCEMANAGER, * LPD3DDEVINFO_RESOURCEMANAGER;
-}
+typedef struct _D3DDEVINFO_RESOURCEMANAGER
+{
+  char dummy;
+} D3DDEVINFO_RESOURCEMANAGER, * LPD3DDEVINFO_RESOURCEMANAGER;
 #endif
 
 // This is the managed pool on D3D9Ex, it's just hidden!

@@ -2,8 +2,6 @@
 
 #include "../util/config/config.h"
 
-#include "../vulkan/vulkan_loader.h"
-
 namespace dxvk {
 
   struct DxvkOptions {
@@ -11,81 +9,45 @@ namespace dxvk {
     DxvkOptions(const Config& config);
 
     /// Enable debug utils
-    bool enableDebugUtils = false;
-	bool enableAsync;
+    bool enableDebugUtils;
 
-    /// Enable memory defragmentation
-    Tristate enableMemoryDefrag = Tristate::Auto;
+    /// Enable state cache
+    bool enableStateCache;
 
     /// Number of compiler threads
     /// when using the state cache
-    int32_t numCompilerThreads = 0;
+    int32_t numCompilerThreads;
 
     /// Enable graphics pipeline library
-    Tristate enableGraphicsPipelineLibrary = Tristate::Auto;
-
-    /// Enable descriptor buffer
-    Tristate enableDescriptorBuffer = Tristate::Auto;
+    Tristate enableGraphicsPipelineLibrary;
 
     /// Enables pipeline lifetime tracking
-    Tristate trackPipelineLifetime = Tristate::Auto;
+    Tristate trackPipelineLifetime;
 
     /// Shader-related options
-    Tristate useRawSsbo = Tristate::Auto;
+    Tristate useRawSsbo;
 
     /// HUD elements
     std::string hud;
 
     /// Forces swap chain into MAILBOX (if true)
     /// or FIFO_RELAXED (if false) present mode
-    Tristate tearFree = Tristate::Auto;
-
-    /// Enables latency sleep
-    Tristate latencySleep = Tristate::Auto;
-
-    /// Latency tolerance, in microseconds
-    int32_t latencyTolerance = 0u;
-
-    /// Disable VK_NV_low_latency2. This extension
-    /// appears to be all sorts of broken on 32-bit.
-    Tristate disableNvLowLatency2 = Tristate::Auto;
+    Tristate tearFree;
 
     // Hides integrated GPUs if dedicated GPUs are
     // present. May be necessary for some games that
     // incorrectly assume monitor layouts.
-    bool hideIntegratedGraphics = false;
+    bool hideIntegratedGraphics;
 
-    /// Clears all mapped memory to zero.
-    bool zeroMappedMemory = false;
-
-    /// Allows full-screen exclusive mode on Windows
-    bool allowFse = false;
-
-    /// Whether to enable tiler optimizations
-    Tristate tilerMode = Tristate::Auto;
-
-    /// Overrides memory budget for DXVK
-    VkDeviceSize maxMemoryBudget = 0u;
-
-    /// Whether to use custom sin/cos approximation
-    Tristate lowerSinCos = Tristate::Auto;
-
-    /// Device name
+    // Device name
     std::string deviceFilter;
 
-    // --- VEGAS: ADRENO OPTIMIZATION OPTIONS ---
-    /// Master switch: enables all Vegas Adreno optimizations.
-    /// Auto = enable on Adreno, True = force-on, False = force-off.
+    /// Enable Star/Vegas optimization profile (Auto = detect Adreno)
     Tristate enableStarProfile = Tristate::Auto;
 
-    /// Enables FSR 1.0 spatial upscaler (Auto/True/False)
-    /// Only effective when enableStarProfile is not False.
-    Tristate vegasEnableUpscaler = Tristate::Auto;
-
-    /// Override GPU tier (0 = auto-detect, 1 = entry, 2 = mid, 3 = high).
-    /// Forces the tier detected by the GPU-name classifier to this value.
-    /// Useful for misclassified Adreno GPUs or manual tuning.
+    /// Force GPU tier (0 = auto, 1-3 = manual override)
     int32_t vegasForceTier = 0;
+
   };
 
 }

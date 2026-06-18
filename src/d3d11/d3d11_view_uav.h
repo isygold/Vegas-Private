@@ -43,10 +43,6 @@ namespace dxvk {
       return m_info.BindFlags & Flags;
     }
 
-    BOOL HasCounter() const {
-      return m_counterView != nullptr;
-    }
-
     D3D11_RESOURCE_DIMENSION GetResourceType() const {
       D3D11_RESOURCE_DIMENSION type;
       m_resource->GetType(&type);
@@ -88,8 +84,6 @@ namespace dxvk {
     Rc<DxvkBufferView>                m_bufferView;
     Rc<DxvkImageView>                 m_imageView;
     Rc<DxvkBufferView>                m_counterView;
-
-    D3DDestructionNotifier            m_destructionNotifier;
 
     Rc<DxvkBufferView> CreateCounterBufferView();
     

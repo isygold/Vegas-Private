@@ -48,10 +48,9 @@ namespace dxvk {
 
   private:
 
-    ContextType*  m_container           = nullptr;
-    int32_t       m_eventDepth          = 0u;
-    bool          m_annotationsEnabled  = false;
-
+    ContextType*  m_container;
+    int32_t       m_eventDepth;
+    bool          m_annotationsEnabled;
   };
 
 }

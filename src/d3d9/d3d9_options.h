@@ -22,19 +22,6 @@ namespace dxvk {
     int32_t customDeviceId;
     std::string customDeviceDesc;
 
-    /// Reports Nvidia GPUs running on the proprietary driver as a different
-    /// vendor (usually AMD)
-    bool hideNvidiaGpu;
-
-    /// Reports Nvidia GPUs running on NVK as a different vendor (usually AMD)
-    bool hideNvkGpu;
-
-    /// Reports AMD GPUs as a different vendor (usually Nvidia)
-    bool hideAmdGpu;
-
-    /// Reports Intel GPUs as a different vendor (usually AMD)
-    bool hideIntelGpu;
-
     /// Present interval. Overrides the value
     /// in D3DPRESENT_PARAMS used in swapchain present.
     int32_t presentInterval;
@@ -47,7 +34,7 @@ namespace dxvk {
     int32_t maxFrameRate;
 
     /// Set the max shader model the device can support in the caps.
-    uint32_t shaderModel;
+    int32_t shaderModel;
 
     /// Whether or not to set the process as DPI aware in Windows when the API interface is created.
     bool dpiAware;
@@ -62,6 +49,10 @@ namespace dxvk {
 
     /// Whether or not to do a fast path clear if we're close enough to the whole render target.
     bool lenientClear;
+
+    /// Back buffer count for the Vulkan swap chain.
+    /// Overrides buffer count in present parameters.
+    int32_t numBackBuffers;
 
     /// Defer surface creation
     bool deferSurfaceCreation;
@@ -87,6 +78,9 @@ namespace dxvk {
     /// Support X4R4G4B4
     bool supportX4R4G4B4;
 
+    /// Support D16_LOCKABLE
+    bool supportD16Lockable;
+
     /// Use D32f for D24
     bool useD32forD24;
 
@@ -103,30 +97,30 @@ namespace dxvk {
     /// failing resource allocation.
     bool memoryTrackTest;
 
+    /// Support VCACHE query
+    bool supportVCache;
+
     /// Forced aspect ratio, disable other modes
     std::string forceAspectRatio;
 
-    /// Forced refresh rate, disable other modes
-    uint32_t forceRefreshRate;
-
-    /// Restrict the mode count to ensure a maximum total count of 24
-    bool modeCountCompatibility;
+    /// Enable dialog mode (ie. no exclusive fullscreen)
+    bool enableDialogMode;
 
     /// Always use a spec constant to determine sampler type (instead of just in PS 1.x)
     /// Works around a game bug in Halo CE where it gives cube textures to 2d/volume samplers
     bool forceSamplerTypeSpecConstants;
 
+    /// Forces an MSAA level on the swapchain
+    int32_t forceSwapchainMSAA;
+
     /// Forces sample rate shading
     bool forceSampleRateShading;
-
-    /// Allow D3DLOCK_DISCARD
-    bool allowDiscard;
 
     /// Enumerate adapters by displays
     bool enumerateByDisplays;
 
     /// Cached dynamic buffers: Maps all buffers in cached memory.
-    bool cachedWriteOnlyBuffers;
+    bool cachedDynamicBuffers;
 
     /// Use device local memory for constant buffers.
     bool deviceLocalConstantBuffers;
@@ -164,15 +158,6 @@ namespace dxvk {
 
     /// Enable depth texcoord Z (Dref) scaling (D3D8 quirk)
     int32_t drefScaling;
-
-    /// Add an extra front buffer to make GetFrontBufferData() work correctly when the swapchain only has a single buffer
-    bool extraFrontbuffer;
-
-    /// Use the uber shader for fixed function vertex shaders.
-    bool ffUbershaderVS;
-
-    /// Use the uber shader for fixed function fragment shaders.
-    bool ffUbershaderFS;
   };
 
 }

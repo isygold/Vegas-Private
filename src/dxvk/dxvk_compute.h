@@ -1,17 +1,20 @@
 #pragma once
 
-#include <optional>
 #include <vector>
+
+#include "../util/sync/sync_list.h"
 
 #include "dxvk_bind_mask.h"
 #include "dxvk_graphics_state.h"
 #include "dxvk_pipelayout.h"
+#include "dxvk_resource.h"
 #include "dxvk_shader.h"
 #include "dxvk_stats.h"
 
 namespace dxvk {
   
   class DxvkDevice;
+  class DxvkStateCache;
   class DxvkPipelineManager;
   struct DxvkPipelineStats;
 
@@ -27,7 +30,7 @@ namespace dxvk {
     }
 
     size_t hash() const {
-      return DxvkShader::getCookie(cs);
+      return DxvkShader::getHash(cs);
     }
   };
 
@@ -37,10 +40,13 @@ namespace dxvk {
    */
   struct DxvkComputePipelineInstance {
     DxvkComputePipelineInstance() { }
-    DxvkComputePipelineInstance(VkPipeline handle_)
-    : handle(handle_) { }
+    DxvkComputePipelineInstance(
+      const DxvkComputePipelineStateInfo& state_,
+            VkPipeline                    handle_)
+    : state(state_), handle(handle_) { }
 
-    VkPipeline handle = VK_NULL_HANDLE;
+    DxvkComputePipelineStateInfo state;
+    VkPipeline                   handle = VK_NULL_HANDLE;
   };
   
   
@@ -60,6 +66,7 @@ namespace dxvk {
             DxvkDevice*                 device,
             DxvkPipelineManager*        pipeMgr,
             DxvkComputePipelineShaders  shaders,
+            DxvkBindingLayoutObjects*   layout,
             DxvkShaderPipelineLibrary*  library);
 
     ~DxvkComputePipeline();
@@ -73,11 +80,15 @@ namespace dxvk {
     }
     
     /**
-     * \brief Queries pipeline layout
+     * \brief Pipeline layout
+     * 
+     * Stores the pipeline layout and the descriptor set
+     * layouts, as well as information on the resource
+     * slots used by the pipeline.
      * \returns Pipeline layout
      */
-    const DxvkPipelineBindings* getLayout() const {
-      return &m_layout;
+    DxvkBindingLayoutObjects* getBindings() const {
+      return m_bindings;
     }
 
     /**
@@ -88,7 +99,7 @@ namespace dxvk {
      */
     uint32_t getSpecConstantMask() const {
       constexpr uint32_t globalMask = (1u << MaxNumSpecConstants) - 1;
-      return m_shaders.cs->metadata().specConstantMask & globalMask;
+      return m_shaders.cs->getSpecConstantMask() & globalMask;
     }
     
     /**
@@ -109,35 +120,22 @@ namespace dxvk {
      */
     void compilePipeline(
       const DxvkComputePipelineStateInfo& state);
-
-    /**
-     * \brief Debug name
-     *
-     * Consists of the compute shader's debug name.
-     * \returns Debug name
-     */
-    const char* debugName() const {
-      return m_debugName.c_str();
-    }
-
+    
   private:
     
-    DxvkDevice*                 m_device = nullptr;
-    DxvkPipelineStats*          m_stats = nullptr;
+    DxvkDevice*                 m_device;    
+    DxvkStateCache*             m_stateCache;
+    DxvkPipelineStats*          m_stats;
 
-    DxvkShaderPipelineLibrary*  m_library = nullptr;
-    std::optional<VkPipeline>   m_libraryHandle;
+    DxvkShaderPipelineLibrary*  m_library;
+    VkPipeline                  m_libraryHandle;
 
     DxvkComputePipelineShaders  m_shaders;
-    DxvkPipelineBindings        m_layout;
+    DxvkBindingLayoutObjects*   m_bindings;
     
-    std::string                 m_debugName;
-
     alignas(CACHE_LINE_SIZE)
     dxvk::mutex                             m_mutex;
-    DxvkPipelineVariantTable<
-      DxvkComputePipelineStateInfo,
-      DxvkComputePipelineInstance>          m_pipelines;
+    sync::List<DxvkComputePipelineInstance> m_pipelines;
     
     DxvkComputePipelineInstance* createInstance(
       const DxvkComputePipelineStateInfo& state);
@@ -154,8 +152,6 @@ namespace dxvk {
     void logPipelineState(
             LogLevel                      level,
       const DxvkComputePipelineStateInfo& state) const;
-
-    std::string createDebugName() const;
 
   };
   

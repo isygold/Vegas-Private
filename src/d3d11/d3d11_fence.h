@@ -41,10 +41,8 @@ namespace dxvk {
     
   private:
     
-    Rc<DxvkFence>           m_fence;
-    D3D11_FENCE_FLAG        m_flags = D3D11_FENCE_FLAG_NONE;
-
-    D3DDestructionNotifier  m_destructionNotifier;
+    Rc<DxvkFence> m_fence;
+    D3D11_FENCE_FLAG m_flags;
 
   };
   

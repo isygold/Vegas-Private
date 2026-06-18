@@ -41,24 +41,9 @@ namespace dxvk::wsi {
   }
 
 
-  void Sdl2WsiDriver::saveWindowState(
-          HWND             hWindow,
-          DxvkWindowState* pState,
-          bool             saveStyle) {
-  }
-
-
-  void Sdl2WsiDriver::restoreWindowState(
-          HWND             hWindow,
-          DxvkWindowState* pState,
-          bool             restoreCoordinates) {
-  }
-
-
   bool Sdl2WsiDriver::setWindowMode(
           HMONITOR         hMonitor,
           HWND             hWindow,
-          DxvkWindowState* pState,
     const WsiMode&         pMode) {
     const int32_t displayId    = fromHmonitor(hMonitor);
     SDL_Window* window         = fromHwnd(hWindow);
@@ -118,7 +103,8 @@ namespace dxvk::wsi {
 
   bool Sdl2WsiDriver::leaveFullscreenMode(
           HWND             hWindow,
-          DxvkWindowState* pState) {
+          DxvkWindowState* pState,
+          bool             restoreCoordinates) {
     SDL_Window* window = fromHwnd(hWindow);
 
     if (SDL_SetWindowFullscreen(window, 0) != 0) {

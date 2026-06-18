@@ -4,21 +4,6 @@
 
 #include "../util/log/log.h"
 
-/**
- * \brief Declaration of the ID3D11On12Device1 interface
- *
- * Various different headers that we need to be compatible with
- * can't seem to agree on the signature of GetD3D12Device, and
- * older wine/mingw headers don't support this interface at all.
- */
-MIDL_INTERFACE("bdb64df4-ea2f-4c70-b861-aaab1258bb5d")
-ID3D11On12Device1_DXVK : public ID3D11On12Device {
-  virtual HRESULT STDMETHODCALLTYPE GetD3D12Device(
-          REFIID                  riid,
-          void**                  ppvDevice) = 0;
-};
-
-
 namespace dxvk {
 
   class D3D11Device;
@@ -37,7 +22,7 @@ namespace dxvk {
   };
 
 
-  class D3D11on12Device : public ID3D11On12Device1_DXVK {
+  class D3D11on12Device : public ID3D11On12Device {
 
   public:
 
@@ -73,10 +58,6 @@ namespace dxvk {
             ID3D11Resource* const*  ppResources,
             UINT                    ResourceCount);
 
-    HRESULT STDMETHODCALLTYPE GetD3D12Device(
-            REFIID                  riid,
-            void**                  ppvDevice);
-
     bool Is11on12Device() const {
       return m_d3d12Device != nullptr;
     }
@@ -92,7 +73,3 @@ namespace dxvk {
   };
 
 }
-
-#ifndef _MSC_VER
-__CRT_UUID_DECL(ID3D11On12Device1_DXVK, 0xbdb64df4,0xea2f,0x4c70,0xb8,0x61,0xaa,0xab,0x12,0x58,0xbb,0x5d);
-#endif

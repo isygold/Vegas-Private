@@ -24,11 +24,9 @@ namespace dxvk {
     const Com<DxgiFactory>& factory,
     const Com<DxgiAdapter>& adapter,
               HMONITOR      monitor)
-  : m_factory     ( factory ),
-    m_adapter     ( adapter ),
-    m_monitorInfo ( factory->GetMonitorInfo() ),
-    m_monitor     ( monitor ),
-    m_destructionNotifier(this) {
+  : m_monitorInfo(factory->GetMonitorInfo()),
+    m_adapter(adapter),
+    m_monitor(monitor) {
     CacheMonitorData();
   }
   
@@ -54,11 +52,6 @@ namespace dxvk {
      || riid == __uuidof(IDXGIOutput5)
      || riid == __uuidof(IDXGIOutput6)) {
       *ppvObject = ref(this);
-      return S_OK;
-    }
-
-    if (riid == __uuidof(ID3DDestructionNotifier)) {
-      *ppvObject = ref(&m_destructionNotifier);
       return S_OK;
     }
     
@@ -172,13 +165,7 @@ namespace dxvk {
     std::vector<DXGI_MODE_DESC1> modes(modeCount);
     GetDisplayModeList1(targetFormat, DXGI_ENUM_MODES_SCALING, &modeCount, modes.data());
 
-    const DxgiOptions* options = m_factory->GetOptions();
-
-    DXGI_MODE_DESC1 modeToMatch = *pModeToMatch;
-    if (options->forceRefreshRate)
-      modeToMatch.RefreshRate = {options->forceRefreshRate, 1u};
-
-    FilterModesByDesc(modes, modeToMatch);
+    FilterModesByDesc(modes, *pModeToMatch);
     FilterModesByDesc(modes, defaultMode);
 
     if (modes.empty())
@@ -188,12 +175,11 @@ namespace dxvk {
 
     Logger::debug(str::format(
       "DXGI: For mode ",
-        modeToMatch.Width, "x", modeToMatch.Height, "@",
-        modeToMatch.RefreshRate.Denominator ? (modeToMatch.RefreshRate.Numerator / modeToMatch.RefreshRate.Denominator) : 0,
+        pModeToMatch->Width, "x", pModeToMatch->Height, "@",
+        pModeToMatch->RefreshRate.Denominator ? (pModeToMatch->RefreshRate.Numerator / pModeToMatch->RefreshRate.Denominator) : 0,
       " found closest mode ",
         pClosestMatch->Width, "x", pClosestMatch->Height, "@",
         pClosestMatch->RefreshRate.Denominator ? (pClosestMatch->RefreshRate.Numerator / pClosestMatch->RefreshRate.Denominator) : 0));
-
     return S_OK;
   }
 

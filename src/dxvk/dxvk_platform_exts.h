@@ -10,9 +10,9 @@ namespace dxvk {
 
     std::string_view getName();
 
-    DxvkExtensionList getInstanceExtensions();
+    DxvkNameSet getInstanceExtensions();
 
-    DxvkExtensionList getDeviceExtensions(
+    DxvkNameSet getDeviceExtensions(
             uint32_t      adapterId);
     
     void initInstanceExtensions();

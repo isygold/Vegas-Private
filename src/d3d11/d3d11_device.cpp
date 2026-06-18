@@ -1,10 +1,6 @@
 #include <algorithm>
 #include <cstring>
 
-#include <dxbc/dxbc_container.h>
-#include <dxbc/dxbc_parser.h>
-#include <dxbc/dxbc_signature.h>
-
 #include "../dxgi/dxgi_monitor.h"
 #include "../dxgi/dxgi_surface.h"
 #include "../dxgi/dxgi_swapchain.h"
@@ -50,7 +46,7 @@ namespace dxvk {
     m_dxvkAdapter       (m_dxvkDevice->adapter()),
     m_d3d11Formats      (m_dxvkDevice),
     m_d3d11Options      (m_dxvkDevice->instance()->config()),
-    m_shaderOptions     (GetShaderOptions(m_dxvkDevice, m_d3d11Options)),
+    m_dxbcOptions       (m_dxvkDevice, m_d3d11Options),
     m_maxFeatureLevel   (GetMaxFeatureLevel(m_dxvkDevice->instance(), m_dxvkDevice->adapter())),
     m_deviceFeatures    (m_dxvkDevice->instance(), m_dxvkDevice->adapter(), m_d3d11Options, m_featureLevel) {
     m_initializer = new D3D11Initializer(this);
@@ -187,7 +183,7 @@ namespace dxvk {
     desc.TextureLayout  = D3D11_TEXTURE_LAYOUT_UNDEFINED;
     
     ID3D11Texture2D1* texture2D = nullptr;
-    HRESULT hr = CreateTexture2DBase(&desc, pInitialData, ppTexture2D ? &texture2D : nullptr);
+    HRESULT hr = CreateTexture2D1(&desc, pInitialData, ppTexture2D ? &texture2D : nullptr);
 
     if (hr != S_OK)
       return hr;
@@ -206,14 +202,6 @@ namespace dxvk {
     if (!pDesc)
       return E_INVALIDARG;
     
-    return CreateTexture2DBase(pDesc, pInitialData, ppTexture2D);
-  }
-
-
-  HRESULT STDMETHODCALLTYPE D3D11Device::CreateTexture2DBase(
-    const D3D11_TEXTURE2D_DESC1*  pDesc,
-    const D3D11_SUBRESOURCE_DATA* pInitialData,
-          ID3D11Texture2D1**      ppTexture2D) {
     D3D11_COMMON_TEXTURE_DESC desc;
     desc.Width          = pDesc->Width;
     desc.Height         = pDesc->Height;
@@ -274,7 +262,7 @@ namespace dxvk {
     desc.TextureLayout  = D3D11_TEXTURE_LAYOUT_UNDEFINED;
     
     ID3D11Texture3D1* texture3D = nullptr;
-    HRESULT hr = CreateTexture3DBase(&desc, pInitialData, ppTexture3D ? &texture3D : nullptr);
+    HRESULT hr = CreateTexture3D1(&desc, pInitialData, ppTexture3D ? &texture3D : nullptr);
 
     if (hr != S_OK)
       return hr;
@@ -292,15 +280,7 @@ namespace dxvk {
 
     if (!pDesc)
       return E_INVALIDARG;
-
-    return CreateTexture3DBase(pDesc, pInitialData, ppTexture3D);
-  }
-  
-  
-  HRESULT STDMETHODCALLTYPE D3D11Device::CreateTexture3DBase(
-    const D3D11_TEXTURE3D_DESC1*  pDesc,
-    const D3D11_SUBRESOURCE_DATA* pInitialData,
-          ID3D11Texture3D1**      ppTexture3D) {
+    
     D3D11_COMMON_TEXTURE_DESC desc;
     desc.Width          = pDesc->Width;
     desc.Height         = pDesc->Height;
@@ -345,9 +325,6 @@ namespace dxvk {
           ID3D11ShaderResourceView**        ppSRView) {
     InitReturnPtr(ppSRView);
 
-    if (!pResource)
-      return E_INVALIDARG;
-
     uint32_t plane = GetViewPlaneIndex(pResource, pDesc ? pDesc->Format : DXGI_FORMAT_UNKNOWN);
 
     D3D11_SHADER_RESOURCE_VIEW_DESC1 desc = pDesc
@@ -356,7 +333,7 @@ namespace dxvk {
     
     ID3D11ShaderResourceView1* view = nullptr;
 
-    HRESULT hr = CreateShaderResourceViewBase(pResource,
+    HRESULT hr = CreateShaderResourceView1(pResource,
       pDesc    ? &desc : nullptr,
       ppSRView ? &view : nullptr);
     
@@ -376,15 +353,7 @@ namespace dxvk {
 
     if (!pResource)
       return E_INVALIDARG;
-
-    return CreateShaderResourceViewBase(pResource, pDesc, ppSRView);
-  }
-  
-  
-  HRESULT STDMETHODCALLTYPE D3D11Device::CreateShaderResourceViewBase(
-          ID3D11Resource*                   pResource,
-    const D3D11_SHADER_RESOURCE_VIEW_DESC1* pDesc,
-          ID3D11ShaderResourceView1**       ppSRView) {
+    
     D3D11_COMMON_RESOURCE_DESC resourceDesc;
     GetCommonResourceDesc(pResource, &resourceDesc);
     
@@ -433,24 +402,21 @@ namespace dxvk {
           ID3D11UnorderedAccessView**       ppUAView) {
     InitReturnPtr(ppUAView);
 
-    if (!pResource)
-      return E_INVALIDARG;
-
     uint32_t plane = GetViewPlaneIndex(pResource, pDesc ? pDesc->Format : DXGI_FORMAT_UNKNOWN);
 
     D3D11_UNORDERED_ACCESS_VIEW_DESC1 desc = pDesc
       ? D3D11UnorderedAccessView::PromoteDesc(pDesc, plane)
       : D3D11_UNORDERED_ACCESS_VIEW_DESC1();
-
+    
     ID3D11UnorderedAccessView1* view = nullptr;
 
-    HRESULT hr = CreateUnorderedAccessViewBase(pResource,
+    HRESULT hr = CreateUnorderedAccessView1(pResource,
       pDesc    ? &desc : nullptr,
       ppUAView ? &view : nullptr);
-
+    
     if (hr != S_OK)
       return hr;
-
+    
     *ppUAView = view;
     return S_OK;
   }
@@ -464,15 +430,7 @@ namespace dxvk {
     
     if (!pResource)
       return E_INVALIDARG;
-
-    return CreateUnorderedAccessViewBase(pResource, pDesc, ppUAView);
-  }
-  
-  
-  HRESULT STDMETHODCALLTYPE D3D11Device::CreateUnorderedAccessViewBase(
-          ID3D11Resource*                   pResource,
-    const D3D11_UNORDERED_ACCESS_VIEW_DESC1* pDesc,
-          ID3D11UnorderedAccessView1**      ppUAView) {
+    
     D3D11_COMMON_RESOURCE_DESC resourceDesc;
     GetCommonResourceDesc(pResource, &resourceDesc);
 
@@ -523,9 +481,6 @@ namespace dxvk {
           ID3D11RenderTargetView**          ppRTView) {
     InitReturnPtr(ppRTView);
 
-    if (!pResource)
-      return E_INVALIDARG;
-
     uint32_t plane = GetViewPlaneIndex(pResource, pDesc ? pDesc->Format : DXGI_FORMAT_UNKNOWN);
 
     D3D11_RENDER_TARGET_VIEW_DESC1 desc = pDesc
@@ -534,7 +489,7 @@ namespace dxvk {
     
     ID3D11RenderTargetView1* view = nullptr;
 
-    HRESULT hr = CreateRenderTargetViewBase(pResource,
+    HRESULT hr = CreateRenderTargetView1(pResource,
       pDesc    ? &desc : nullptr,
       ppRTView ? &view : nullptr);
     
@@ -554,15 +509,7 @@ namespace dxvk {
 
     if (!pResource)
       return E_INVALIDARG;
-
-    return CreateRenderTargetViewBase(pResource, pDesc, ppRTView);
-  }
-  
-  
-  HRESULT STDMETHODCALLTYPE D3D11Device::CreateRenderTargetViewBase(
-          ID3D11Resource*                   pResource,
-    const D3D11_RENDER_TARGET_VIEW_DESC1*   pDesc,
-          ID3D11RenderTargetView1**         ppRTView) {
+    
     // DXVK only supports render target views for image resources
     D3D11_COMMON_RESOURCE_DESC resourceDesc;
     GetCommonResourceDesc(pResource, &resourceDesc);
@@ -672,32 +619,30 @@ namespace dxvk {
     // works, provided the shader does not have any actual inputs
     if (!pInputElementDescs)
       return E_INVALIDARG;
-
+    
     try {
-      dxbc_spv::dxbc::Container container(pShaderBytecodeWithInputSignature, BytecodeLength);
-      auto isgnChunk = container.getInputSignatureChunk();
-
-      if (!isgnChunk)
-        return E_INVALIDARG;
-
-      dxbc_spv::dxbc::Signature inputSignature(std::move(isgnChunk));
+      DxbcReader dxbcReader(reinterpret_cast<const char*>(
+        pShaderBytecodeWithInputSignature), BytecodeLength);
+      DxbcModule dxbcModule(dxbcReader);
+      
+      const Rc<DxbcIsgn> inputSignature = dxbcModule.isgn();
 
       uint32_t attrMask = 0;
       uint32_t bindMask = 0;
       uint32_t locationMask = 0;
       uint32_t bindingsDefined = 0;
-
+      
       std::array<DxvkVertexAttribute, D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> attrList = { };
       std::array<DxvkVertexBinding,   D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> bindList = { };
-
+      
       for (uint32_t i = 0; i < NumElements; i++) {
-        auto entry = inputSignature.findSemantic(0u,
+        const DxbcSgnEntry* entry = inputSignature->find(
           pInputElementDescs[i].SemanticName,
-          pInputElementDescs[i].SemanticIndex);
+          pInputElementDescs[i].SemanticIndex, 0);
 
         // Create vertex input attribute description
-        DxvkVertexAttribute attrib = { };
-        attrib.location = entry != inputSignature.end() ? entry->getRegisterIndex() : 0;
+        DxvkVertexAttribute attrib;
+        attrib.location = entry != nullptr ? entry->registerId : 0;
         attrib.binding  = pInputElementDescs[i].InputSlot;
         attrib.format   = LookupFormat(pInputElementDescs[i].Format, DXGI_VK_FORMAT_MODE_COLOR).Format;
         attrib.offset   = pInputElementDescs[i].AlignedByteOffset;
@@ -720,21 +665,20 @@ namespace dxvk {
               break;
             }
           }
-        } else if (attrib.offset & (alignment - 1)) {
+        } else if (attrib.offset & (alignment - 1))
           return E_INVALIDARG;
-        }
 
         attrList.at(i) = attrib;
 
         // Create vertex input binding description. The
         // stride is dynamic state in D3D11 and will be
         // set by D3D11DeviceContext::IASetVertexBuffers.
-        DxvkVertexBinding binding = { };
+        DxvkVertexBinding binding;
         binding.binding   = pInputElementDescs[i].InputSlot;
-        binding.divisor   = pInputElementDescs[i].InstanceDataStepRate;
+        binding.fetchRate = pInputElementDescs[i].InstanceDataStepRate;
         binding.inputRate = pInputElementDescs[i].InputSlotClass == D3D11_INPUT_PER_INSTANCE_DATA
           ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
-        binding.extent    = entry != inputSignature.end() ? uint32_t(attrib.offset + formatInfo->elementSize) : 0u;
+        binding.extent    = entry ? uint32_t(attrib.offset + formatInfo->elementSize) : 0u;
 
         // Check if the binding was already defined. If so, the
         // parameters must be identical (namely, the input rate).
@@ -749,7 +693,7 @@ namespace dxvk {
           bindingsDefined |= 1u << binding.binding;
         }
 
-        if (entry != inputSignature.end()) {
+        if (entry) {
           attrMask |= 1u << i;
           bindMask |= 1u << binding.binding;
           locationMask |= 1u << attrib.location;
@@ -757,10 +701,11 @@ namespace dxvk {
       }
 
       // Ensure that all inputs used by the shader are defined
-      for (auto i = inputSignature.begin(); i != inputSignature.end(); i++) {
-        bool isBuiltIn = i->getSystemValue() != dxbc_spv::dxbc::SignatureSysval::eNone;
+      for (auto i = inputSignature->begin(); i != inputSignature->end(); i++) {
+        bool isBuiltIn = DxbcIsgn::compareSemanticNames(i->semanticName, "sv_instanceid")
+                      || DxbcIsgn::compareSemanticNames(i->semanticName, "sv_vertexid");
 
-        if (!isBuiltIn && !(locationMask & (1u << i->getRegisterIndex())))
+        if (!isBuiltIn && !(locationMask & (1u << i->registerId)))
           return E_INVALIDARG;
       }
 
@@ -792,12 +737,18 @@ namespace dxvk {
     InitReturnPtr(ppVertexShader);
     D3D11CommonShader module;
 
-    DxvkIrShaderCreateInfo moduleInfo = { };
-    moduleInfo.options = m_shaderOptions;
+    DxbcModuleInfo moduleInfo;
+    moduleInfo.options = m_dxbcOptions;
+    moduleInfo.tess    = nullptr;
+    moduleInfo.xfb     = nullptr;
 
-    HRESULT hr = CreateShaderModule(&module, pClassLinkage,
-      ComputeShaderKey(VK_SHADER_STAGE_VERTEX_BIT, pShaderBytecode, BytecodeLength),
-      pShaderBytecode, BytecodeLength, moduleInfo);
+    Sha1Hash hash = Sha1Hash::compute(
+      pShaderBytecode, BytecodeLength);
+    
+    HRESULT hr = CreateShaderModule(&module,
+      DxvkShaderKey(VK_SHADER_STAGE_VERTEX_BIT, hash),
+      pShaderBytecode, BytecodeLength, pClassLinkage,
+      &moduleInfo);
     
     if (FAILED(hr))
       return hr;
@@ -818,12 +769,18 @@ namespace dxvk {
     InitReturnPtr(ppGeometryShader);
     D3D11CommonShader module;
     
-    DxvkIrShaderCreateInfo moduleInfo = { };
-    moduleInfo.options = m_shaderOptions;
+    DxbcModuleInfo moduleInfo;
+    moduleInfo.options = m_dxbcOptions;
+    moduleInfo.tess    = nullptr;
+    moduleInfo.xfb     = nullptr;
 
-    HRESULT hr = CreateShaderModule(&module, pClassLinkage,
-      ComputeShaderKey(VK_SHADER_STAGE_GEOMETRY_BIT, pShaderBytecode, BytecodeLength),
-      pShaderBytecode, BytecodeLength, moduleInfo);
+    Sha1Hash hash = Sha1Hash::compute(
+      pShaderBytecode, BytecodeLength);
+    
+    HRESULT hr = CreateShaderModule(&module,
+      DxvkShaderKey(VK_SHADER_STAGE_GEOMETRY_BIT, hash),
+      pShaderBytecode, BytecodeLength, pClassLinkage,
+      &moduleInfo);
 
     if (FAILED(hr))
       return hr;
@@ -854,11 +811,7 @@ namespace dxvk {
 
     // Zero-init some counterss so that we can increment
     // them while walking over the stream output entries
-    std::array<uint32_t, D3D11_SO_BUFFER_SLOT_COUNT> xfbOffsets = { };
-
-    DxvkIrShaderCreateInfo moduleInfo = { };
-    moduleInfo.options = m_shaderOptions;
-    moduleInfo.rasterizedStream = RasterizedStream;
+    DxbcXfbInfo xfb = { };
 
     for (uint32_t i = 0; i < NumEntries; i++) {
       const D3D11_SO_DECLARATION_ENTRY* so = &pSODeclaration[i];
@@ -872,36 +825,60 @@ namespace dxvk {
          || so->ComponentCount <  1
          || so->ComponentCount >  4)
           return E_INVALIDARG;
-
-        auto& entry = moduleInfo.xfbEntries.emplace_back();
-        entry.semanticName = so->SemanticName;
-        entry.semanticIndex = so->SemanticIndex;
-        entry.componentMask = ((1u << so->ComponentCount) - 1u) << so->StartComponent;
-        entry.stream = so->Stream;
-        entry.buffer = so->OutputSlot;
-        entry.offset = xfbOffsets.at(so->OutputSlot);
+        
+        DxbcXfbEntry* entry = &xfb.entries[xfb.entryCount++];
+        entry->semanticName   = so->SemanticName;
+        entry->semanticIndex  = so->SemanticIndex;
+        entry->componentIndex = so->StartComponent;
+        entry->componentCount = so->ComponentCount;
+        entry->streamId       = so->Stream;
+        entry->bufferId       = so->OutputSlot;
+        entry->offset         = xfb.strides[so->OutputSlot];
       }
 
-      xfbOffsets.at(so->OutputSlot) += so->ComponentCount * sizeof(uint32_t);
+      xfb.strides[so->OutputSlot] += so->ComponentCount * sizeof(uint32_t);
     }
     
     // If necessary, override the buffer strides
     for (uint32_t i = 0; i < NumStrides; i++)
-      xfbOffsets.at(i) = pBufferStrides[i];
+      xfb.strides[i] = pBufferStrides[i];
 
-    // Assign buffer stride to each entry
-    for (size_t i = 0u; i < moduleInfo.xfbEntries.size(); i++) {
-      auto& entry = moduleInfo.xfbEntries[i];
-      entry.stride = xfbOffsets.at(entry.buffer);
+    // Set stream to rasterize, if any
+    xfb.rasterizedStream = -1;
+    
+    if (RasterizedStream != D3D11_SO_NO_RASTERIZED_STREAM)
+      Logger::err("D3D11: CreateGeometryShaderWithStreamOutput: Rasterized stream not supported");
+    
+    // Compute hash from both the xfb info and the source
+    // code, because both influence the generated code
+    DxbcXfbInfo hashXfb = xfb;
+
+    std::vector<Sha1Data> chunks = {{
+      { pShaderBytecode, BytecodeLength  },
+      { &hashXfb,        sizeof(hashXfb) },
+    }};
+
+    for (uint32_t i = 0; i < hashXfb.entryCount; i++) {
+      const char* semantic = hashXfb.entries[i].semanticName;
+
+      if (semantic) {
+        chunks.push_back({ semantic, std::strlen(semantic) });
+        hashXfb.entries[i].semanticName = nullptr;
+      }
     }
 
-    // Create the actual shader module
-    auto shaderKey = ComputeShaderKey(VK_SHADER_STAGE_GEOMETRY_BIT,
-      pShaderBytecode, BytecodeLength, pSODeclaration, NumEntries,
-      pBufferStrides, NumStrides, RasterizedStream);
+    Sha1Hash hash = Sha1Hash::compute(chunks.size(), chunks.data());
     
-    HRESULT hr = CreateShaderModule(&module, pClassLinkage, shaderKey,
-      pShaderBytecode, BytecodeLength, moduleInfo);
+    // Create the actual shader module
+    DxbcModuleInfo moduleInfo;
+    moduleInfo.options = m_dxbcOptions;
+    moduleInfo.tess    = nullptr;
+    moduleInfo.xfb     = &xfb;
+    
+    HRESULT hr = CreateShaderModule(&module,
+      DxvkShaderKey(VK_SHADER_STAGE_GEOMETRY_BIT, hash),
+      pShaderBytecode, BytecodeLength, pClassLinkage,
+      &moduleInfo);
 
     if (FAILED(hr))
       return E_INVALIDARG;
@@ -922,12 +899,19 @@ namespace dxvk {
     InitReturnPtr(ppPixelShader);
     D3D11CommonShader module;
     
-    DxvkIrShaderCreateInfo moduleInfo = { };
-    moduleInfo.options = m_shaderOptions;
+    DxbcModuleInfo moduleInfo;
+    moduleInfo.options = m_dxbcOptions;
+    moduleInfo.tess    = nullptr;
+    moduleInfo.xfb     = nullptr;
 
-    HRESULT hr = CreateShaderModule(&module, pClassLinkage,
-      ComputeShaderKey(VK_SHADER_STAGE_FRAGMENT_BIT, pShaderBytecode, BytecodeLength),
-      pShaderBytecode, BytecodeLength, moduleInfo);
+    Sha1Hash hash = Sha1Hash::compute(
+      pShaderBytecode, BytecodeLength);
+    
+
+    HRESULT hr = CreateShaderModule(&module,
+      DxvkShaderKey(VK_SHADER_STAGE_FRAGMENT_BIT, hash),
+      pShaderBytecode, BytecodeLength, pClassLinkage,
+      &moduleInfo);
 
     if (FAILED(hr))
       return hr;
@@ -948,12 +932,23 @@ namespace dxvk {
     InitReturnPtr(ppHullShader);
     D3D11CommonShader module;
     
-    DxvkIrShaderCreateInfo moduleInfo = { };
-    moduleInfo.options = m_shaderOptions;
+    DxbcTessInfo tessInfo;
+    tessInfo.maxTessFactor = float(m_d3d11Options.maxTessFactor);
 
-    HRESULT hr = CreateShaderModule(&module, pClassLinkage,
-      ComputeShaderKey(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, pShaderBytecode, BytecodeLength),
-      pShaderBytecode, BytecodeLength, moduleInfo);
+    DxbcModuleInfo moduleInfo;
+    moduleInfo.options = m_dxbcOptions;
+    moduleInfo.tess    = nullptr;
+    moduleInfo.xfb     = nullptr;
+
+    if (tessInfo.maxTessFactor >= 8.0f)
+      moduleInfo.tess = &tessInfo;
+
+    Sha1Hash hash = Sha1Hash::compute(
+      pShaderBytecode, BytecodeLength);
+    
+    HRESULT hr = CreateShaderModule(&module,
+      DxvkShaderKey(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, hash),
+      pShaderBytecode, BytecodeLength, pClassLinkage, &moduleInfo);
 
     if (FAILED(hr))
       return hr;
@@ -974,12 +969,17 @@ namespace dxvk {
     InitReturnPtr(ppDomainShader);
     D3D11CommonShader module;
     
-    DxvkIrShaderCreateInfo moduleInfo = { };
-    moduleInfo.options = m_shaderOptions;
+    DxbcModuleInfo moduleInfo;
+    moduleInfo.options = m_dxbcOptions;
+    moduleInfo.tess    = nullptr;
+    moduleInfo.xfb     = nullptr;
 
-    HRESULT hr = CreateShaderModule(&module, pClassLinkage,
-      ComputeShaderKey(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, pShaderBytecode, BytecodeLength),
-      pShaderBytecode, BytecodeLength, moduleInfo);
+    Sha1Hash hash = Sha1Hash::compute(
+      pShaderBytecode, BytecodeLength);
+    
+    HRESULT hr = CreateShaderModule(&module,
+      DxvkShaderKey(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, hash),
+      pShaderBytecode, BytecodeLength, pClassLinkage, &moduleInfo);
 
     if (FAILED(hr))
       return hr;
@@ -1000,12 +1000,18 @@ namespace dxvk {
     InitReturnPtr(ppComputeShader);
     D3D11CommonShader module;
     
-    DxvkIrShaderCreateInfo moduleInfo = { };
-    moduleInfo.options = m_shaderOptions;
+    DxbcModuleInfo moduleInfo;
+    moduleInfo.options = m_dxbcOptions;
+    moduleInfo.tess    = nullptr;
+    moduleInfo.xfb     = nullptr;
 
-    HRESULT hr = CreateShaderModule(&module, pClassLinkage,
-      ComputeShaderKey(VK_SHADER_STAGE_COMPUTE_BIT, pShaderBytecode, BytecodeLength),
-      pShaderBytecode, BytecodeLength, moduleInfo);
+    Sha1Hash hash = Sha1Hash::compute(
+      pShaderBytecode, BytecodeLength);
+    
+    HRESULT hr = CreateShaderModule(&module,
+      DxvkShaderKey(VK_SHADER_STAGE_COMPUTE_BIT, hash),
+      pShaderBytecode, BytecodeLength, pClassLinkage,
+      &moduleInfo);
 
     if (FAILED(hr))
       return hr;
@@ -1196,7 +1202,7 @@ namespace dxvk {
     desc.ContextType = D3D11_CONTEXT_TYPE_ALL;
 
     ID3D11Query1* query = nullptr;
-    HRESULT hr = CreateQueryBase(&desc, ppQuery ? &query : nullptr);
+    HRESULT hr = CreateQuery1(&desc, ppQuery ? &query : nullptr);
 
     if (hr != S_OK)
       return hr;
@@ -1213,14 +1219,7 @@ namespace dxvk {
 
     if (!pQueryDesc)
       return E_INVALIDARG;
-
-    return CreateQueryBase(pQueryDesc, ppQuery);
-  }
-
-  
-  HRESULT STDMETHODCALLTYPE D3D11Device::CreateQueryBase(
-    const D3D11_QUERY_DESC1*          pQueryDesc,
-          ID3D11Query1**              ppQuery) {
+    
     HRESULT hr = D3D11Query::ValidateDesc(pQueryDesc);
 
     if (FAILED(hr))
@@ -1397,10 +1396,10 @@ namespace dxvk {
      || texture->CountSubresources() <= SrcSubresource)
       return;
 
-    uint32_t map = texture->GetMapType(SrcSubresource);
+    D3D11_MAP map = texture->GetMapType(SrcSubresource);
 
-    if (map != uint32_t(D3D11_MAP_READ)
-     && map != uint32_t(D3D11_MAP_READ_WRITE))
+    if (map != D3D11_MAP_READ
+     && map != D3D11_MAP_READ_WRITE)
       return;
 
     CopySubresourceData(
@@ -1426,11 +1425,11 @@ namespace dxvk {
      || texture->CountSubresources() <= DstSubresource)
       return;
 
-    uint32_t map = texture->GetMapType(DstSubresource);
+    D3D11_MAP map = texture->GetMapType(DstSubresource);
 
-    if (map != uint32_t(D3D11_MAP_WRITE)
-     && map != uint32_t(D3D11_MAP_WRITE_NO_OVERWRITE)
-     && map != uint32_t(D3D11_MAP_READ_WRITE))
+    if (map != D3D11_MAP_WRITE
+     && map != D3D11_MAP_WRITE_NO_OVERWRITE
+     && map != D3D11_MAP_READ_WRITE)
       return;
 
     CopySubresourceData(
@@ -1443,84 +1442,6 @@ namespace dxvk {
           HANDLE      hResource,
           REFIID      ReturnedInterface,
           void**      ppResource) {
-    InitReturnPtr(ppResource);
-
-    if (!(reinterpret_cast<uintptr_t>(hResource) & 0xc0000000)) {
-      Logger::warn("D3D11Device::OpenSharedResource: Invalid shared handle type");
-      return E_INVALIDARG;
-    }
-
-    if (ppResource == nullptr)
-      return S_FALSE;
-
-    union d3dkmt_desc d3dkmt;
-
-    D3DKMT_QUERYRESOURCEINFO query = { };
-    query.hDevice = m_dxvkDevice->kmtLocal();
-    query.hGlobalShare = reinterpret_cast<uintptr_t>(hResource);
-    query.pPrivateRuntimeData = &d3dkmt;
-    query.PrivateRuntimeDataSize = sizeof(d3dkmt);
-
-    if (D3DKMTQueryResourceInfo(&query)) {
-      Logger::warn(str::format("D3D11Device::OpenSharedResource: Failed to query resource: ", hResource));
-    } else if (query.PrivateRuntimeDataSize < sizeof(d3dkmt.dxgi) || query.PrivateRuntimeDataSize > sizeof(d3dkmt)) {
-      Logger::warn(str::format("D3D11Device::OpenSharedResource: Unexpected size: ", query.PrivateRuntimeDataSize));
-    } else {
-      D3DDDI_OPENALLOCATIONINFO2 alloc = { };
-      D3DKMT_OPENRESOURCE open = { };
-      open.hDevice = m_dxvkDevice->kmtLocal();
-      open.hGlobalShare = reinterpret_cast<uintptr_t>(hResource);
-      open.NumAllocations = 1;
-      open.pOpenAllocationInfo2 = &alloc;
-      open.pPrivateRuntimeData = &d3dkmt;
-      open.PrivateRuntimeDataSize = query.PrivateRuntimeDataSize;
-
-      if (D3DKMTOpenResource2(&open)) {
-        Logger::warn(str::format("D3D11Device::OpenSharedResource: Failed to open resource: ", hResource));
-      } else {
-        D3DKMT_DESTROYALLOCATION destroy = { };
-        destroy.hDevice = m_dxvkDevice->kmtLocal();
-        destroy.hResource = open.hResource;
-        D3DKMTDestroyAllocation(&destroy);
-
-        Rc<DxvkFence> fence;
-        if (d3dkmt.dxgi.sync_handle) {
-          DxvkFenceCreateInfo fenceInfo = { };
-          fenceInfo.sharedType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT;
-          fenceInfo.sharedHandle = reinterpret_cast<HANDLE>(d3dkmt.dxgi.sync_handle);
-          fence = this->GetDXVKDevice()->createFence(fenceInfo);
-        }
-
-        Rc<DxvkKeyedMutex> mutex;
-        if (d3dkmt.dxgi.keyed_mutex) {
-          D3DKMT_OPENKEYEDMUTEX openMutex = { };
-          openMutex.hSharedHandle = d3dkmt.dxgi.mutex_handle;
-
-          if (D3DKMTOpenKeyedMutex(&openMutex)) {
-            Logger::warn(str::format("D3D11Device::OpenSharedResource: Failed to open keyed mutex: ", d3dkmt.dxgi.keyed_mutex));
-          } else {
-            mutex = new DxvkKeyedMutex(m_dxvkDevice, std::move(fence), openMutex.hKeyedMutex, openMutex.hSharedHandle);
-          }
-        }
-
-        D3D11_COMMON_TEXTURE_DESC desc = { };
-        if (!ConvertRuntimeDescriptor(query.PrivateRuntimeDataSize, d3dkmt, &desc))
-          return E_INVALIDARG;
-
-        try {
-          const Com<D3D11Texture2D> texture = new D3D11Texture2D(this, &desc, nullptr, hResource);
-          texture->GetCommonTexture()->GetImage()->setKeyedMutex(std::move(mutex));
-          texture->QueryInterface(ReturnedInterface, ppResource);
-          return S_OK;
-        }
-        catch (const DxvkError& e) {
-          Logger::err(e.message());
-          return E_INVALIDARG;
-        }
-      }
-    }
-
-    /* try the legacy Proton shared resource implementation */
     return OpenSharedResourceGeneric<true>(
       hResource, ReturnedInterface, ppResource);
   }
@@ -1530,95 +1451,6 @@ namespace dxvk {
           HANDLE      hResource,
           REFIID      ReturnedInterface,
           void**      ppResource) {
-    InitReturnPtr(ppResource);
-
-    if (reinterpret_cast<uintptr_t>(hResource) & 0xc0000000) {
-      Logger::warn("D3D11Device::OpenSharedResource1: Invalid shared handle type");
-      return E_INVALIDARG;
-    }
-
-    if (ppResource == nullptr)
-      return S_FALSE;
-
-    union d3dkmt_desc d3dkmt;
-
-    D3DKMT_QUERYRESOURCEINFOFROMNTHANDLE query = { };
-    query.hDevice = m_dxvkDevice->kmtLocal();
-    query.hNtHandle = hResource;
-    query.pPrivateRuntimeData = &d3dkmt;
-    query.PrivateRuntimeDataSize = sizeof(d3dkmt);
-
-    if (D3DKMTQueryResourceInfoFromNtHandle(&query)) {
-      Logger::warn(str::format("D3D11Device::OpenSharedResource1: Failed to query resource: ", hResource));
-    } else if (query.PrivateRuntimeDataSize < sizeof(d3dkmt.dxgi) || query.PrivateRuntimeDataSize > sizeof(d3dkmt)) {
-      Logger::warn(str::format("D3D11Device::OpenSharedResource1: Unexpected size: ", query.PrivateRuntimeDataSize));
-    } else {
-      D3DDDI_OPENALLOCATIONINFO2 alloc = { };
-      D3DKMT_OPENRESOURCEFROMNTHANDLE open = { };
-      char dummy;
-
-      open.hDevice = m_dxvkDevice->kmtLocal();
-      open.hNtHandle = hResource;
-      open.NumAllocations = 1;
-      open.pOpenAllocationInfo2 = &alloc;
-      open.pPrivateRuntimeData = &d3dkmt;
-      open.PrivateRuntimeDataSize = query.PrivateRuntimeDataSize;
-      open.pTotalPrivateDriverDataBuffer = &dummy;
-      open.TotalPrivateDriverDataBufferSize = 0;
-
-      if (D3DKMTOpenResourceFromNtHandle(&open)) {
-        Logger::warn(str::format("D3D11Device::OpenSharedResource1: Failed to open resource: ", hResource));
-      } else {
-        D3DKMT_DESTROYALLOCATION destroy = { };
-        destroy.hDevice = m_dxvkDevice->kmtLocal();
-        destroy.hResource = open.hResource;
-        D3DKMTDestroyAllocation(&destroy);
-
-        Rc<DxvkFence> fence;
-        if (open.hSyncObject) {
-#ifdef _WIN32
-          DxvkFenceCreateInfo fenceInfo = { };
-
-          /* need to create a NT shared handle again to import the fence from it */
-          if (D3DKMTShareObjects(1, &open.hSyncObject, NULL, GENERIC_ALL, &fenceInfo.sharedHandle))
-            Logger::warn(str::format("D3D11Device::OpenSharedResource1: Failed to open sync object"));
-          else {
-            fenceInfo.sharedType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-            fence = m_dxvkDevice->createFence(fenceInfo);
-            CloseHandle(fenceInfo.sharedHandle);
-          }
-#else
-          Logger::warn(str::format("D3D11Device::OpenSharedResource1: Ignoring bundled sync object"));
-#endif
-
-          D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroySync = { };
-          destroySync.hSyncObject = open.hSyncObject;
-          D3DKMTDestroySynchronizationObject(&destroySync);
-        }
-
-        Rc<DxvkKeyedMutex> mutex;
-        if (open.hKeyedMutex) {
-          mutex = new DxvkKeyedMutex(m_dxvkDevice, std::move(fence), open.hKeyedMutex, 0);
-        }
-
-        D3D11_COMMON_TEXTURE_DESC desc = { };
-        if (!ConvertRuntimeDescriptor(query.PrivateRuntimeDataSize, d3dkmt, &desc))
-          return E_INVALIDARG;
-
-        try {
-          const Com<D3D11Texture2D> texture = new D3D11Texture2D(this, &desc, nullptr, hResource);
-          texture->GetCommonTexture()->GetImage()->setKeyedMutex(std::move(mutex));
-          texture->QueryInterface(ReturnedInterface, ppResource);
-          return S_OK;
-        }
-        catch (const DxvkError& e) {
-          Logger::err(e.message());
-          return E_INVALIDARG;
-        }
-      }
-    }
-
-    /* try the legacy Proton shared resource implementation */
     return OpenSharedResourceGeneric<false>(
       hResource, ReturnedInterface, ppResource);
   }
@@ -2007,9 +1839,20 @@ namespace dxvk {
   }
   
   
+  void D3D11Device::FlushInitContext() {
+    m_initializer->Flush();
+  }
+  
+  
   D3D_FEATURE_LEVEL D3D11Device::GetMaxFeatureLevel(
     const Rc<DxvkInstance>& Instance,
     const Rc<DxvkAdapter>&  Adapter) {
+    // Check whether baseline features are supported by the device    
+    DxvkDeviceFeatures features = GetDeviceFeatures(Adapter);
+    
+    if (!Adapter->checkFeatureSupport(features))
+      return D3D_FEATURE_LEVEL();
+
     // The feature level override always takes precedence
     static const std::array<std::pair<std::string, D3D_FEATURE_LEVEL>, 9> s_featureLevels = {{
       { "12_1", D3D_FEATURE_LEVEL_12_1 },
@@ -2038,271 +1881,127 @@ namespace dxvk {
   }
   
   
+  DxvkDeviceFeatures D3D11Device::GetDeviceFeatures(
+    const Rc<DxvkAdapter>&  Adapter) {
+    DxvkDeviceFeatures supported = Adapter->features();
+    DxvkDeviceFeatures enabled   = {};
+
+    // Required for feature level 10_1
+    enabled.core.features.depthBiasClamp                          = VK_TRUE;
+    enabled.core.features.depthClamp                              = VK_TRUE;
+    enabled.core.features.dualSrcBlend                            = VK_TRUE;
+    enabled.core.features.fillModeNonSolid                        = VK_TRUE;
+    enabled.core.features.fullDrawIndexUint32                     = VK_TRUE;
+    enabled.core.features.geometryShader                          = VK_TRUE;
+    enabled.core.features.imageCubeArray                          = VK_TRUE;
+    enabled.core.features.independentBlend                        = VK_TRUE;
+    enabled.core.features.multiViewport                           = VK_TRUE;
+    enabled.core.features.occlusionQueryPrecise                   = VK_TRUE;
+    enabled.core.features.pipelineStatisticsQuery                 = supported.core.features.pipelineStatisticsQuery;
+    enabled.core.features.sampleRateShading                       = VK_TRUE;
+    enabled.core.features.samplerAnisotropy                       = supported.core.features.samplerAnisotropy;
+    enabled.core.features.shaderClipDistance                      = VK_TRUE;
+    enabled.core.features.shaderCullDistance                      = VK_TRUE;
+    enabled.core.features.shaderImageGatherExtended               = VK_TRUE;
+    enabled.core.features.textureCompressionBC                    = VK_TRUE;
+
+    enabled.vk11.shaderDrawParameters                             = VK_TRUE;
+
+    enabled.vk12.samplerMirrorClampToEdge                         = VK_TRUE;
+
+    enabled.vk13.shaderDemoteToHelperInvocation                   = VK_TRUE;
+
+    enabled.extCustomBorderColor.customBorderColors               = supported.extCustomBorderColor.customBorderColorWithoutFormat;
+    enabled.extCustomBorderColor.customBorderColorWithoutFormat   = supported.extCustomBorderColor.customBorderColorWithoutFormat;
+
+    enabled.extTransformFeedback.transformFeedback                = VK_TRUE;
+    enabled.extTransformFeedback.geometryStreams                  = VK_TRUE;
+
+    enabled.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor      = supported.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor;
+    enabled.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor  = supported.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor;
+
+    // Required for Feature Level 11_0
+    enabled.core.features.drawIndirectFirstInstance               = supported.core.features.drawIndirectFirstInstance;
+    enabled.core.features.fragmentStoresAndAtomics                = supported.core.features.fragmentStoresAndAtomics;
+    enabled.core.features.multiDrawIndirect                       = supported.core.features.multiDrawIndirect;
+    enabled.core.features.tessellationShader                      = supported.core.features.tessellationShader;
+
+    // Required for Feature Level 11_1
+    enabled.core.features.logicOp                                 = supported.core.features.logicOp;
+    enabled.core.features.vertexPipelineStoresAndAtomics          = supported.core.features.vertexPipelineStoresAndAtomics;
+
+    // Required for Feature Level 12_0
+    enabled.core.features.sparseBinding                           = supported.core.features.sparseBinding;
+    enabled.core.features.sparseResidencyBuffer                   = supported.core.features.sparseResidencyBuffer;
+    enabled.core.features.sparseResidencyImage2D                  = supported.core.features.sparseResidencyImage2D;
+    enabled.core.features.sparseResidencyImage3D                  = supported.core.features.sparseResidencyImage3D;
+    enabled.core.features.sparseResidency2Samples                 = supported.core.features.sparseResidency2Samples;
+    enabled.core.features.sparseResidency4Samples                 = supported.core.features.sparseResidency4Samples;
+    enabled.core.features.sparseResidency8Samples                 = supported.core.features.sparseResidency8Samples;
+    enabled.core.features.sparseResidency16Samples                = supported.core.features.sparseResidency16Samples;
+    enabled.core.features.sparseResidencyAliased                  = supported.core.features.sparseResidencyAliased;
+    enabled.core.features.shaderResourceResidency                 = supported.core.features.shaderResourceResidency;
+    enabled.core.features.shaderResourceMinLod                    = supported.core.features.shaderResourceMinLod;
+    enabled.vk12.samplerFilterMinmax                              = supported.vk12.samplerFilterMinmax;
+
+    // Required for Feature Level 12_1
+    enabled.extFragmentShaderInterlock.fragmentShaderSampleInterlock = supported.extFragmentShaderInterlock.fragmentShaderSampleInterlock;
+    enabled.extFragmentShaderInterlock.fragmentShaderPixelInterlock  = supported.extFragmentShaderInterlock.fragmentShaderPixelInterlock;
+
+    // Optional in any feature level
+    enabled.core.features.depthBounds                             = supported.core.features.depthBounds;
+    enabled.core.features.shaderFloat64                           = supported.core.features.shaderFloat64;
+    enabled.core.features.shaderInt64                             = supported.core.features.shaderInt64;
+
+    // Depth bias control
+    enabled.extDepthBiasControl.depthBiasControl                                = supported.extDepthBiasControl.depthBiasControl;
+    enabled.extDepthBiasControl.depthBiasExact                                  = supported.extDepthBiasControl.depthBiasExact;
+    enabled.extDepthBiasControl.leastRepresentableValueForceUnormRepresentation = supported.extDepthBiasControl.leastRepresentableValueForceUnormRepresentation;
+
+    return enabled;
+  }
+  
+  
   HRESULT D3D11Device::CreateShaderModule(
           D3D11CommonShader*      pShaderModule,
-          ID3D11ClassLinkage*     pLinkage,
-    const DxvkShaderHash&         ShaderKey,
+          DxvkShaderKey           ShaderKey,
     const void*                   pShaderBytecode,
           size_t                  BytecodeLength,
-    const DxvkIrShaderCreateInfo& ModuleInfo) {
-    if (!BytecodeLength || !pShaderBytecode)
-      return E_INVALIDARG;
+          ID3D11ClassLinkage*     pClassLinkage,
+    const DxbcModuleInfo*         pModuleInfo) {
+    if (pClassLinkage != nullptr)
+      Logger::warn("D3D11Device::CreateShaderModule: Class linkage not supported");
 
-    // Ensure that the built-in hash is valid for the given binary.
-    // Somewhat relevant for us because we use the hash as a way to
-    // deduplicate and also tag shaders.
-    dxbc_spv::dxbc::Container container(pShaderBytecode, BytecodeLength);
-
-    if (!container.validateHash()) {
-      Logger::err("D3D11: Shader hash validation failed");
-      return E_INVALIDARG;
-    }
-
-    // Parse dxbc binary and I/O signatures and validate that all
-    // features used by the shader are enabled on the device
-    dxbc_spv::dxbc::Parser parser(container.getCodeChunk());
-    dxbc_spv::dxbc::ShaderInfo shaderInfo = parser.getShaderInfo();
-
-    auto [hi, lo] = shaderInfo.getVersion();
-
-    if ((hi > 5u) || (hi == 5u && lo) || (hi == 4u && lo > 1u) || hi < 4u)
-      throw DxvkError(str::format("Invalid shader model: ", hi, "_", lo));
-
-    // Check whether the stage matches or if we can create a pass-through GS
-    auto shaderStage = [] (dxbc_spv::dxbc::ShaderType type) {
-      switch (type) {
-        case dxbc_spv::dxbc::ShaderType::eVertex:   return VK_SHADER_STAGE_VERTEX_BIT;
-        case dxbc_spv::dxbc::ShaderType::eHull:     return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
-        case dxbc_spv::dxbc::ShaderType::eDomain:   return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-        case dxbc_spv::dxbc::ShaderType::eGeometry: return VK_SHADER_STAGE_GEOMETRY_BIT;
-        case dxbc_spv::dxbc::ShaderType::ePixel:    return VK_SHADER_STAGE_FRAGMENT_BIT;
-        case dxbc_spv::dxbc::ShaderType::eCompute:  return VK_SHADER_STAGE_COMPUTE_BIT;
-      }
-
-      return VK_SHADER_STAGE_FLAG_BITS_MAX_ENUM;
-    } (shaderInfo.getType());
-
-    if (ShaderKey.stage() != shaderStage) {
-      bool mismatch = !ShaderKey.hasXfb() || (
-        shaderStage != VK_SHADER_STAGE_VERTEX_BIT &&
-        shaderStage != VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
-
-      if (mismatch) {
-        Logger::warn(str::format("D3D11: ", ShaderKey.toString(), ": Source shader is of incompatible type: ", shaderInfo.getType()));
-        return E_INVALIDARG;
-      }
-    }
-
-    dxbc_spv::dxbc::Instruction icbOp = { };
-
-    D3D11BindingMask bindingMask;
-
-    while (parser) {
-      auto op = parser.parseInstruction();
-
-      if (!op)
-        return E_INVALIDARG;
-
-      switch (op.getOpToken().getOpCode()) {
-        case dxbc_spv::dxbc::OpCode::eCustomData: {
-          if (op.getOpToken().getCustomDataType() == dxbc_spv::dxbc::CustomDataType::eDclIcb)
-            icbOp = std::move(op);
-        } break;
-
-        case dxbc_spv::dxbc::OpCode::eDclSampler: {
-          uint32_t index = op.getDst(0u).getIndex(0u);
-          bindingMask.setSampler(index);
-        } break;
-
-        case dxbc_spv::dxbc::OpCode::eDclConstantBuffer: {
-          uint32_t index = op.getDst(0u).getIndex(0u);
-          bindingMask.setCbv(index);
-        } break;
-
-        case dxbc_spv::dxbc::OpCode::eDclResource:
-        case dxbc_spv::dxbc::OpCode::eDclResourceRaw:
-        case dxbc_spv::dxbc::OpCode::eDclResourceStructured: {
-          uint32_t index = op.getDst(0u).getIndex(0u);
-          bindingMask.setSrv(index);
-        } break;
-
-        case dxbc_spv::dxbc::OpCode::eDclUavTyped:
-        case dxbc_spv::dxbc::OpCode::eDclUavRaw:
-        case dxbc_spv::dxbc::OpCode::eDclUavStructured: {
-          uint32_t index = op.getDst(0u).getIndex(0u);
-          bindingMask.setUav(index);
-        } break;
-
-        case dxbc_spv::dxbc::OpCode::eDclInput:
-        case dxbc_spv::dxbc::OpCode::eDclInputSgv:
-        case dxbc_spv::dxbc::OpCode::eDclInputSiv:
-        case dxbc_spv::dxbc::OpCode::eDclInputPs:
-        case dxbc_spv::dxbc::OpCode::eDclInputPsSgv:
-        case dxbc_spv::dxbc::OpCode::eDclInputPsSiv: {
-          const auto& dst = op.getDst(0u);
-
-          if (dst.getRegisterType() == dxbc_spv::dxbc::RegisterType::eInnerCoverage) {
-            if (m_deviceFeatures.GetConservativeRasterizationTier() < D3D11_CONSERVATIVE_RASTERIZATION_TIER_2) {
-              Logger::warn(str::format("D3D11: ", ShaderKey.toString(), ": Shader uses innser coverage, but feature is not supported."));
-              return E_INVALIDARG;
-            }
-          }
-        } break;
-
-        case dxbc_spv::dxbc::OpCode::eDclOutputSgv:
-        case dxbc_spv::dxbc::OpCode::eDclOutputSiv: {
-          auto sysval = op.getImm(0u).getImmediate<dxbc_spv::dxbc::Sysval>(0u);
-
-          if ((sysval == dxbc_spv::dxbc::Sysval::eRenderTargetId || sysval == dxbc_spv::dxbc::Sysval::eViewportId)
-           && (shaderInfo.getType() == dxbc_spv::dxbc::ShaderType::eVertex || shaderInfo.getType() == dxbc_spv::dxbc::ShaderType::eDomain)) {
-            D3D11_FEATURE_DATA_D3D11_OPTIONS3 options3 = { };
-            m_deviceFeatures.GetFeatureData(D3D11_FEATURE_D3D11_OPTIONS3, sizeof(options3), &options3);
-
-            if (!options3.VPAndRTArrayIndexFromAnyShaderFeedingRasterizer) {
-              Logger::warn(str::format("D3D11: ", ShaderKey.toString(), ": Shader uses viewport / layer, but feature is not supported."));
-              return E_INVALIDARG;
-            }
-          }
-        } [[fallthrough]];
-
-        case dxbc_spv::dxbc::OpCode::eDclOutput: {
-          const auto& dst = op.getDst(0u);
-
-          if (dst.getRegisterType() == dxbc_spv::dxbc::RegisterType::eStencilRef) {
-            if (m_deviceFeatures.GetConservativeRasterizationTier() < D3D11_CONSERVATIVE_RASTERIZATION_TIER_2) {
-              Logger::warn(str::format("D3D11: ", ShaderKey.toString(), ": Shader exports stencil reference, but feature is not supported."));
-              return E_INVALIDARG;
-            }
-          }
-        } break;
-
-        case dxbc_spv::dxbc::OpCode::eDMov:
-        case dxbc_spv::dxbc::OpCode::eDMovc:
-        case dxbc_spv::dxbc::OpCode::eDAdd:
-        case dxbc_spv::dxbc::OpCode::eDMul:
-        case dxbc_spv::dxbc::OpCode::eDFma:
-        case dxbc_spv::dxbc::OpCode::eDDiv:
-        case dxbc_spv::dxbc::OpCode::eDRcp:
-        case dxbc_spv::dxbc::OpCode::eDMin:
-        case dxbc_spv::dxbc::OpCode::eDMax:
-        case dxbc_spv::dxbc::OpCode::eDtoF:
-        case dxbc_spv::dxbc::OpCode::eDtoI:
-        case dxbc_spv::dxbc::OpCode::eDtoU:
-        case dxbc_spv::dxbc::OpCode::eFtoD:
-        case dxbc_spv::dxbc::OpCode::eItoD:
-        case dxbc_spv::dxbc::OpCode::eUtoD:
-        case dxbc_spv::dxbc::OpCode::eDEq:
-        case dxbc_spv::dxbc::OpCode::eDNe:
-        case dxbc_spv::dxbc::OpCode::eDLt:
-        case dxbc_spv::dxbc::OpCode::eDGe: {
-          D3D11_FEATURE_DATA_DOUBLES doubles = { };
-          m_deviceFeatures.GetFeatureData(D3D11_FEATURE_DOUBLES, sizeof(doubles), &doubles);
-
-          if (!doubles.DoublePrecisionFloatShaderOps) {
-            Logger::warn(str::format("D3D11: ", ShaderKey.toString(), ": Shader uses fp64, but feature is not supported."));
-            return E_INVALIDARG;
-          }
-        } break;
-
-        case dxbc_spv::dxbc::OpCode::eGather4S:
-        case dxbc_spv::dxbc::OpCode::eGather4CS:
-        case dxbc_spv::dxbc::OpCode::eGather4PoS:
-        case dxbc_spv::dxbc::OpCode::eGather4PoCS:
-        case dxbc_spv::dxbc::OpCode::eLdS:
-        case dxbc_spv::dxbc::OpCode::eLdMsS:
-        case dxbc_spv::dxbc::OpCode::eLdUavTypedS:
-        case dxbc_spv::dxbc::OpCode::eLdRawS:
-        case dxbc_spv::dxbc::OpCode::eLdStructuredS:
-        case dxbc_spv::dxbc::OpCode::eSampleLS:
-        case dxbc_spv::dxbc::OpCode::eSampleClzS:
-        case dxbc_spv::dxbc::OpCode::eSampleClampS:
-        case dxbc_spv::dxbc::OpCode::eSampleBClampS:
-        case dxbc_spv::dxbc::OpCode::eSampleDClampS:
-        case dxbc_spv::dxbc::OpCode::eSampleCClampS:
-        case dxbc_spv::dxbc::OpCode::eCheckAccessFullyMapped: {
-          if (m_deviceFeatures.GetTiledResourcesTier() < D3D11_TILED_RESOURCES_TIER_2) {
-            Logger::warn(str::format("D3D11: ", ShaderKey.toString(), ": Shader uses sparse residency, but TILED_RESOURCES_TIER_2 is not supported."));
-            return E_INVALIDARG;
-          }
-        } break;
-
-        default:
-          break;
-      }
-    }
-
-    // Handle immediate constant buffer declaration
-    D3D11ShaderIcbInfo icbInfo = { };
-
-    if (icbOp) {
-      icbInfo.data = icbOp.getCustomData().first;
-      icbInfo.size = icbOp.getCustomData().second;
-    }
-
-    // Initialize the actual shader
-    D3D11CommonShader commonShader = { };
+    D3D11CommonShader commonShader;
 
     HRESULT hr = m_shaderModules.GetShaderModule(this,
-      static_cast<D3D11ClassLinkage*>(pLinkage),
-      ShaderKey, ModuleInfo, pShaderBytecode, BytecodeLength,
-      icbInfo, bindingMask, &commonShader);
+      &ShaderKey, pModuleInfo, pShaderBytecode, BytecodeLength,
+      &commonShader);
 
     if (FAILED(hr))
       return hr;
 
+    auto shader = commonShader.GetShader();
+
+    if (shader->flags().test(DxvkShaderFlag::ExportsStencilRef)
+     && !m_dxvkDevice->features().extShaderStencilExport)
+      return E_INVALIDARG;
+
+    if (shader->flags().test(DxvkShaderFlag::ExportsViewportIndexLayerFromVertexStage)
+     && (!m_dxvkDevice->features().vk12.shaderOutputViewportIndex
+      || !m_dxvkDevice->features().vk12.shaderOutputLayer))
+      return E_INVALIDARG;
+
+    if (shader->flags().test(DxvkShaderFlag::UsesSparseResidency)
+     && !m_dxvkDevice->features().core.features.shaderResourceResidency)
+      return E_INVALIDARG;
+
+    if (shader->flags().test(DxvkShaderFlag::UsesFragmentCoverage)
+     && !m_dxvkDevice->properties().extConservativeRasterization.fullyCoveredFragmentShaderInputVariable)
+      return E_INVALIDARG;
+
     *pShaderModule = std::move(commonShader);
     return S_OK;
-  }
-
-
-  DxvkShaderHash D3D11Device::ComputeShaderKey(
-          VkShaderStageFlagBits   Stage,
-    const void*                   pShaderBytecode,
-          size_t                  BytecodeLength) {
-    return ComputeShaderKey(Stage, pShaderBytecode, BytecodeLength, nullptr, 0u, nullptr, 0u, 0u);
-  }
-
-
-  DxvkShaderHash D3D11Device::ComputeShaderKey(
-          VkShaderStageFlagBits   Stage,
-    const void*                   pShaderBytecode,
-          size_t                  BytecodeLength,
-    const D3D11_SO_DECLARATION_ENTRY* pSODeclaration,
-          UINT                    NumEntries,
-    const UINT*                   pBufferStrides,
-          UINT                    NumStrides,
-          UINT                    RasterizedStream) {
-    dxbc_spv::dxbc::Container container(pShaderBytecode, BytecodeLength);
-    auto binHash = container.getHash();
-
-    if (!NumEntries) {
-      return DxvkShaderHash(Stage,
-        BytecodeLength, binHash.data.data(), binHash.data.size());
-    }
-
-    dxbc_spv::util::md5::Hasher xfbHasher;
-
-    for (uint32_t i = 0u; i < NumEntries; i++) {
-      xfbHasher.update(&pSODeclaration[i].Stream, sizeof(pSODeclaration[i].Stream));
-
-      if (pSODeclaration[i].SemanticName)
-        xfbHasher.update(pSODeclaration[i].SemanticName, std::strlen(pSODeclaration[i].SemanticName));
-
-      xfbHasher.update(&pSODeclaration[i].SemanticIndex, sizeof(pSODeclaration[i].SemanticIndex));
-      xfbHasher.update(&pSODeclaration[i].StartComponent, sizeof(pSODeclaration[i].StartComponent));
-      xfbHasher.update(&pSODeclaration[i].ComponentCount, sizeof(pSODeclaration[i].ComponentCount));
-      xfbHasher.update(&pSODeclaration[i].OutputSlot, sizeof(pSODeclaration[i].OutputSlot));
-    }
-
-    xfbHasher.update(pBufferStrides, sizeof(*pBufferStrides) * NumStrides);
-    xfbHasher.update(&RasterizedStream, sizeof(RasterizedStream));
-    xfbHasher.finalize();
-
-    auto xfbHash = xfbHasher.getDigest();
-
-    return DxvkShaderHash(Stage, BytecodeLength,
-      binHash.data.data(), binHash.data.size(),
-      xfbHash.data.data(), xfbHash.data.size());
   }
 
 
@@ -2484,7 +2183,7 @@ namespace dxvk {
       flags1 |= D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW;
       flags2 |= D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE;
       
-      if (!m_shaderOptions.flags.test(DxvkShaderCompileFlag::TypedR32LoadRequiresFormat)) {
+      if (m_dxbcOptions.supportsTypedUavLoadR32) {
         // If the R32 formats are supported without format declarations,
         // we can optionally support additional formats for typed loads
         if (imgFeatures & VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT)
@@ -2573,6 +2272,11 @@ namespace dxvk {
           HANDLE      hResource,
           REFIID      ReturnedInterface,
           void**      ppResource) {
+    InitReturnPtr(ppResource);
+
+    if (ppResource == nullptr)
+      return S_FALSE;
+
 #ifdef _WIN32
     HANDLE ntHandle = IsKmtHandle ? openKmtHandle(hResource) : hResource;
 
@@ -2680,7 +2384,11 @@ namespace dxvk {
       D3D11_COMMON_TEXTURE_SUBRESOURCE_LAYOUT layout = pTexture->GetSubresourceLayout(aspect, Subresource);
 
       // Compute actual map pointer, accounting for the region offset
-      void* mapPtr = pTexture->GetMapPtr(Subresource, pTexture->ComputeMappedOffset(Subresource, i, offset));
+      VkDeviceSize mapOffset = pTexture->ComputeMappedOffset(Subresource, i, offset);
+
+      void* mapPtr = pTexture->GetMapMode() == D3D11_COMMON_TEXTURE_MAP_MODE_BUFFER
+        ? pTexture->GetMappedBuffer(Subresource)->mapPtr(mapOffset)
+        : image->mapPtr(mapOffset);
 
       if constexpr (std::is_const<Void>::value) {
         // WriteToSubresource
@@ -2707,180 +2415,6 @@ namespace dxvk {
     // Track dirty texture region if necessary
     if constexpr (std::is_const<Void>::value)
       pTexture->AddDirtyRegion(Subresource, offset, extent);
-  }
-
-
-  bool D3D11Device::LockImage(
-    const Rc<DxvkImage>&            Image,
-          VkImageUsageFlags         Usage) {
-    bool feedback = false;
-
-    auto chunk = AllocCsChunk(DxvkCsChunkFlag::SingleUse);
-
-    chunk->push([
-      cImage  = Image,
-      cUsage  = Usage,
-      &feedback
-    ] (DxvkContext* ctx) {
-      DxvkImageUsageInfo usageInfo;
-      usageInfo.usage = cUsage;
-      usageInfo.stableGpuAddress = VK_TRUE;
-
-      feedback = ctx->ensureImageCompatibility(cImage, usageInfo);
-    });
-
-    m_context->InjectCsChunk(DxvkCsQueue::HighPriority, std::move(chunk), true);
-
-    if (!feedback) {
-      Logger::err(str::format("Failed to lock image:"
-        "\n  Image format:  ", Image->info().format,
-        "\n  Image usage:   ", std::hex, Image->info().usage,
-        "\n  Desired usage: ", std::hex, Usage));
-    }
-
-    return feedback;
-  }
-
-
-  DxvkShaderOptions D3D11Device::GetShaderOptions(
-    const Rc<DxvkDevice>&             Device,
-    const D3D11Options&               Options) {
-    auto result = Device->getShaderCompileOptions();
-
-    if (Options.disableMsaa)
-      result.flags.set(DxvkShaderCompileFlag::DisableMsaa);
-
-    if (Options.forceComputeLdsBarriers)
-      result.flags.set(DxvkShaderCompileFlag::InsertSharedMemoryBarriers);
-
-    if (Options.forceComputeUavBarriers)
-      result.flags.set(DxvkShaderCompileFlag::InsertResourceBarriers);
-
-    if (Options.forceSampleRateShading)
-      result.flags.set(DxvkShaderCompileFlag::EnableSampleRateShading);
-
-    return result;
-  }
-
-
-  bool D3D11Device::ConvertRuntimeDescriptor(
-       UINT                       size,
-       const union d3dkmt_desc&   d3dkmt,
-       D3D11_COMMON_TEXTURE_DESC* desc) {
-
-    if (size == sizeof(d3dkmt.d3d12) && d3dkmt.d3d12.d3d11.dxgi.size == sizeof(d3dkmt.d3d12.d3d11) && d3dkmt.d3d12.d3d11.dxgi.version == 0) {
-      Logger::warn(str::format("D3D11Device::ConvertRuntimeDescriptor: D3D12 descriptor conversion not implemented"));
-      return false;
-    }
-
-    if (size >= sizeof(d3dkmt.d3d11) && d3dkmt.dxgi.size == sizeof(d3dkmt.d3d11) && d3dkmt.dxgi.version == 4) {
-      Logger::debug(str::format("D3D11Device::ConvertRuntimeDescriptor: Found D3D11 desc with dimension: ", d3dkmt.d3d11.dimension));
-
-      switch (d3dkmt.d3d11.dimension) {
-        case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
-          desc->Width = d3dkmt.d3d11.d3d11_2d.Width;
-          desc->Height = d3dkmt.d3d11.d3d11_2d.Height;
-          desc->Depth = 1;
-          desc->MipLevels = d3dkmt.d3d11.d3d11_2d.MipLevels;
-          desc->ArraySize = d3dkmt.d3d11.d3d11_2d.ArraySize;
-          desc->Format = d3dkmt.d3d11.d3d11_2d.Format;
-          desc->SampleDesc = d3dkmt.d3d11.d3d11_2d.SampleDesc;
-          desc->Usage = d3dkmt.d3d11.d3d11_2d.Usage;
-          desc->BindFlags = d3dkmt.d3d11.d3d11_2d.BindFlags;
-          desc->CPUAccessFlags = d3dkmt.d3d11.d3d11_2d.CPUAccessFlags;
-          desc->MiscFlags = d3dkmt.d3d11.d3d11_2d.MiscFlags;
-          desc->TextureLayout = D3D11_TEXTURE_LAYOUT_UNDEFINED;
-          break;
-        default:
-          Logger::warn(str::format("D3D11Device::ConvertRuntimeDescriptor: Unsupported dimension: ", d3dkmt.d3d11.dimension));
-          return false;
-      }
-
-      Logger::debug(str::format("D3D11Device::ConvertRuntimeDescriptor: Translated D3D11 desc:"));
-      Logger::debug(str::format("  Width: ", desc->Width));
-      Logger::debug(str::format("  Height: ", desc->Height));
-      Logger::debug(str::format("  Depth: ", desc->Depth));
-      Logger::debug(str::format("  MipLevels: ", desc->MipLevels));
-      Logger::debug(str::format("  ArraySize: ", desc->ArraySize));
-      Logger::debug(str::format("  Format: ", desc->Format));
-      Logger::debug(str::format("  SampleDesc.Count: ", desc->SampleDesc.Count));
-      Logger::debug(str::format("  SampleDesc.Quality: ", desc->SampleDesc.Quality));
-      Logger::debug(str::format("  Usage: ", desc->Usage));
-      Logger::debug(str::format("  BindFlags: ", desc->BindFlags));
-      Logger::debug(str::format("  CPUAccessFlags: ", desc->CPUAccessFlags));
-      Logger::debug(str::format("  MiscFlags: ", desc->MiscFlags));
-      Logger::debug(str::format("  TextureLayout: ", desc->TextureLayout));
-      return true;
-    }
-
-    if (size >= sizeof(d3dkmt.d3d9) && d3dkmt.dxgi.size == sizeof(d3dkmt.d3d9) && d3dkmt.dxgi.version == 1) {
-      Logger::debug(str::format("D3D11Device::ConvertRuntimeDescriptor: Found D3D9 desc: ", d3dkmt.d3d9.type));
-      Logger::debug(str::format("  dxgi.width: ", d3dkmt.d3d9.dxgi.width));
-      Logger::debug(str::format("  dxgi.height: ", d3dkmt.d3d9.dxgi.height));
-      Logger::debug(str::format("  format: ", d3dkmt.d3d9.format));
-      Logger::debug(str::format("  usage: ", d3dkmt.d3d9.usage));
-      if (d3dkmt.d3d9.type == D3DRTYPE_TEXTURE) {
-        Logger::debug(str::format("  texture.width: ", d3dkmt.d3d9.texture.width));
-        Logger::debug(str::format("  texture.height: ", d3dkmt.d3d9.texture.height));
-        Logger::debug(str::format("  texture.depth: ", d3dkmt.d3d9.texture.depth));
-        Logger::debug(str::format("  texture.levels: ", d3dkmt.d3d9.texture.levels));
-      } else if (d3dkmt.d3d9.type == D3DRTYPE_SURFACE) {
-        Logger::debug(str::format("  surface.width: ", d3dkmt.d3d9.surface.width));
-        Logger::debug(str::format("  surface.height: ", d3dkmt.d3d9.surface.height));
-      } else {
-        Logger::warn(str::format("D3D11Device::ConvertRuntimeDescriptor: Unsupported D3D9 type: ", d3dkmt.d3d9.type));
-        return false;
-      }
-
-      desc->Width = d3dkmt.d3d9.dxgi.width;
-      desc->Height = d3dkmt.d3d9.dxgi.height;
-      desc->Depth = 1;
-      desc->MipLevels = 1;
-      desc->ArraySize = 1;
-      desc->Format = d3dkmt.d3d9.dxgi.format;
-      desc->SampleDesc.Count = 1;
-      desc->SampleDesc.Quality = 0;
-      desc->Usage = D3D11_USAGE_DEFAULT;
-      desc->BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-      desc->CPUAccessFlags = 0;
-      desc->MiscFlags = D3D11_RESOURCE_MISC_SHARED;
-      desc->TextureLayout = D3D11_TEXTURE_LAYOUT_UNDEFINED;
-
-      switch (d3dkmt.d3d9.type) {
-        case D3DRTYPE_TEXTURE:
-          desc->Width = d3dkmt.d3d9.texture.width;
-          desc->Height = d3dkmt.d3d9.texture.height;
-          desc->MipLevels = d3dkmt.d3d9.texture.levels;
-          desc->ArraySize = d3dkmt.d3d9.texture.depth ? d3dkmt.d3d9.texture.depth : 1;
-          break;
-        case D3DRTYPE_SURFACE:
-          desc->Width = d3dkmt.d3d9.surface.width;
-          desc->Height = d3dkmt.d3d9.surface.height;
-          break;
-        default:
-          break;
-      }
-
-      Logger::debug(str::format("D3D11Device::ConvertRuntimeDescriptor: Translated D3D9 desc:"));
-      Logger::debug(str::format("  Width: ", desc->Width));
-      Logger::debug(str::format("  Height: ", desc->Height));
-      Logger::debug(str::format("  Depth: ", desc->Depth));
-      Logger::debug(str::format("  MipLevels: ", desc->MipLevels));
-      Logger::debug(str::format("  ArraySize: ", desc->ArraySize));
-      Logger::debug(str::format("  Format: ", desc->Format));
-      Logger::debug(str::format("  SampleDesc.Count: ", desc->SampleDesc.Count));
-      Logger::debug(str::format("  SampleDesc.Quality: ", desc->SampleDesc.Quality));
-      Logger::debug(str::format("  Usage: ", desc->Usage));
-      Logger::debug(str::format("  BindFlags: ", desc->BindFlags));
-      Logger::debug(str::format("  CPUAccessFlags: ", desc->CPUAccessFlags));
-      Logger::debug(str::format("  MiscFlags: ", desc->MiscFlags));
-      Logger::debug(str::format("  TextureLayout: ", desc->TextureLayout));
-      return true;
-    }
-
-    Logger::warn(str::format("D3D11Device::ConvertRuntimeDescriptor: Unsupported runtime desc size: ",
-                             size, "/", d3dkmt.dxgi.size, " version: ", d3dkmt.dxgi.version));
-    return false;
   }
 
 
@@ -2932,7 +2466,8 @@ namespace dxvk {
         return deviceFeatures.nvxImageViewHandle;
 
       case D3D11_VK_NVX_BINARY_IMPORT:
-        return deviceFeatures.nvxBinaryImport;
+        return deviceFeatures.nvxBinaryImport
+            && deviceFeatures.vk12.bufferDeviceAddress;
 
       default:
         return false;
@@ -2957,15 +2492,15 @@ namespace dxvk {
 
     D3D11SamplerState* pSS = static_cast<D3D11SamplerState*>(samplerState);
     Rc<DxvkSampler> pDSS = pSS->GetDXVKSampler();
+    VkSampler vkSampler = pDSS->handle();
 
     D3D11ShaderResourceView* pSRV = static_cast<D3D11ShaderResourceView*>(srv);
     Rc<DxvkImageView> pIV = pSRV->GetImageView();
+    VkImageView vkImageView = pIV->handle();
 
-    LockImage(pIV->image(), 0u);
-
-    VkImageViewHandleInfoNVX imageViewHandleInfo = { VK_STRUCTURE_TYPE_IMAGE_VIEW_HANDLE_INFO_NVX };
-    imageViewHandleInfo.imageView = pIV->handle();
-    imageViewHandleInfo.sampler = pDSS->getDescriptor().samplerObject;
+    VkImageViewHandleInfoNVX imageViewHandleInfo = {VK_STRUCTURE_TYPE_IMAGE_VIEW_HANDLE_INFO_NVX};
+    imageViewHandleInfo.imageView = vkImageView;
+    imageViewHandleInfo.sampler = vkSampler;
     imageViewHandleInfo.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 
     // note: there's no implicit lifetime management here; it's up to the
@@ -3023,9 +2558,21 @@ namespace dxvk {
     ID3D11Resource* pResource = static_cast<ID3D11Resource*>(hObject);
 
     D3D11_COMMON_RESOURCE_DESC resourceDesc;
-
     if (FAILED(GetCommonResourceDesc(pResource, &resourceDesc))) {
-      Logger::warn("GetResourceHandleGPUVirtualAddressAndSize: Invalid resource");
+      Logger::warn("GetResourceHandleGPUVirtualAddressAndSize() - GetCommonResourceDesc() failed");
+      return false;
+    }
+
+    switch (resourceDesc.Dim) {
+    case D3D11_RESOURCE_DIMENSION_BUFFER:
+    case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
+      // okay - we can deal with those two dimensions
+      break;
+    case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+    case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+    case D3D11_RESOURCE_DIMENSION_UNKNOWN:
+    default:
+      Logger::warn(str::format("GetResourceHandleGPUVirtualAddressAndSize(?) - failure - unsupported dimension: ", resourceDesc.Dim));
       return false;
     }
 
@@ -3034,49 +2581,57 @@ namespace dxvk {
 
     if (resourceDesc.Dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
       D3D11CommonTexture *texture = GetCommonTexture(pResource);
-
-      // Ensure that the image has a stable GPU address and
-      // won't be relocated by the backend going forward
       Rc<DxvkImage> dxvkImage = texture->GetImage();
-
-      if (!LockImage(dxvkImage, VK_IMAGE_USAGE_SAMPLED_BIT))
+      if (0 == (dxvkImage->info().usage & (VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))) {
+        Logger::warn(str::format("GetResourceHandleGPUVirtualAddressAndSize(res=", pResource,") image info missing required usage bit(s); can't be used for vkGetImageViewHandleNVX - failure"));
         return false;
+      }
 
-      // The d3d11 nvapi provides us a texture, but vulkan only lets us
-      // get the GPU address from an image view. So, make a private image
-      // view and get the address from that.
-      DxvkImageViewKey viewInfo;
-      viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-      viewInfo.format = dxvkImage->info().format;
-      viewInfo.aspects = dxvkImage->formatInfo()->aspectMask;
-      viewInfo.mipIndex = 0;
-      viewInfo.mipCount = dxvkImage->info().mipLevels;
-      viewInfo.layerIndex = 0;
-      viewInfo.layerCount = 1;
-      viewInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+      // The d3d11 nvapi provides us a texture but vulkan only lets us get the GPU address from an imageview.  So, make a private imageview and get the address from that...
 
-      auto dxvkView = dxvkImage->createView(viewInfo);
-      VkImageViewAddressPropertiesNVX imageViewAddressProperties = { VK_STRUCTURE_TYPE_IMAGE_VIEW_ADDRESS_PROPERTIES_NVX };
+      D3D11_SHADER_RESOURCE_VIEW_DESC resourceViewDesc;
 
-      VkResult vr = dxvkDevice->vkd()->vkGetImageViewAddressNVX(vkDevice,
-        dxvkView->handle(), &imageViewAddressProperties);
+      const D3D11_COMMON_TEXTURE_DESC *texDesc = texture->Desc();
+      if (texDesc->ArraySize != 1) {
+        Logger::debug(str::format("GetResourceHandleGPUVirtualAddressAndSize(?) - unexpected array size: ", texDesc->ArraySize));
+      }
+      resourceViewDesc.Format = texDesc->Format;
+      resourceViewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+      resourceViewDesc.Texture2D.MostDetailedMip = 0;
+      resourceViewDesc.Texture2D.MipLevels = texDesc->MipLevels;
 
-      if (vr != VK_SUCCESS) {
-        Logger::warn(str::format("GetResourceHandleGPUVirtualAddressAndSize(): Failed: vr = ", vr));
+      Com<ID3D11ShaderResourceView> pNewSRV;
+      HRESULT hr = m_device->CreateShaderResourceView(pResource, &resourceViewDesc, &pNewSRV);
+      if (FAILED(hr)) {
+        Logger::warn("GetResourceHandleGPUVirtualAddressAndSize() - private CreateShaderResourceView() failed");
+        return false;
+      }
+
+      Rc<DxvkImageView> dxvkImageView = static_cast<D3D11ShaderResourceView*>(pNewSRV.ptr())->GetImageView();
+      VkImageView vkImageView = dxvkImageView->handle();
+
+      VkImageViewAddressPropertiesNVX imageViewAddressProperties = {VK_STRUCTURE_TYPE_IMAGE_VIEW_ADDRESS_PROPERTIES_NVX};
+
+      VkResult res = dxvkDevice->vkd()->vkGetImageViewAddressNVX(vkDevice, vkImageView, &imageViewAddressProperties);
+      if (res != VK_SUCCESS) {
+        Logger::warn(str::format("GetResourceHandleGPUVirtualAddressAndSize(): vkGetImageViewAddressNVX() result is failure: ", res));
         return false;
       }
 
       *gpuVAStart = imageViewAddressProperties.deviceAddress;
       *gpuVASize = imageViewAddressProperties.size;
-    } else if (resourceDesc.Dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
-      Rc<DxvkBuffer> dxvkBuffer = GetCommonBuffer(pResource)->GetBuffer();
-      LockBuffer(dxvkBuffer);
+    }
+    else if (resourceDesc.Dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
+      D3D11Buffer *buffer = GetCommonBuffer(pResource);
+      const DxvkBufferSliceHandle bufSliceHandle = buffer->GetBuffer()->getSliceHandle();
+      VkBuffer vkBuffer = bufSliceHandle.handle;
 
-      *gpuVAStart = dxvkBuffer->getSliceInfo().gpuAddress;
-      *gpuVASize = dxvkBuffer->info().size;
-    } else {
-      Logger::warn(str::format("GetResourceHandleGPUVirtualAddressAndSize(): Unsupported resource type: ", resourceDesc.Dim));
-      return false;
+      VkBufferDeviceAddressInfo bdaInfo = { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+      bdaInfo.buffer = vkBuffer;
+
+      VkDeviceAddress bufAddr = dxvkDevice->vkd()->vkGetBufferDeviceAddress(vkDevice, &bdaInfo);
+      *gpuVAStart = uint64_t(bufAddr) + bufSliceHandle.offset;
+      *gpuVASize = bufSliceHandle.length;
     }
 
     if (!*gpuVAStart)
@@ -3086,99 +2641,102 @@ namespace dxvk {
   }
 
 
-  bool STDMETHODCALLTYPE D3D11DeviceExt::CreateUnorderedAccessViewAndGetDriverHandleNVX(
-          ID3D11Resource*                     pResource,
-    const D3D11_UNORDERED_ACCESS_VIEW_DESC*   pDesc,
-          ID3D11UnorderedAccessView**         ppUAV,
-          uint32_t*                           pDriverHandle) {
-    D3D11_COMMON_RESOURCE_DESC resourceDesc = { };
-    GetCommonResourceDesc(pResource, &resourceDesc);
-
+  bool STDMETHODCALLTYPE D3D11DeviceExt::CreateUnorderedAccessViewAndGetDriverHandleNVX(ID3D11Resource* pResource, const D3D11_UNORDERED_ACCESS_VIEW_DESC*  pDesc, ID3D11UnorderedAccessView** ppUAV, uint32_t* pDriverHandle) {
+    D3D11_COMMON_RESOURCE_DESC resourceDesc;
+    if (!SUCCEEDED(GetCommonResourceDesc(pResource, &resourceDesc))) {
+      Logger::warn("CreateUnorderedAccessViewAndGetDriverHandleNVX() - GetCommonResourceDesc() failed");
+      return false;
+    }
     if (resourceDesc.Dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
-      Logger::warn(str::format("CreateUnorderedAccessViewAndGetDriverHandleNVX(): Unsupported dimension: ", resourceDesc.Dim));
+      Logger::warn(str::format("CreateUnorderedAccessViewAndGetDriverHandleNVX() - failure - unsupported dimension: ", resourceDesc.Dim));
       return false;
     }
 
-    Rc<DxvkImage> dxvkImage = GetCommonTexture(pResource)->GetImage();
-
-    if (!(dxvkImage->info().usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
-      Logger::warn(str::format("CreateUnorderedAccessViewAndGetDriverHandleNVX(res=", pResource, "): Image not UAV compatible"));
+    auto texture = GetCommonTexture(pResource);
+    Rc<DxvkImage> dxvkImage = texture->GetImage();
+    if (0 == (dxvkImage->info().usage & (VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))) {
+      Logger::warn(str::format("CreateUnorderedAccessViewAndGetDriverHandleNVX(res=", pResource, ") image info missing required usage bit(s); can't be used for vkGetImageViewHandleNVX - failure"));
       return false;
     }
 
-    Com<ID3D11UnorderedAccessView> uav;
-
-    if (FAILED(m_device->CreateUnorderedAccessView(pResource, pDesc, &uav)))
+    if (!SUCCEEDED(m_device->CreateUnorderedAccessView(pResource, pDesc, ppUAV))) {
       return false;
+    }
 
-    Rc<DxvkImageView> dxvkImageView = static_cast<D3D11UnorderedAccessView*>(uav.ptr())->GetImageView();
-    LockImage(dxvkImageView->image(), 0u);
+    D3D11UnorderedAccessView *pUAV = static_cast<D3D11UnorderedAccessView *>(*ppUAV);
+    Rc<DxvkDevice> dxvkDevice = m_device->GetDXVKDevice();
+    VkDevice vkDevice = dxvkDevice->handle();
 
     VkImageViewHandleInfoNVX imageViewHandleInfo = {VK_STRUCTURE_TYPE_IMAGE_VIEW_HANDLE_INFO_NVX};
-    imageViewHandleInfo.imageView = dxvkImageView->handle();
+    Rc<DxvkImageView> dxvkImageView = pUAV->GetImageView();
+    VkImageView vkImageView = dxvkImageView->handle();
+
+    imageViewHandleInfo.imageView = vkImageView;
     imageViewHandleInfo.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 
-    Rc<DxvkDevice> dxvkDevice = m_device->GetDXVKDevice();
-    *pDriverHandle = dxvkDevice->vkd()->vkGetImageViewHandleNVX(
-      dxvkDevice->handle(), &imageViewHandleInfo);
+    *pDriverHandle = dxvkDevice->vkd()->vkGetImageViewHandleNVX(vkDevice, &imageViewHandleInfo);
 
     if (!*pDriverHandle) {
-      Logger::warn("CreateUnorderedAccessViewAndGetDriverHandleNVX(): Handle is 0");
+      Logger::warn("CreateUnorderedAccessViewAndGetDriverHandleNVX() handle==0 - failure");
+      pUAV->Release();
       return false;
     }
 
-    *ppUAV = uav.ref();
     return true;
   }
 
 
   bool STDMETHODCALLTYPE D3D11DeviceExt::CreateShaderResourceViewAndGetDriverHandleNVX(ID3D11Resource* pResource, const D3D11_SHADER_RESOURCE_VIEW_DESC*  pDesc, ID3D11ShaderResourceView** ppSRV, uint32_t* pDriverHandle) {
-    D3D11_COMMON_RESOURCE_DESC resourceDesc = { };
-    GetCommonResourceDesc(pResource, &resourceDesc);
-
+    D3D11_COMMON_RESOURCE_DESC resourceDesc;
+    if (!SUCCEEDED(GetCommonResourceDesc(pResource, &resourceDesc))) {
+      Logger::warn("CreateShaderResourceViewAndGetDriverHandleNVX() - GetCommonResourceDesc() failed");
+      return false;
+    }
     if (resourceDesc.Dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
-      Logger::warn(str::format("CreateShaderResourceViewAndGetDriverHandleNVX(): Unsupported dimension: ", resourceDesc.Dim));
+      Logger::warn(str::format("CreateShaderResourceViewAndGetDriverHandleNVX() - failure - unsupported dimension: ", resourceDesc.Dim));
       return false;
     }
 
-    Rc<DxvkImage> dxvkImage = GetCommonTexture(pResource)->GetImage();
-
-    if (!(dxvkImage->info().usage & VK_IMAGE_USAGE_SAMPLED_BIT)) {
-      Logger::warn(str::format("CreateShaderResourceViewAndGetDriverHandleNVX(res=", pResource, "): Image not SRV compatible"));
+    auto texture = GetCommonTexture(pResource);
+    Rc<DxvkImage> dxvkImage = texture->GetImage();
+    if (0 == (dxvkImage->info().usage & (VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))) {
+      Logger::warn(str::format("CreateShaderResourceViewAndGetDriverHandleNVX(res=", pResource, ") image info missing required usage bit(s); can't be used for vkGetImageViewHandleNVX - failure"));
       return false;
     }
 
-    Com<ID3D11ShaderResourceView> srv;
-
-    if (FAILED(m_device->CreateShaderResourceView(pResource, pDesc, &srv)))
+    if (!SUCCEEDED(m_device->CreateShaderResourceView(pResource, pDesc, ppSRV))) {
       return false;
+    }
 
-    Rc<DxvkImageView> dxvkImageView = static_cast<D3D11ShaderResourceView*>(srv.ptr())->GetImageView();
-    LockImage(dxvkImageView->image(), 0u);
+    D3D11ShaderResourceView* pSRV = static_cast<D3D11ShaderResourceView*>(*ppSRV);
+    Rc<DxvkDevice> dxvkDevice = m_device->GetDXVKDevice();
+    VkDevice vkDevice = dxvkDevice->handle();
 
     VkImageViewHandleInfoNVX imageViewHandleInfo = {VK_STRUCTURE_TYPE_IMAGE_VIEW_HANDLE_INFO_NVX};
-    imageViewHandleInfo.imageView = dxvkImageView->handle();
+    Rc<DxvkImageView> dxvkImageView = pSRV->GetImageView();
+    VkImageView vkImageView = dxvkImageView->handle();
+
+    imageViewHandleInfo.imageView = vkImageView;
     imageViewHandleInfo.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 
-    Rc<DxvkDevice> dxvkDevice = m_device->GetDXVKDevice();
-    *pDriverHandle = dxvkDevice->vkd()->vkGetImageViewHandleNVX(
-      dxvkDevice->handle(), &imageViewHandleInfo);
+    *pDriverHandle = dxvkDevice->vkd()->vkGetImageViewHandleNVX(vkDevice, &imageViewHandleInfo);
 
     if (!*pDriverHandle) {
-      Logger::warn("CreateShaderResourceViewAndGetDriverHandleNVX(): Handle is 0");
+      Logger::warn("CreateShaderResourceViewAndGetDriverHandleNVX() handle==0 - failure");
+      pSRV->Release();
       return false;
     }
 
     // will need to look-up resource from uint32 handle later
-    *ppSRV = srv.ref();
-    AddSrvAndHandleNVX(srv.ptr(), *pDriverHandle);
+    AddSrvAndHandleNVX(*ppSRV, *pDriverHandle);
     return true;
   }
 
 
   bool STDMETHODCALLTYPE D3D11DeviceExt::CreateSamplerStateAndGetDriverHandleNVX(const D3D11_SAMPLER_DESC* pSamplerDesc, ID3D11SamplerState** ppSamplerState, uint32_t* pDriverHandle) {
-    if (FAILED(m_device->CreateSamplerState(pSamplerDesc, ppSamplerState)))
+    if (!SUCCEEDED(m_device->CreateSamplerState(pSamplerDesc, ppSamplerState))) {
       return false;
+    }
 
     // for our purposes the actual value doesn't matter, only its uniqueness
     static std::atomic<ULONG> s_seqNum = 0;
@@ -3224,32 +2782,8 @@ namespace dxvk {
   }
 
 
-  bool D3D11DeviceExt::LockImage(
-    const Rc<DxvkImage>&            Image,
-          VkImageUsageFlags         Usage) {
-    if (!Image->canRelocate() && (Image->info().usage & Usage))
-      return true;
 
-    return m_device->LockImage(Image, Usage);
-  }
-
-
-  void D3D11DeviceExt::LockBuffer(
-    const Rc<DxvkBuffer>&           Buffer) {
-    if (!Buffer->canRelocate())
-      return;
-
-    auto chunk = m_device->AllocCsChunk(DxvkCsChunkFlag::SingleUse);
-
-    chunk->push([cBuffer = Buffer] (DxvkContext* ctx) {
-      ctx->ensureBufferAddress(cBuffer);
-    });
-
-    m_device->GetContext()->InjectCsChunk(DxvkCsQueue::HighPriority, std::move(chunk), true);
-  }
-
-
-
+  
   
   D3D11VideoDevice::D3D11VideoDevice(
           D3D11DXGIDevice*        pContainer,
@@ -3285,11 +2819,7 @@ namespace dxvk {
     const D3D11_VIDEO_DECODER_DESC*                     pVideoDesc,
     const D3D11_VIDEO_DECODER_CONFIG*                   pConfig,
           ID3D11VideoDecoder**                          ppDecoder) {
-    static bool s_errorShown = false;
-
-    if (!std::exchange(s_errorShown, true))
-      Logger::warn("D3D11VideoDevice::CreateVideoDecoder: Stub");
-
+    Logger::err("D3D11VideoDevice::CreateVideoDecoder: Stub");
     return E_NOTIMPL;
   }
 
@@ -3312,7 +2842,7 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D11VideoDevice::CreateAuthenticatedChannel(
           D3D11_AUTHENTICATED_CHANNEL_TYPE              ChannelType,
           ID3D11AuthenticatedChannel**                  ppAuthenticatedChannel) {
-    Logger::warn("D3D11VideoDevice::CreateAuthenticatedChannel: Stub");
+    Logger::err("D3D11VideoDevice::CreateAuthenticatedChannel: Stub");
     return E_NOTIMPL;
   }
 
@@ -3322,7 +2852,7 @@ namespace dxvk {
     const GUID*                                         pDecoderProfile,
     const GUID*                                         pKeyExchangeType,
           ID3D11CryptoSession**                         ppCryptoSession) {
-    Logger::warn("D3D11VideoDevice::CreateCryptoSession: Stub");
+    Logger::err("D3D11VideoDevice::CreateCryptoSession: Stub");
     return E_NOTIMPL;
   }
 
@@ -3331,11 +2861,7 @@ namespace dxvk {
           ID3D11Resource*                               pResource,
     const D3D11_VIDEO_DECODER_OUTPUT_VIEW_DESC*         pDesc,
           ID3D11VideoDecoderOutputView**                ppVDOVView) {
-    static bool s_errorShown = false;
-
-    if (!std::exchange(s_errorShown, true))
-      Logger::warn("D3D11VideoDevice::CreateVideoDecoderOutputView: Stub");
-
+    Logger::err("D3D11VideoDevice::CreateVideoDecoderOutputView: Stub");
     return E_NOTIMPL;
   }
 
@@ -3384,11 +2910,7 @@ namespace dxvk {
 
 
   UINT STDMETHODCALLTYPE D3D11VideoDevice::GetVideoDecoderProfileCount() {
-    static bool s_errorShown = false;
-
-    if (!std::exchange(s_errorShown, true))
-      Logger::warn("D3D11VideoDevice::GetVideoDecoderProfileCount: Stub");
-
+    Logger::err("D3D11VideoDevice::GetVideoDecoderProfileCount: Stub");
     return 0;
   }
 
@@ -3396,11 +2918,7 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D11VideoDevice::GetVideoDecoderProfile(
           UINT                                          Index,
           GUID*                                         pDecoderProfile) {
-    static bool s_errorShown = false;
-
-    if (!std::exchange(s_errorShown, true))
-      Logger::warn("D3D11VideoDevice::GetVideoDecoderProfile: Stub");
-
+    Logger::err("D3D11VideoDevice::GetVideoDecoderProfile: Stub");
     return E_NOTIMPL;
   }
 
@@ -3409,11 +2927,7 @@ namespace dxvk {
     const GUID*                                         pDecoderProfile,
           DXGI_FORMAT                                   Format,
           BOOL*                                         pSupported) {
-    static bool s_errorShown = false;
-
-    if (!std::exchange(s_errorShown, true))
-      Logger::warn("D3D11VideoDevice::CheckVideoDecoderFormat: Stub");
-
+    Logger::err("D3D11VideoDevice::CheckVideoDecoderFormat: Stub");
     return E_NOTIMPL;
   }
 
@@ -3421,17 +2935,8 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D11VideoDevice::GetVideoDecoderConfigCount(
     const D3D11_VIDEO_DECODER_DESC*                     pDesc,
           UINT*                                         pCount) {
-    static bool s_errorShown = false;
-
-    if (!std::exchange(s_errorShown, true))
-      Logger::warn("D3D11VideoDevice::GetVideoDecoderConfigCount: Stub");
-
-    if (!pCount)
-      return E_INVALIDARG;
-
-    *pCount = 0;
-
-    return S_OK;
+    Logger::err("D3D11VideoDevice::GetVideoDecoderConfigCount: Stub");
+    return E_NOTIMPL;
   }
 
 
@@ -3439,11 +2944,7 @@ namespace dxvk {
     const D3D11_VIDEO_DECODER_DESC*                     pDesc,
           UINT                                          Index,
           D3D11_VIDEO_DECODER_CONFIG*                   pConfig) {
-    static bool s_errorShown = false;
-
-    if (!std::exchange(s_errorShown, true))
-      Logger::warn("D3D11VideoDevice::GetVideoDecoderConfig: Stub");
-
+    Logger::err("D3D11VideoDevice::GetVideoDecoderConfig: Stub");
     return E_NOTIMPL;
   }
 
@@ -3452,11 +2953,7 @@ namespace dxvk {
     const GUID*                                         pCryptoType,
     const GUID*                                         pDecoderProfile,
           D3D11_VIDEO_CONTENT_PROTECTION_CAPS*          pCaps) {
-    static bool s_errorShown = false;
-
-    if (!std::exchange(s_errorShown, true))
-      Logger::warn("D3D11VideoDevice::GetContentProtectionCaps: Stub");
-
+    Logger::err("D3D11VideoDevice::GetContentProtectionCaps: Stub");
     return E_NOTIMPL;
   }
 
@@ -3466,11 +2963,7 @@ namespace dxvk {
     const GUID*                                         pDecoderProfile,
           UINT                                          Index,
           GUID*                                         pKeyExchangeType) {
-    static bool s_errorShown = false;
-
-    if (!std::exchange(s_errorShown, true))
-      Logger::warn("D3D11VideoDevice::CheckCryptoKeyExchange: Stub");
-
+    Logger::err("D3D11VideoDevice::CheckCryptoKeyExchange: Stub");
     return E_NOTIMPL;
   }
 
@@ -3487,196 +2980,6 @@ namespace dxvk {
           REFGUID                                       Name,
     const IUnknown*                                     pData) {
     return m_container->SetPrivateDataInterface(Name, pData);
-  }
-
-
-  D3D11ReflexDevice::D3D11ReflexDevice(
-          D3D11DXGIDevice*        pContainer,
-          D3D11Device*            pDevice)
-  : m_container(pContainer), m_device(pDevice) {
-    auto dxvkDevice = pDevice->GetDXVKDevice();
-
-    m_reflexEnabled = dxvkDevice->features().nvLowLatency2
-                   && dxvkDevice->config().latencySleep == Tristate::Auto;
-  }
-
-
-  D3D11ReflexDevice::~D3D11ReflexDevice() {
-
-  }
-
-
-  ULONG STDMETHODCALLTYPE D3D11ReflexDevice::AddRef() {
-    return m_container->AddRef();
-  }
-
-
-  ULONG STDMETHODCALLTYPE D3D11ReflexDevice::Release() {
-    return m_container->Release();
-  }
-
-
-  HRESULT STDMETHODCALLTYPE D3D11ReflexDevice::QueryInterface(
-          REFIID                        riid,
-          void**                        ppvObject) {
-    return m_container->QueryInterface(riid, ppvObject);
-  }
-
-
-  BOOL STDMETHODCALLTYPE D3D11ReflexDevice::SupportsLowLatency() {
-    return m_reflexEnabled;
-  }
-
-
-  HRESULT STDMETHODCALLTYPE D3D11ReflexDevice::LatencySleep() {
-    if (!m_reflexEnabled)
-      return DXGI_ERROR_INVALID_CALL;
-
-    // Don't keep object locked while sleeping
-    Rc<DxvkReflexLatencyTrackerNv> tracker;
-
-    { std::lock_guard lock(m_mutex);
-      tracker = m_tracker;
-    }
-
-    if (tracker)
-      tracker->latencySleep();
-
-    return S_OK;
-  }
-
-
-  HRESULT STDMETHODCALLTYPE D3D11ReflexDevice::SetLatencySleepMode(
-          BOOL                          LowLatencyEnable,
-          BOOL                          LowLatencyBoost,
-          UINT32                        MinIntervalUs) {
-    if (!m_reflexEnabled)
-      return DXGI_ERROR_INVALID_CALL;
-
-    std::lock_guard lock(m_mutex);
-
-    if (m_tracker) {
-      m_tracker->setLatencySleepMode(
-        LowLatencyEnable, LowLatencyBoost, MinIntervalUs);
-    }
-
-    // Write back in case we have no swapchain yet
-    m_enableLowLatency = LowLatencyEnable;
-    m_enableBoost      = LowLatencyBoost;
-    m_minIntervalUs    = MinIntervalUs;
-    return S_OK;
-  }
-
-
-  HRESULT STDMETHODCALLTYPE D3D11ReflexDevice::SetLatencyMarker(
-          UINT64                        FrameId,
-          UINT32                        MarkerType) {
-    if (!m_reflexEnabled)
-      return DXGI_ERROR_INVALID_CALL;
-
-    std::lock_guard lock(m_mutex);
-
-    if (m_tracker) {
-      auto marker = VkLatencyMarkerNV(MarkerType);
-      m_tracker->setLatencyMarker(FrameId, marker);
-
-      if (marker == VK_LATENCY_MARKER_RENDERSUBMIT_START_NV) {
-        m_device->GetContext()->InjectCs(DxvkCsQueue::Ordered, [
-          cTracker  = m_tracker,
-          cFrameId  = FrameId
-        ] (DxvkContext* ctx) {
-          uint64_t frameId = cTracker->frameIdFromAppFrameId(cFrameId);
-
-          if (frameId)
-            ctx->beginLatencyTracking(cTracker, frameId);
-        });
-      } else if (marker == VK_LATENCY_MARKER_RENDERSUBMIT_END_NV) {
-        m_device->GetContext()->InjectCs(DxvkCsQueue::Ordered, [
-          cTracker  = m_tracker
-        ] (DxvkContext* ctx) {
-          ctx->endLatencyTracking(cTracker);
-        });
-      }
-    }
-
-    return S_OK;
-  }
-
-
-  HRESULT STDMETHODCALLTYPE D3D11ReflexDevice::GetLatencyInfo(
-          D3D_LOW_LATENCY_RESULTS*      pLowLatencyResults) {
-    constexpr static size_t FrameCount = 64;
-
-    if (!pLowLatencyResults)
-      return E_INVALIDARG;
-
-    for (size_t i = 0; i < FrameCount; i++)
-      pLowLatencyResults->frameReports[i] = D3D_LOW_LATENCY_FRAME_REPORT();
-
-    if (!m_reflexEnabled)
-      return DXGI_ERROR_INVALID_CALL;
-
-    std::lock_guard lock(m_mutex);
-
-    if (!m_tracker)
-      return S_OK;
-
-    // Apparently we have to report all 64 frames, or nothing
-    std::array<DxvkReflexFrameReport, FrameCount> reports = { };
-    uint32_t reportCount = m_tracker->getFrameReports(FrameCount, reports.data());
-
-    if (reportCount < FrameCount)
-      return S_OK;
-
-    for (uint32_t i = 0; i < FrameCount; i++) {
-      auto& src = reports[i];
-      auto& dst = pLowLatencyResults->frameReports[i];
-
-      dst.frameID = src.report.presentID;
-      dst.inputSampleTime = src.report.inputSampleTimeUs;
-      dst.simStartTime = src.report.simStartTimeUs;
-      dst.simEndTime = src.report.simEndTimeUs;
-      dst.renderSubmitStartTime = src.report.renderSubmitStartTimeUs;
-      dst.renderSubmitEndTime = src.report.renderSubmitEndTimeUs;
-      dst.presentStartTime = src.report.presentStartTimeUs;
-      dst.presentEndTime = src.report.presentEndTimeUs;
-      dst.driverStartTime = src.report.driverStartTimeUs;
-      dst.driverEndTime = src.report.driverEndTimeUs;
-      dst.osRenderQueueStartTime = src.report.osRenderQueueStartTimeUs;
-      dst.osRenderQueueEndTime = src.report.osRenderQueueEndTimeUs;
-      dst.gpuRenderStartTime = src.report.gpuRenderStartTimeUs;
-      dst.gpuRenderEndTime = src.report.gpuRenderEndTimeUs;
-      dst.gpuActiveRenderTimeUs = src.gpuActiveTimeUs;
-      dst.gpuFrameTimeUs = 0;
-
-      if (i) {
-        dst.gpuFrameTimeUs = reports[i - 0].report.gpuRenderEndTimeUs
-                           - reports[i - 1].report.gpuRenderEndTimeUs;
-      }
-    }
-
-    return S_OK;
-  }
-
-
-  void D3D11ReflexDevice::RegisterLatencyTracker(
-          Rc<DxvkLatencyTracker>          Tracker) {
-    std::lock_guard lock(m_mutex);
-
-    if (m_tracker)
-      return;
-
-    if ((m_tracker = dynamic_cast<DxvkReflexLatencyTrackerNv*>(Tracker.ptr())))
-      m_tracker->setLatencySleepMode(m_enableLowLatency, m_enableBoost, m_minIntervalUs);
-  }
-
-
-  void D3D11ReflexDevice::UnregisterLatencyTracker(
-          Rc<DxvkLatencyTracker>          Tracker) {
-    std::lock_guard lock(m_mutex);
-
-    if (m_tracker == Tracker)
-      m_tracker = nullptr;
   }
 
 
@@ -3763,13 +3066,9 @@ namespace dxvk {
     return m_apiVersion;
   }
 
-
-  void* STDMETHODCALLTYPE DXGIDXVKDevice::GetDXVKDevice() {
-    return m_container->GetDXVKDevice().ptr();
-  }
-
-
   
+
+
   D3D11DXGIDevice::D3D11DXGIDevice(
           IDXGIAdapter*       pAdapter,
           ID3D12Device*       pD3D12Device,
@@ -3787,11 +3086,9 @@ namespace dxvk {
     m_d3d11DeviceExt(this, &m_d3d11Device),
     m_d3d11Interop  (this, &m_d3d11Device),
     m_d3d11Video    (this, &m_d3d11Device),
-    m_d3d11Reflex   (this, &m_d3d11Device),
     m_d3d11on12     (this, &m_d3d11Device, pD3D12Device, pD3D12Queue),
     m_metaDevice    (this),
-    m_dxvkFactory   (this, &m_d3d11Device),
-    m_destructionNotifier(this) {
+    m_dxvkFactory   (this, &m_d3d11Device) {
 
   }
   
@@ -3861,14 +3158,8 @@ namespace dxvk {
       return S_OK;
     }
 
-    if (riid == __uuidof(ID3DLowLatencyDevice)) {
-      *ppvObject = ref(&m_d3d11Reflex);
-      return S_OK;
-    }
-
     if (m_d3d11on12.Is11on12Device()) {
-      if (riid == __uuidof(ID3D11On12Device)
-       || riid == __uuidof(ID3D11On12Device1_DXVK)) {
+      if (riid == __uuidof(ID3D11On12Device)) {
         *ppvObject = ref(&m_d3d11on12);
         return S_OK;
       }
@@ -3878,11 +3169,6 @@ namespace dxvk {
       Com<ID3D11DeviceContext> context;
       m_d3d11Device.GetImmediateContext(&context);
       return context->QueryInterface(riid, ppvObject);
-    }
-
-    if (riid == __uuidof(ID3DDestructionNotifier)) {
-      *ppvObject = ref(&m_destructionNotifier);
-      return S_OK;
     }
 
     if (riid == __uuidof(ID3D11Debug))

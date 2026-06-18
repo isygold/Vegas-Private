@@ -28,13 +28,13 @@ namespace dxvk {
   }
   
   
-  DxvkExtensionList DxvkXrProvider::getInstanceExtensions() {
+  DxvkNameSet DxvkXrProvider::getInstanceExtensions() {
     std::lock_guard<dxvk::mutex> lock(m_mutex);
     return m_insExtensions;
   }
 
 
-  DxvkExtensionList DxvkXrProvider::getDeviceExtensions(uint32_t adapterId) {
+  DxvkNameSet DxvkXrProvider::getDeviceExtensions(uint32_t adapterId) {
     std::lock_guard<dxvk::mutex> lock(m_mutex);
     return m_devExtensions;
   }
@@ -82,56 +82,56 @@ namespace dxvk {
   }
 
 
-  DxvkExtensionList DxvkXrProvider::queryInstanceExtensions() const {
+  DxvkNameSet DxvkXrProvider::queryInstanceExtensions() const {
     int res;
     uint32_t len;
 
     res = g_winexrFunctions.__wineopenxr_GetVulkanInstanceExtensions(0, &len, nullptr);
     if (res != 0) {
       Logger::warn("OpenXR: Unable to get required Vulkan instance extensions size");
-      return DxvkExtensionList();
+      return DxvkNameSet();
     }
 
     std::vector<char> extensionList(len);
     res = g_winexrFunctions.__wineopenxr_GetVulkanInstanceExtensions(len, &len, &extensionList[0]);
     if (res != 0) {
       Logger::warn("OpenXR: Unable to get required Vulkan instance extensions");
-      return DxvkExtensionList();
+      return DxvkNameSet();
     }
 
     return parseExtensionList(std::string(extensionList.data(), len));
   }
   
   
-  DxvkExtensionList DxvkXrProvider::queryDeviceExtensions() const {
+  DxvkNameSet DxvkXrProvider::queryDeviceExtensions() const {
     int res;
 
     uint32_t len;
     res = g_winexrFunctions.__wineopenxr_GetVulkanDeviceExtensions(0, &len, nullptr);
     if (res != 0) {
       Logger::warn("OpenXR: Unable to get required Vulkan Device extensions size");
-      return DxvkExtensionList();
+      return DxvkNameSet();
     }
 
     std::vector<char> extensionList(len);
     res = g_winexrFunctions.__wineopenxr_GetVulkanDeviceExtensions(len, &len, &extensionList[0]);
     if (res != 0) {
       Logger::warn("OpenXR: Unable to get required Vulkan Device extensions");
-      return DxvkExtensionList();
+      return DxvkNameSet();
     }
 
     return parseExtensionList(std::string(extensionList.data(), len));
   }
   
   
-  DxvkExtensionList DxvkXrProvider::parseExtensionList(const std::string& str) const {
-    DxvkExtensionList result;
+  DxvkNameSet DxvkXrProvider::parseExtensionList(const std::string& str) const {
+    DxvkNameSet result;
     
     std::stringstream strstream(str);
     std::string       section;
     
     while (std::getline(strstream, section, ' '))
-      result.push_back(vk::makeExtension(section.c_str()));
+      result.add(section.c_str());
     
     return result;
   }

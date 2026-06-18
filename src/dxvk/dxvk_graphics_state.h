@@ -1,12 +1,8 @@
 #pragma once
 
-#include "dxvk_format.h"
 #include "dxvk_limits.h"
 
-#include <atomic>
 #include <cstring>
-#include <optional>
-#include <utility>
 
 namespace dxvk {
 
@@ -223,12 +219,14 @@ namespace dxvk {
 
     DxvkRsInfo(
             VkBool32              depthClipEnable,
+            VkBool32              depthBiasEnable,
             VkPolygonMode         polygonMode,
             VkSampleCountFlags    sampleCount,
             VkConservativeRasterizationModeEXT conservativeMode,
             VkBool32              flatShading,
             VkLineRasterizationModeEXT lineMode)
     : m_depthClipEnable (uint16_t(depthClipEnable)),
+      m_depthBiasEnable (uint16_t(depthBiasEnable)),
       m_polygonMode     (uint16_t(polygonMode)),
       m_sampleCount     (uint16_t(sampleCount)),
       m_conservativeMode(uint16_t(conservativeMode)),
@@ -238,6 +236,10 @@ namespace dxvk {
     
     VkBool32 depthClipEnable() const {
       return VkBool32(m_depthClipEnable);
+    }
+
+    VkBool32 depthBiasEnable() const {
+      return VkBool32(m_depthBiasEnable);
     }
 
     VkPolygonMode polygonMode() const {
@@ -267,12 +269,13 @@ namespace dxvk {
   private:
 
     uint16_t m_depthClipEnable        : 1;
+    uint16_t m_depthBiasEnable        : 1;
     uint16_t m_polygonMode            : 2;
     uint16_t m_sampleCount            : 5;
     uint16_t m_conservativeMode       : 2;
     uint16_t m_flatShading            : 1;
     uint16_t m_lineMode               : 2;
-    uint16_t m_reserved               : 3;
+    uint16_t m_reserved               : 2;
   
   };
 
@@ -320,6 +323,113 @@ namespace dxvk {
     uint16_t m_enableAlphaToCoverage  : 1;
     uint16_t m_reserved               : 10;
     uint16_t m_sampleMask;
+
+  };
+
+
+  /**
+   * \brief Packed depth-stencil metadata
+   *
+   * Stores some flags and the depth-compare op in
+   * two bytes. Stencil ops are stored separately.
+   */
+  class DxvkDsInfo {
+
+  public:
+
+    DxvkDsInfo() = default;
+
+    DxvkDsInfo(
+            VkBool32 enableDepthTest,
+            VkBool32 enableDepthWrite,
+            VkBool32 enableDepthBoundsTest,
+            VkBool32 enableStencilTest,
+            VkCompareOp depthCompareOp)
+    : m_enableDepthTest       (uint16_t(enableDepthTest)),
+      m_enableDepthWrite      (uint16_t(enableDepthWrite)),
+      m_enableDepthBoundsTest (uint16_t(enableDepthBoundsTest)),
+      m_enableStencilTest     (uint16_t(enableStencilTest)),
+      m_depthCompareOp        (uint16_t(depthCompareOp)),
+      m_reserved              (0) { }
+    
+    VkBool32 enableDepthTest() const {
+      return VkBool32(m_enableDepthTest);
+    }
+
+    VkBool32 enableDepthWrite() const {
+      return VkBool32(m_enableDepthWrite);
+    }
+
+    VkBool32 enableDepthBoundsTest() const {
+      return VkBool32(m_enableDepthBoundsTest);
+    }
+
+    VkBool32 enableStencilTest() const {
+      return VkBool32(m_enableStencilTest);
+    }
+
+    VkCompareOp depthCompareOp() const {
+      return VkCompareOp(m_depthCompareOp);
+    }
+
+    void setEnableDepthBoundsTest(VkBool32 enableDepthBoundsTest) {
+      m_enableDepthBoundsTest = VkBool32(enableDepthBoundsTest);
+    }
+
+  private:
+
+    uint16_t m_enableDepthTest        : 1;
+    uint16_t m_enableDepthWrite       : 1;
+    uint16_t m_enableDepthBoundsTest  : 1;
+    uint16_t m_enableStencilTest      : 1;
+    uint16_t m_depthCompareOp         : 3;
+    uint16_t m_reserved               : 9;
+
+  };
+
+
+  /**
+   * \brief Packed stencil op
+   *
+   * Stores various stencil op parameters
+   * for one single face in four bytes.
+   */
+  class DxvkDsStencilOp {
+
+  public:
+
+    DxvkDsStencilOp() = default;
+
+    DxvkDsStencilOp(VkStencilOpState state)
+    : m_failOp      (uint32_t(state.failOp)),
+      m_passOp      (uint32_t(state.passOp)),
+      m_depthFailOp (uint32_t(state.depthFailOp)),
+      m_compareOp   (uint32_t(state.compareOp)),
+      m_reserved    (0),
+      m_compareMask (uint32_t(state.compareMask)),
+      m_writeMask   (uint32_t(state.writeMask)) { }
+    
+    VkStencilOpState state(bool write) const {
+      VkStencilOpState result;
+      result.failOp      = VkStencilOp(m_failOp);
+      result.passOp      = VkStencilOp(m_passOp);
+      result.depthFailOp = VkStencilOp(m_depthFailOp);
+      result.compareOp   = VkCompareOp(m_compareOp);
+      result.compareMask = m_compareMask;
+      result.writeMask   = write ? m_writeMask : 0;
+      result.reference   = 0;
+      return result;
+    }
+
+  private:
+
+    uint32_t m_failOp                 : 3;
+    uint32_t m_passOp                 : 3;
+    uint32_t m_depthFailOp            : 3;
+    uint32_t m_compareOp              : 3;
+    uint32_t m_reserved               : 4;
+    uint32_t m_compareMask            : 8;
+    uint32_t m_writeMask              : 8;
 
   };
 
@@ -424,15 +534,13 @@ namespace dxvk {
     }
 
     static uint64_t encodeColorFormat(VkFormat format, uint32_t index) {
-      uint64_t value = 0u;
+      uint64_t value = uint64_t(format);
 
-      for (const auto& p : s_colorFormatRanges) {
-        if (format >= p.first && format <= p.second) {
-          value += uint32_t(format) - uint32_t(p.first);
-          break;
-        }
-
-        value += uint32_t(p.second) - uint32_t(p.first) + 1u;
+      if (value >= uint64_t(VK_FORMAT_A4R4G4B4_UNORM_PACK16)) {
+        value -= uint64_t(VK_FORMAT_A4R4G4B4_UNORM_PACK16);
+        value += uint64_t(VK_FORMAT_E5B9G9R9_UFLOAT_PACK32) + 1;
+      } else if (value > uint64_t(VK_FORMAT_E5B9G9R9_UFLOAT_PACK32)) {
+        value = 0;
       }
 
       return value << (7 * index);
@@ -453,23 +561,13 @@ namespace dxvk {
     static VkFormat decodeColorFormat(uint64_t value, uint32_t index) {
       value = (value >> (7 * index)) & 0x7F;
 
-      for (const auto& p : s_colorFormatRanges) {
-        uint32_t rangeSize = uint32_t(p.second) - uint32_t(p.first) + 1u;
-
-        if (value < rangeSize)
-          return VkFormat(uint32_t(p.first) + uint32_t(value));
-
-        value -= rangeSize;
+      if (value > uint64_t(VK_FORMAT_E5B9G9R9_UFLOAT_PACK32)) {
+        value -= uint64_t(VK_FORMAT_E5B9G9R9_UFLOAT_PACK32) + 1ull;
+        value += uint64_t(VK_FORMAT_A4R4G4B4_UNORM_PACK16);
       }
 
-      return VK_FORMAT_UNDEFINED;
+      return VkFormat(value);
     }
-
-    static constexpr std::array<std::pair<VkFormat, VkFormat>, 3> s_colorFormatRanges = {{
-      { VK_FORMAT_UNDEFINED,                  VK_FORMAT_E5B9G9R9_UFLOAT_PACK32  },  /*   0 - 123 */
-      { VK_FORMAT_A4R4G4B4_UNORM_PACK16,      VK_FORMAT_A4B4G4R4_UNORM_PACK16   },  /* 124 - 125 */
-      { VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR,  VK_FORMAT_A8_UNORM_KHR            },  /* 126 - 127 */
-    }};
 
   };
 
@@ -642,26 +740,24 @@ namespace dxvk {
       return *this;
     }
     
-    bool eq(const DxvkGraphicsPipelineStateInfo& other) const {
+    bool operator == (const DxvkGraphicsPipelineStateInfo& other) const {
       return bit::bcmpeq(this, &other);
     }
 
-    size_t hash() const {
-      auto src = reinterpret_cast<const unsigned char*>(this);
-      return size_t(bit::fnv1a_hash(src, sizeof(*this)));
+    bool operator != (const DxvkGraphicsPipelineStateInfo& other) const {
+      return !bit::bcmpeq(this, &other);
     }
 
-    bool useDynamicDepthTest() const {
-      return rt.getDepthStencilFormat();
+    bool useDynamicStencilRef() const {
+      return ds.enableStencilTest();
+    }
+
+    bool useDynamicDepthBias() const {
+      return rs.depthBiasEnable();
     }
 
     bool useDynamicDepthBounds() const {
-      return rt.getDepthStencilFormat();
-    }
-
-    bool useDynamicStencilTest() const {
-      auto format = rt.getDepthStencilFormat();
-      return format && (lookupFormatInfo(format)->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT);
+      return ds.enableDepthBoundsTest();
     }
 
     bool useDynamicVertexStrides() const {
@@ -698,11 +794,6 @@ namespace dxvk {
         util::isDualSourceBlendFactor(omBlend[0].dstAlphaBlendFactor()));
     }
 
-    bool useSampleLocations() const {
-      return ms.sampleCount() != VK_SAMPLE_COUNT_1_BIT
-          && rs.sampleCount() == VK_SAMPLE_COUNT_1_BIT;
-    }
-
     bool writesRenderTarget(
             uint32_t                        target) const {
       if (!omBlend[target].colorWriteMask())
@@ -717,9 +808,12 @@ namespace dxvk {
     DxvkIlInfo              il;
     DxvkRsInfo              rs;
     DxvkMsInfo              ms;
+    DxvkDsInfo              ds;
     DxvkOmInfo              om;
     DxvkRtInfo              rt;
     DxvkScInfo              sc;
+    DxvkDsStencilOp         dsFront;
+    DxvkDsStencilOp         dsBack;
     DxvkOmAttachmentSwizzle omSwizzle         [DxvkLimits::MaxNumRenderTargets];
     DxvkOmAttachmentBlend   omBlend           [DxvkLimits::MaxNumRenderTargets];
     DxvkIlAttribute         ilAttributes      [DxvkLimits::MaxNumVertexAttributes];
@@ -744,230 +838,15 @@ namespace dxvk {
       return *this;
     }
     
-    bool eq(const DxvkComputePipelineStateInfo& other) const {
+    bool operator == (const DxvkComputePipelineStateInfo& other) const {
       return bit::bcmpeq(this, &other);
     }
+
+    bool operator != (const DxvkComputePipelineStateInfo& other) const {
+      return !bit::bcmpeq(this, &other);
+    }
     
-    size_t hash() const {
-      auto src = reinterpret_cast<const unsigned char*>(this);
-      return size_t(bit::fnv1a_hash(src, sizeof(*this)));
-    }
-
     DxvkScInfo              sc;
-  };
-
-
-  /**
-   * \brief Pipeline state look-up table
-   *
-   * Provides a thread-safe, adaptive data structure for pipeline variants.
-   * Look-up and insertion are expected to be O(log n).
-   */
-  template<typename K, typename V>
-  class DxvkPipelineVariantTable {
-    static constexpr size_t LayerBits = 5u;
-    static constexpr size_t LayerSize = 1u << LayerBits;
-
-    static constexpr uint32_t HashThreshold = 4u;
-  public:
-
-    ~DxvkPipelineVariantTable() {
-      iter(m_table, [] (Entry* e) { delete e; });
-    }
-
-    V* find(const K& k) const {
-      // If the number of variants is small, avoid computing the
-      // state hash since that is somewhat expensive to do
-      uint32_t mask = m_table.mask.load(std::memory_order::memory_order_acquire);
-
-      bool useSimple = !(mask & (mask - 1u));
-
-      if (!useSimple)
-        useSimple = bit::popcnt(mask) < HashThreshold;
-
-      if (likely(useSimple)) {
-        for (auto index : bit::BitMask(mask)) {
-          // If more that one level is present, we need to consider
-          // those as well, but we can only do that on the hash path.
-          auto e = m_table.entries[index].load(std::memory_order_acquire);
-          useSimple = useSimple && !e->table.mask.load(std::memory_order_relaxed);
-
-          // Scan entries with the same hash
-          while (e) {
-            if (e->key.eq(k))
-              return &e->value;
-
-            e = e->next.load(std::memory_order_acquire);
-          }
-        }
-
-        if (likely(useSimple))
-          return nullptr;
-      }
-
-      // Compute hash and traverse entries
-      size_t hash = k.hash();
-      size_t shift = 0u;
-
-      const Table* table = &m_table;
-
-      while (true) {
-        size_t index = computeListIndex(hash, shift);
-        shift += LayerBits;
-
-        auto e = table->entries[index].load(std::memory_order_acquire);
-
-        if (!e)
-          break;
-
-        // Fetch next table from list head
-        // and ensure that the hash matches
-        table = &e->table;
-
-        if (e->hash != hash)
-          continue;
-
-        // Scan entries with the same hash
-        while (e) {
-          if (e->key.eq(k))
-            return &e->value;
-
-          e = e->next.load(std::memory_order_acquire);
-        }
-      }
-
-      // No pipeline found
-      return nullptr;
-    }
-
-    template<typename... Args>
-    V* add(const K& k, Args&&... args) {
-      size_t hash = k.hash();
-
-      // Try to insert the new entry into the top-level look-up table.
-      // If the given entry is already set, try the next level.
-      Entry* entry = new Entry(k, hash, std::forward<Args>(args)...);
-      Table* table = &m_table;
-      Entry* target = nullptr;
-
-      size_t index = -1;
-      size_t shift = 0u;
-
-      while (!target) {
-        index = computeListIndex(hash, shift);
-
-        // If this succeeds, this is the first entry at the given index
-        if (table->entries[index].compare_exchange_strong(target, entry,
-            std::memory_order_release, std::memory_order_acquire))
-          break;
-
-        // Check if there is a hash collision
-        if (target->hash == hash)
-          break;
-
-        table = &target->table;
-        target = nullptr;
-
-        shift += LayerBits;
-      }
-
-      if (target) {
-        // The new entry has the same hash as the target entry, so
-        // just append it to the linked list. This should be rare.
-        while (true) {
-          Entry* next = nullptr;
-
-          if (target->next.compare_exchange_strong(next, entry,
-              std::memory_order_release, std::memory_order_acquire))
-            break;
-
-          target = next;
-        }
-      } else {
-        // Update mask now that the corresponding entry is non-null
-        table->mask.fetch_or(1u << index, std::memory_order_release);
-      }
-
-      return &entry->value;
-    }
-
-    template<typename Fn>
-    void forEach(const Fn& fn) const {
-      iter(m_table, [&] (Entry* e) { fn(e->value); });
-    }
-
-  private:
-
-    struct Entry;
-
-    struct Table {
-      std::array<std::atomic<Entry*>, LayerSize> entries = { };
-      std::atomic<uint32_t> mask = { 0u };
-    };
-
-    struct Entry {
-      template<typename... Args>
-      Entry(const K& k, size_t h, Args&&... args)
-      : key(k), hash(h), value(std::forward<Args>(args)...) { }
-
-      K       key   = { };
-      size_t  hash  = 0u;
-      V       value = { };
-      Table   table = { };
-
-      std::atomic<Entry*> next = { nullptr };
-    };
-
-    Table m_table;
-
-    template<typename Fn>
-    static void iter(const Table& table, const Fn& fn) {
-      uint32_t mask = table.mask.load(std::memory_order_acquire);
-
-      for (auto index : bit::BitMask(mask)) {
-        Entry* e = table.entries[index].load(std::memory_order_relaxed);
-
-        // Recurse first so that the function can be used for destruction.
-        // Only the first entry in each list can have a sub-table.
-        if (e->table.mask.load(std::memory_order_relaxed))
-          iter(e->table, fn);
-
-        while (e) {
-          Entry* next = e->next.load(std::memory_order_acquire);
-          fn(e);
-          e = next;
-        }
-      }
-    }
-
-    static size_t computeListIndex(size_t hash, size_t shift) {
-      // Swap bytes to ensure that high bits of the hash contribute to the index.
-      // This is useful since hashes often only differ in the high 32 bits.
-      if constexpr (sizeof(size_t) == sizeof(uint64_t)) {
-        uint64_t index = hash;
-
-        index = ((index >> 56u) & 0x00000000000000ffull)
-              | ((index >> 40u) & 0x000000000000ff00ull)
-              | ((index >> 24u) & 0x0000000000ff0000ull)
-              | ((index >>  8u) & 0x00000000ff000000ull)
-              | ((index <<  8u) & 0x000000ff00000000ull)
-              | ((index << 24u) & 0x0000ff0000000000ull)
-              | ((index << 40u) & 0x00ff000000000000ull)
-              | ((index << 56u) & 0xff00000000000000ull);
-
-        return size_t((index + hash) >> shift) % LayerSize;
-      } else {
-        uint32_t index = hash;
-
-        index = ((index >> 24u) & 0x000000ffu)
-              | ((index >>  8u) & 0x0000ff00u)
-              | ((index <<  8u) & 0x00ff0000u)
-              | ((index << 24u) & 0xff000000u);
-
-        return size_t((index + hash) >> shift) % LayerSize;
-      }
-    }
-
   };
 
 }

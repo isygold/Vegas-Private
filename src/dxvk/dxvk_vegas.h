@@ -42,7 +42,7 @@ namespace dxvk {
    * \brief Vegas — Star Engine next-gen optimization system
    *
    * Provides Adreno-optimized GPU profiling, dynamic VRAM/GPU masking,
-   * BCn→ASTC texture transcoding, FSR upscaling support, and
+   * FSR upscaling support, and
    * governor-style adaptive threshold tuning.
    */
   // Forward declarations for DXVK types used in async FSR
@@ -250,28 +250,6 @@ namespace dxvk {
     /// swapchain resize).  Idempotent — safe to call even if no FSR
     /// is in flight.
     static void fsrDrain();
-
-    // ---- BCn→ASTC Transcoder (baked auto) ----
-
-    static bool formatIsBcn(
-            VkFormat             format);
-
-    static VkFormat getAstcFormat(
-            VkFormat             bcnFormat);
-
-    static VkFormat shouldTranscodeFormat(
-            VkFormat             originalFormat,
-            VkImageUsageFlags    usage,
-            VkExtent3D           extent,
-            const Rc<DxvkAdapter>& adapter);
-
-    static void transcodeImageData(
-            void*                dstData,
-            const void*          srcData,
-            VkFormat             srcFormat,
-            VkFormat             dstFormat,
-            uint32_t             width,
-            uint32_t             height);
 
     /// Retrieve framegen output VkImage (interpolated intermediate frame).
     /// Note: framegenDispatch blits the output to curImage internally;

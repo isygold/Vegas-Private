@@ -4,8 +4,8 @@
 
 namespace dxvk {
 
-  DxsoTag DxsoReader::readTag() {
-    DxsoTag tag;
+  DxbcTag DxsoReader::readTag() {
+    DxbcTag tag;
     this->read(&tag, 4);
     return tag;
   }

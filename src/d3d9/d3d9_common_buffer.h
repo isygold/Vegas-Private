@@ -133,13 +133,17 @@ namespace dxvk {
       return DxvkBufferSlice();
     }
 
-    inline Rc<DxvkResourceAllocation> DiscardMapSlice() {
-      m_allocation = GetMapBuffer()->allocateStorage();
-      return m_allocation;
+    inline DxvkBufferSliceHandle AllocMapSlice() {
+      return GetMapBuffer()->allocSlice();
     }
 
-    inline Rc<DxvkResourceAllocation> GetMappedSlice() const {
-      return m_allocation;
+    inline DxvkBufferSliceHandle DiscardMapSlice() {
+      m_sliceHandle = GetMapBuffer()->allocSlice();
+      return m_sliceHandle;
+    }
+
+    inline DxvkBufferSliceHandle GetMappedSlice() const {
+      return m_sliceHandle;
     }
 
     inline DWORD GetMapFlags() const      { return m_mapFlags; }
@@ -147,7 +151,7 @@ namespace dxvk {
 
     inline const D3D9_BUFFER_DESC* Desc() const { return &m_desc; }
 
-    static HRESULT ValidateBufferProperties(const D3D9_BUFFER_DESC* pDesc, const bool IsExtended);
+    static HRESULT ValidateBufferProperties(const D3D9_BUFFER_DESC* pDesc);
 
     /**
      * \brief The range of the buffer that was changed using Lock calls
@@ -236,7 +240,7 @@ namespace dxvk {
     Rc<DxvkBuffer>              m_buffer;
     Rc<DxvkBuffer>              m_stagingBuffer;
 
-    Rc<DxvkResourceAllocation>  m_allocation;
+    DxvkBufferSliceHandle       m_sliceHandle;
 
     D3D9Range                   m_dirtyRange;
 

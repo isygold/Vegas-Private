@@ -1,11 +1,7 @@
 #pragma once
 
-#include "../dxso/dxso_module.h"
-
-#include "../dxvk/dxvk_shader.h"
-#include "../dxvk/dxvk_shader_key.h"
-
 #include "d3d9_resource.h"
+#include "../dxso/dxso_module.h"
 #include "d3d9_util.h"
 #include "d3d9_mem.h"
 
@@ -56,31 +52,18 @@ namespace dxvk {
 
     const DxsoProgramInfo& GetInfo() const { return m_info; }
 
-    int32_t GetMaxDefinedFloatConstant() const { return m_maxDefinedFloatConst; }
-
-    int32_t GetMaxDefinedIntConstant() const { return m_maxDefinedIntConst; }
-
-    int32_t GetMaxDefinedBoolConstant() const { return m_maxDefinedBoolConst; }
-
-    VkImageViewType GetImageViewType(uint32_t samplerSlot) const {
-      const uint32_t offset = samplerSlot * 2;
-      const uint32_t mask = 0b11;
-      return static_cast<VkImageViewType>((m_textureTypes >> offset) & mask);
-    }
+    uint32_t GetMaxDefinedConstant() const { return m_maxDefinedConst; }
 
   private:
 
     DxsoIsgn              m_isgn;
     uint32_t              m_usedSamplers;
     uint32_t              m_usedRTs;
-    uint32_t              m_textureTypes;
 
     DxsoProgramInfo       m_info;
     DxsoShaderMetaInfo    m_meta;
     DxsoDefinedConstants  m_constants;
-    int32_t               m_maxDefinedFloatConst = -1;
-    int32_t               m_maxDefinedIntConst = -1;
-    int32_t               m_maxDefinedBoolConst = -1;
+    uint32_t              m_maxDefinedConst;
 
     Rc<DxvkShader>        m_shader;
 
@@ -106,8 +89,9 @@ namespace dxvk {
             uint32_t             BytecodeLength)
       : D3D9DeviceChild<Base>( pDevice )
       , m_shader             ( CommonShader )
-      , m_bytecode           ( pAllocator->Alloc(BytecodeLength) )
       , m_bytecodeLength     ( BytecodeLength ) {
+
+      m_bytecode = pAllocator->Alloc(BytecodeLength);
       m_bytecode.Map();
       std::memcpy(m_bytecode.Ptr(), pShaderBytecode, BytecodeLength);
       m_bytecode.Unmap();
