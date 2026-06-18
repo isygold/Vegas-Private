@@ -880,6 +880,16 @@ namespace dxvk {
   }
 
 
+  bool Vegas::ensureFsrIntermediate(
+          DxvkDevice*          device,
+          VkExtent3D           extent) {
+    // Stub: assume intermediate image exists (caller will create it
+    // if needed).  Full implementation would manage a persistent
+    // VkImage with STORAGE_BIT for async FSR dispatch.
+    return true;
+  }
+
+
   bool Vegas::fsrUpscale(
           VkImage              srcImage,
           VkImage              dstImage,

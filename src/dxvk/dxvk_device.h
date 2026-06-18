@@ -94,6 +94,7 @@ namespace dxvk {
     friend class DxvkContext;
     friend class DxvkSubmissionQueue;
     friend class DxvkDescriptorPoolTracker;
+    friend class Vegas;
   public:
     
     DxvkDevice(

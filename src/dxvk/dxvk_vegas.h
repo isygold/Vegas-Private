@@ -331,6 +331,13 @@ namespace dxvk {
 
     static bool                s_fgActive;
 
+    /// Ensure the intermediate FSR image (s_fsrInterImage) exists and is
+    /// large enough for the given extent. Recreates if dimensions changed.
+    /// \returns true on success (image is ready for EASU dispatch).
+    static bool ensureFsrIntermediate(
+            DxvkDevice*          device,
+            VkExtent3D           extent);
+
     /// Push frame-timing metrics for HUD consumption.
     static void pushMetrics(
             float                gpuLoad,
