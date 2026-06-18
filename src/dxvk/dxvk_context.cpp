@@ -6567,11 +6567,12 @@ namespace dxvk {
     m_cmd->next();
 
     this->beginCurrentCommands();
+  }
 
 
 // ========== VEGAS OPTIMIZATION HELPERS ==========
 
-void DxvkContext::initVegasProfile() {
+  void DxvkContext::initVegasProfile() {
     if (m_vegasProfile.initialized)
         return;
 
@@ -6590,8 +6591,6 @@ void DxvkContext::initVegasProfile() {
               Vegas::getDrawThreshold(), Vegas::getHaaeThreshold());
 
     m_vegasProfile.initialized = true;
-}
-
   }
 
 }
