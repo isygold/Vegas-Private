@@ -49,14 +49,16 @@
 #endif
 
 // MinGW headers are broken. Who'dve guessed?
-#ifndef _MSC_VER
-#ifndef D3DDEVINFO_RESOURCEMANAGER
+// MinGW-w64 12+ properly defines D3DDEVINFO_RESOURCEMANAGER in d3d9types.h,
+// so the dummy is only needed for older versions or non-MinGW GCC (Wine).
+#if !defined(_MSC_VER)
+#if !defined(__MINGW64_VERSION_MAJOR) || __MINGW64_VERSION_MAJOR < 12
 typedef struct _D3DDEVINFO_RESOURCEMANAGER
 {
   char dummy;
 } D3DDEVINFO_RESOURCEMANAGER, * LPD3DDEVINFO_RESOURCEMANAGER;
-#endif  // D3DDEVINFO_RESOURCEMANAGER
-#endif  // _MSC_VER
+#endif  // !__MINGW64_VERSION_MAJOR || < 12
+#endif  // !_MSC_VER
 
 // This is the managed pool on D3D9Ex, it's just hidden!
 #define D3DPOOL_MANAGED_EX D3DPOOL(6)
