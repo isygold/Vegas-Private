@@ -58,7 +58,7 @@ jobs:
           TAG="${{ needs.setup.outputs.tag }}"
           gh release create --repo isygold/Vegas-Private "$TAG" --draft --title "$TAG" --notes "" 2>/dev/null || true
           find build/ -name "*.dll" -o -name "*.dll.a" | while read f; do
-            gh release upload --repo isygold/Vegas-Private "$TAG" "$f" --clobber
+            gh release upload --repo isygold/Vegas-Private "$TAG" "$f#x64/$(basename $f)" --clobber
           done
 
   build-mingw-x32:
@@ -97,7 +97,7 @@ jobs:
           TAG="${{ needs.setup.outputs.tag }}"
           gh release create --repo isygold/Vegas-Private "$TAG" --draft --title "$TAG" --notes "" 2>/dev/null || true
           find build/ -name "*.dll" -o -name "*.dll.a" | while read f; do
-            gh release upload --repo isygold/Vegas-Private "$TAG" "$f" --clobber
+            gh release upload --repo isygold/Vegas-Private "$TAG" "$f#x32/$(basename $f)" --clobber
           done
 
   package-wcp:
