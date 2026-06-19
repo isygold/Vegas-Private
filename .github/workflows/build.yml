@@ -140,61 +140,73 @@ jobs:
           echo "release=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Package WCP (DXVK type)
+        shell: bash
         run: |
+          set -e
           cd workdir
           VERSION="${{ steps.version.outputs.release }}"
           TAG="${{ needs.setup.outputs.tag }}"
-          python3 -c ""
+          python3 << 'PYEOF'
 import json
+import os
+v = os.environ['VERSION']
+tag = os.environ['TAG']
+data = {
+    "type": "DXVK",
+    "versionName": f"{v}-vegas",
+    "versionCode": 1,
+    "description": "VEGAS - Community DXVK fork optimized for Android/Winlator",
+    "files": [
+        {"source": "system32/d3d8.dll", "target": "${system32}/d3d8.dll"},
+        {"source": "system32/d3d9.dll", "target": "${system32}/d3d9.dll"},
+        {"source": "system32/d3d10core.dll", "target": "${system32}/d3d10core.dll"},
+        {"source": "system32/d3d11.dll", "target": "${system32}/d3d11.dll"},
+        {"source": "system32/dxgi.dll", "target": "${system32}/dxgi.dll"},
+        {"source": "syswow64/d3d8.dll", "target": "${syswow64}/d3d8.dll"},
+        {"source": "syswow64/d3d9.dll", "target": "${syswow64}/d3d9.dll"},
+        {"source": "syswow64/d3d10core.dll", "target": "${syswow64}/d3d10core.dll"},
+        {"source": "syswow64/d3d11.dll", "target": "${syswow64}/d3d11.dll"},
+        {"source": "syswow64/dxgi.dll", "target": "${syswow64}/dxgi.dll"}
+    ]
+}
 with open('profile.json', 'w') as f:
-    json.dump({
-        'type': 'DXVK',
-        'versionName': f'${VERSION}-vegas',
-        'versionCode': 1,
-        'description': 'VEGAS — Community DXVK fork optimized for Android/Winlator',
-        'files': [
-            {'source': 'system32/d3d8.dll', 'target': '${system32}/d3d8.dll'},
-            {'source': 'system32/d3d9.dll', 'target': '${system32}/d3d9.dll'},
-            {'source': 'system32/d3d10core.dll', 'target': '${system32}/d3d10core.dll'},
-            {'source': 'system32/d3d11.dll', 'target': '${system32}/d3d11.dll'},
-            {'source': 'system32/dxgi.dll', 'target': '${system32}/dxgi.dll'},
-            {'source': 'syswow64/d3d8.dll', 'target': '${syswow64}/d3d8.dll'},
-            {'source': 'syswow64/d3d9.dll', 'target': '${syswow64}/d3d9.dll'},
-            {'source': 'syswow64/d3d10core.dll', 'target': '${syswow64}/d3d10core.dll'},
-            {'source': 'syswow64/d3d11.dll', 'target': '${syswow64}/d3d11.dll'},
-            {'source': 'syswow64/dxgi.dll', 'target': '${syswow64}/dxgi.dll'}
-        ]
-    }, f, indent=2)
-""
+    json.dump(data, f, indent=2)
+PYEOF
           tar --zstd -cf "../dxvk-${VERSION}-${TAG}.wcp" system32/ syswow64/ profile.json
 
       - name: Package WCP (VEGAS type)
+        shell: bash
         run: |
+          set -e
           cd workdir
           VERSION="${{ steps.version.outputs.release }}"
           TAG="${{ needs.setup.outputs.tag }}"
-          python3 -c ""
+          python3 << 'PYEOF'
 import json
+import os
+v = os.environ['VERSION']
+tag = os.environ['TAG']
+data = {
+    "type": "VEGAS",
+    "versionName": f"vegas-{v}",
+    "versionCode": 1,
+    "description": "VEGAS - community DXVK fork optimized for Adreno GPUs",
+    "files": [
+        {"source": "system32/d3d8.dll", "target": "${system32}/d3d8.dll"},
+        {"source": "system32/d3d9.dll", "target": "${system32}/d3d9.dll"},
+        {"source": "system32/d3d10core.dll", "target": "${system32}/d3d10core.dll"},
+        {"source": "system32/d3d11.dll", "target": "${system32}/d3d11.dll"},
+        {"source": "system32/dxgi.dll", "target": "${system32}/dxgi.dll"},
+        {"source": "syswow64/d3d8.dll", "target": "${syswow64}/d3d8.dll"},
+        {"source": "syswow64/d3d9.dll", "target": "${syswow64}/d3d9.dll"},
+        {"source": "syswow64/d3d10core.dll", "target": "${syswow64}/d3d10core.dll"},
+        {"source": "syswow64/d3d11.dll", "target": "${syswow64}/d3d11.dll"},
+        {"source": "syswow64/dxgi.dll", "target": "${syswow64}/dxgi.dll"}
+    ]
+}
 with open('profile.json', 'w') as f:
-    json.dump({
-        'type': 'VEGAS',
-        'versionName': f'vegas-${VERSION}',
-        'versionCode': 1,
-        'description': 'VEGAS — community DXVK fork optimized for Adreno GPUs',
-        'files': [
-            {'source': 'system32/d3d8.dll', 'target': '${system32}/d3d8.dll'},
-            {'source': 'system32/d3d9.dll', 'target': '${system32}/d3d9.dll'},
-            {'source': 'system32/d3d10core.dll', 'target': '${system32}/d3d10core.dll'},
-            {'source': 'system32/d3d11.dll', 'target': '${system32}/d3d11.dll'},
-            {'source': 'system32/dxgi.dll', 'target': '${system32}/dxgi.dll'},
-            {'source': 'syswow64/d3d8.dll', 'target': '${syswow64}/d3d8.dll'},
-            {'source': 'syswow64/d3d9.dll', 'target': '${syswow64}/d3d9.dll'},
-            {'source': 'syswow64/d3d10core.dll', 'target': '${syswow64}/d3d10core.dll'},
-            {'source': 'syswow64/d3d11.dll', 'target': '${syswow64}/d3d11.dll'},
-            {'source': 'syswow64/dxgi.dll', 'target': '${syswow64}/dxgi.dll'}
-        ]
-    }, f, indent=2)
-""
+    json.dump(data, f, indent=2)
+PYEOF
           tar --zstd -cf "../vegas-${VERSION}-${TAG}.wcp" system32/ syswow64/ profile.json
 
       - name: Upload WCP to Release
