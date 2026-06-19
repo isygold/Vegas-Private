@@ -2,78 +2,60 @@ name: WCP Build
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag of the Release containing built DLLs"
+        required: true
+        type: string
 
 permissions:
-  actions: read
-  contents: read
+  contents: write
 
 jobs:
-  build:
+  build-wcp:
+    name: Build WCP
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Install zstd
         run: sudo apt-get update -y && sudo apt-get install -y zstd
 
-      - name: Get latest build SHA and run ID
-        id: get-sha
+      - name: Download from Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          RUN_JSON=$(gh run list --repo ${{ github.repository }} --workflow build.yml --branch ${{ github.ref_name }} \
-            --status success --limit 1 --json headSha,databaseId)
-          if [ -z "$RUN_JSON" ] || [ "$RUN_JSON" = "[]" ]; then
-            echo "::error::No successful build.yml runs found on branch vegas."
-            echo "::error::Trigger a Build DXVK (x64 + x32) workflow first."
-            exit 1
-          fi
-          FULL_SHA=$(echo "$RUN_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['headSha'])")
-          RUN_ID=$(echo "$RUN_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['databaseId'])")
-          echo "full_sha=$FULL_SHA" >> "$GITHUB_OUTPUT"
-          echo "sha=${FULL_SHA:0:7}" >> "$GITHUB_OUTPUT"
-          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Download build DLLs
-        uses: actions/download-artifact@v4
-        with:
-          name: dxvk-${{ steps.get-sha.outputs.full_sha }}
-          path: ./workdir
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ steps.get-sha.outputs.run_id }}
+          TAG="${{ inputs.release_tag }}"
+          mkdir -p workdir
+          cd workdir
+          # Unpack all assets from the release
+          gh release download "$TAG"
+          # Also clone vegas config
+          git clone --depth 1 https://github.com/isygold/Vegas-Private.git /tmp/vegas-repo 2>/dev/null || true
 
       - name: Restructure for WCP
         run: |
-          cd ./workdir
-          VDIR="$(ls -d dxvk-*/)"
-          mv "$VDIR/x64" ./
-          mv "$VDIR/x32" ./
-          rm -rf "$VDIR"
+          cd workdir
+          # Find all DLLs and sort them
+          mkdir -p system32 syswow64
+          # x64 DLLs (from x64/ subdirectories)
+          find . -path "*/x64/*.dll" -exec cp {} system32/ \; 2>/dev/null || true
+          # x32 DLLs (from x32/ subdirectories)
+          find . -path "*/x32/*.dll" -exec cp {} syswow64/ \; 2>/dev/null || true
+          # Also check for DLLs directly in release (if uploaded flat)
+          find . -maxdepth 1 -name "*.dll" -exec sh -c "basename {} | grep -q x32|\" && cp {} syswow64/ || cp {} system32/" \; 2>/dev/null || true
 
-      - name: Prepare DLL directories
+      - name: Package WCP (DXVK type)
         run: |
-          cd ./workdir
-          mv x64 system32
-          mv x32 syswow64
-
-      - name: Read version from RELEASE file
-        id: version
-        run: |
-          VERSION=$(cat RELEASE)
-          echo "release=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Using version: $VERSION"
-
-      - name: Package WCP (DXVK type — stock Winlator)
-        run: |
-          cd ./workdir
-          VERSION="${{ steps.version.outputs.release }}"
+          cd workdir
+          VERSION="${{ inputs.release_tag }}"
           cat > profile.json << JSONEOF
           {
             "type": "DXVK",
-            "versionName": "${VERSION}-vegas",
+            "versionName": "${VERSION}",
             "versionCode": 1,
             "description": "VEGAS — Community DXVK fork optimized for Android/Winlator",
             "files": [
@@ -89,13 +71,13 @@ jobs:
             ]
           }
           JSONEOF
-          tar --zstd -cf "../dxvk-${VERSION}-vegas-${{ steps.get-sha.outputs.sha }}.wcp" \
+          tar --zstd -cf "../dxvk-${VERSION}.wcp" \
             system32/ syswow64/ profile.json
 
-      - name: Package WCP (VEGAS type — Star Emulator)
+      - name: Package WCP (VEGAS type)
         run: |
-          cd ./workdir
-          VERSION="${{ steps.version.outputs.release }}"
+          cd workdir
+          VERSION="${{ inputs.release_tag }}"
           cat > profile.json << JSONEOF
           {
             "type": "VEGAS",
@@ -115,23 +97,27 @@ jobs:
             ]
           }
           JSONEOF
-          tar --zstd -cf "../vegas-${VERSION}-${{ steps.get-sha.outputs.sha }}.wcp" \
+          tar --zstd -cf "../vegas-${VERSION}.wcp" \
             system32/ syswow64/ profile.json
 
-      - name: Upload WCP (DXVK type — stock Winlator)
-        uses: actions/upload-artifact@v4
-        with:
-          name: wcp-dxvk-${{ steps.get-sha.outputs.sha }}
-          path: ./dxvk-*.wcp
+      - name: Upload WCPs to current Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          gh release upload "$TAG" ./*.wcp --clobber
 
-      - name: Upload WCP (VEGAS type — Star Emulator)
-        uses: actions/upload-artifact@v4
-        with:
-          name: wcp-vegas-${{ steps.get-sha.outputs.sha }}
-          path: ./vegas-*.wcp
+      - name: Upload WCPs to vegas-releases (if configured)
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
+        run: |
+          if [ -n "${{ secrets.PAT_TOKEN }}" ] || [ "${{ github.token }}" != "" ]; then
+            # Clone vegas-releases
+            git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/isygold/vegas-releases.git /tmp/vegas-releases 2>/dev/null || true
+            mkdir -p /tmp/vegas-releases/wcp
+            cp ./*.wcp /tmp/vegas-releases/wcp/ 2>/dev/null || true
+            cd /tmp/vegas-releases
+            git add wcp/
+            git diff --cached --quiet || (git -c user.name="GitHub Actions" -c user.email="actions@github.com" commit -m "Add WCP packages for ${{ inputs.release_tag }}" && git push)
+          fi
 
-      - name: Upload vegas config
-        uses: actions/upload-artifact@v4
-        with:
-          name: vegas-config-${{ steps.get-sha.outputs.sha }}
-          path: vegas/
