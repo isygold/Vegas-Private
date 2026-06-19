@@ -32,7 +32,7 @@ jobs:
           mkdir -p workdir
           cd workdir
           # Unpack all assets from the release
-          gh release download "$TAG"
+          gh release download --repo isygold/Vegas-Private "$TAG"
           # Also clone vegas config
           git clone --depth 1 https://github.com/isygold/Vegas-Private.git /tmp/vegas-repo 2>/dev/null || true
 
@@ -105,7 +105,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ inputs.release_tag }}"
-          gh release upload "$TAG" ./*.wcp --clobber
+          gh release upload --repo isygold/Vegas-Private "$TAG" ./*.wcp --clobber
 
       - name: Upload WCPs to vegas-releases (if configured)
         env:
