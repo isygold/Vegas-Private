@@ -145,6 +145,7 @@ jobs:
           cd workdir
           VERSION="${{ steps.version.outputs.release }}"
           TAG="${{ needs.setup.outputs.tag }}"
+          export VERSION TAG
           python3 -c "import json,os; v=os.environ['VERSION']; json.dump({'type':'DXVK','versionName':f'{v}-vegas','versionCode':1,'description':'VEGAS - Community DXVK fork optimized for Android/Winlator','files':[{'source':'system32/d3d8.dll','target':r'\${system32}/d3d8.dll'},{'source':'system32/d3d9.dll','target':r'\${system32}/d3d9.dll'},{'source':'system32/d3d10core.dll','target':r'\${system32}/d3d10core.dll'},{'source':'system32/d3d11.dll','target':r'\${system32}/d3d11.dll'},{'source':'system32/dxgi.dll','target':r'\${system32}/dxgi.dll'},{'source':'syswow64/d3d8.dll','target':r'\${syswow64}/d3d8.dll'},{'source':'syswow64/d3d9.dll','target':r'\${syswow64}/d3d9.dll'},{'source':'syswow64/d3d10core.dll','target':r'\${syswow64}/d3d10core.dll'},{'source':'syswow64/d3d11.dll','target':r'\${syswow64}/d3d11.dll'},{'source':'syswow64/dxgi.dll','target':r'\${syswow64}/dxgi.dll'}]},open('profile.json','w'),indent=2)"
           tar --zstd -cf "../dxvk-${VERSION}-${TAG}.wcp" system32/ syswow64/ profile.json
 
@@ -154,6 +155,7 @@ jobs:
           cd workdir
           VERSION="${{ steps.version.outputs.release }}"
           TAG="${{ needs.setup.outputs.tag }}"
+          export VERSION TAG
           python3 -c "import json,os; v=os.environ['VERSION']; json.dump({'type':'VEGAS','versionName':f'vegas-{v}','versionCode':1,'description':'VEGAS - community DXVK fork optimized for Adreno GPUs','files':[{'source':'system32/d3d8.dll','target':r'\${system32}/d3d8.dll'},{'source':'system32/d3d9.dll','target':r'\${system32}/d3d9.dll'},{'source':'system32/d3d10core.dll','target':r'\${system32}/d3d10core.dll'},{'source':'system32/d3d11.dll','target':r'\${system32}/d3d11.dll'},{'source':'system32/dxgi.dll','target':r'\${system32}/dxgi.dll'},{'source':'syswow64/d3d8.dll','target':r'\${syswow64}/d3d8.dll'},{'source':'syswow64/d3d9.dll','target':r'\${syswow64}/d3d9.dll'},{'source':'syswow64/d3d10core.dll','target':r'\${syswow64}/d3d10core.dll'},{'source':'syswow64/d3d11.dll','target':r'\${syswow64}/d3d11.dll'},{'source':'syswow64/dxgi.dll','target':r'\${syswow64}/dxgi.dll'}]},open('profile.json','w'),indent=2)"
           tar --zstd -cf "../vegas-${VERSION}-${TAG}.wcp" system32/ syswow64/ profile.json
 
