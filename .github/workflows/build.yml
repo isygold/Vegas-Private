@@ -56,9 +56,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ needs.setup.outputs.tag }}"
-          gh release create "$TAG" --draft --title "$TAG" --notes "" 2>/dev/null || true
+          gh release create --repo isygold/Vegas-Private "$TAG" --draft --title "$TAG" --notes "" 2>/dev/null || true
           find build/ -name "*.dll" -o -name "*.dll.a" | while read f; do
-            gh release upload "$TAG" "$f" --clobber
+            gh release upload --repo isygold/Vegas-Private "$TAG" "$f" --clobber
           done
 
   build-mingw-x32:
@@ -95,9 +95,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ needs.setup.outputs.tag }}"
-          gh release create "$TAG" --draft --title "$TAG" --notes "" 2>/dev/null || true
+          gh release create --repo isygold/Vegas-Private "$TAG" --draft --title "$TAG" --notes "" 2>/dev/null || true
           find build/ -name "*.dll" -o -name "*.dll.a" | while read f; do
-            gh release upload "$TAG" "$f" --clobber
+            gh release upload --repo isygold/Vegas-Private "$TAG" "$f" --clobber
           done
 
   package-wcp:
@@ -119,7 +119,7 @@ jobs:
           TAG="${{ needs.setup.outputs.tag }}"
           mkdir -p workdir
           cd workdir
-          gh release download "$TAG"
+          gh release download --repo isygold/Vegas-Private "$TAG"
 
       - name: Restructure for WCP
         run: |
@@ -162,8 +162,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ needs.setup.outputs.tag }}"
-          gh release upload "$TAG" ./*.wcp --clobber
-          gh release edit "$TAG" --draft=false
+          gh release upload --repo isygold/Vegas-Private "$TAG" ./*.wcp --clobber
+          gh release edit --repo isygold/Vegas-Private "$TAG" --draft=false
 
       - name: Upload vegas config
         env:
