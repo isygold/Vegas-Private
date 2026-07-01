@@ -7,7 +7,7 @@
 # VEGAS — DXVK v2.7.3
 ### Adreno-Tuned DXVK for Android Emulation (Star Emulator / Winlator)
 
-VEGAS is a specialized performance fork of DXVK targeting **Qualcomm Adreno GPUs** on mobile. It features a tier-based auto-tuning engine, FSR 1.0 compute upscaling, motion-compensated frame generation, and dynamic driver safeguards — all behind a single master switch.
+VEGAS is a specialized performance fork of DXVK (via GPLAsync) targeting **Qualcomm Adreno GPUs** on mobile. It features a tier-based auto-tuning engine, FSR 1.0 compute upscaling, motion-compensated frame generation, and dynamic driver safeguards — all behind a single master switch.
 
 ---
 
@@ -169,6 +169,7 @@ The output DLLs (`d3d9.dll`, `d3d11.dll`, `dxgi.dll`, etc.) are placed in `/outp
 
 - **Lead Developer:** isygold
 - **Base Project:** DXVK v2.7.1+ by doitsujin
+- **Upstream Parent:** GPLAsync v2.7.1 by ishitatsuyuki (async pipeline compilation foundation)
 - **License:** zlib/libpng
 
 ---
