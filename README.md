@@ -211,7 +211,7 @@ The output DLLs (`d3d9.dll`, `d3d11.dll`, `dxgi.dll`, etc.) are placed in `/outp
 ## Credits
 
 - **Lead Developer:** isygold
-- **Base Project:** DXVK v2.7.1+ by doitsujin
+- **Base Project:** DXVK v2.7.1 by doitsujin
 - **Timeline Semaphore (DxvkFence):** leegao — enabled non-blocking async FSR dispatch on Turnip
 - **ASTC GPU Encoder (astc_enc_leegao):** leegao — PCA-based RGBA8→ASTC 4×4 compute shader with 2-partition mode support; ported and integrated by isygold
 - **Upstream Parent:** GPLAsync v2.7.1 by ishitatsuyuki (async pipeline compilation foundation)
