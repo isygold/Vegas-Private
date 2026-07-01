@@ -168,7 +168,7 @@ The output DLLs (`d3d9.dll`, `d3d11.dll`, `dxgi.dll`, etc.) are placed in `/outp
 ## Credits
 
 - **Lead Developer:** isygold
-- **Base Project:** DXVK v2.7.1+ by doitsujin
+- **Base Project:** DXVK v2.7.1 by doitsujin
 - **Upstream Parent:** GPLAsync v2.7.1 by ishitatsuyuki (async pipeline compilation foundation)
 - **License:** zlib/libpng
 
