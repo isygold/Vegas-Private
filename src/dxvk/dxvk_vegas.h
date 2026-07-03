@@ -131,9 +131,6 @@ namespace dxvk {
 
     static uint64_t getSystemRamMB();
 
-    /** Returns true if the current process is a Unity game */
-    static bool isUnityGame();
-
     // ---- HW Masking (baked, not user-tunable) ----
 
     /** Apply VRAM scaling at config-load time (self-aware, Config overload) */
