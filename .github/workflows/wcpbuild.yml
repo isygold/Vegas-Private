@@ -2,6 +2,22 @@ name: WCP Build
 
 on:
   workflow_dispatch:
+    inputs:
+      version_name:
+        description: 'Version number, e.g. 2.7.3.0 (will become vegas-2.7.3.0-<sha> in profile.json)'
+        required: true
+        type: string
+        default: '2.7.3'
+      version_code:
+        description: 'Build number (auto if blank)'
+        required: false
+        type: string
+        default: ''
+      release_description:
+        description: 'Short description for profile.json'
+        required: false
+        type: string
+        default: 'VEGAS — Community DXVK fork optimized for Adreno GPUs'
 
 permissions:
   actions: read
@@ -16,6 +32,19 @@ jobs:
 
       - name: Install zstd
         run: sudo apt-get update -y && sudo apt-get install -y zstd
+
+      - name: Resolve version inputs
+        id: version
+        run: |
+          VNAME="${{ inputs.version_name }}"
+          echo "version_name=$VNAME" >> "$GITHUB_OUTPUT"
+
+          # Auto versionCode if not provided: use timestamp
+          VCODE="${{ inputs.version_code }}"
+          if [ -z "$VCODE" ]; then
+            VCODE=$(date +%s)
+          fi
+          echo "version_code=$VCODE" >> "$GITHUB_OUTPUT"
 
       - name: Get latest build SHA and run ID
         id: get-sha
@@ -52,17 +81,21 @@ jobs:
           mv "$VDIR/x32" ./
           rm -rf "$VDIR"
 
-      - name: Package WCP
+      - name: Prepare DLL directories
         run: |
           cd ./workdir
           mv x64 system32
           mv x32 syswow64
+
+      - name: Package WCP
+        run: |
+          cd ./workdir
           cat > profile.json << 'JSONEOF'
           {
             "type": "DXVK",
-            "versionName": "2.7.3-vegas",
-            "versionCode": 0,
-            "description": "VEGAS — Community DXVK fork optimized for Android/Winlator",
+            "versionName": "vegas-${{ steps.version.outputs.version_name }}-${{ steps.get-sha.outputs.sha }}",
+            "versionCode": ${{ steps.version.outputs.version_code }},
+            "description": "${{ inputs.release_description }}",
             "files": [
               {"source": "system32/d3d9.dll",      "target": "${system32}/d3d9.dll"},
               {"source": "system32/d3d10core.dll", "target": "${system32}/d3d10core.dll"},
@@ -76,17 +109,17 @@ jobs:
             ]
           }
           JSONEOF
-          tar --zstd -cf "../dxvk-2.7.3-vegas-${{ steps.get-sha.outputs.sha }}.wcp" \
+          tar --zstd -cf "../dxvk-${{ steps.version.outputs.version_name }}-${{ steps.get-sha.outputs.sha }}.wcp" \
             system32/ syswow64/ profile.json
 
       - name: Upload WCP
         uses: actions/upload-artifact@v4
         with:
-          name: wcp-${{ steps.get-sha.outputs.sha }}
+          name: wcp-dxvk-${{ steps.version.outputs.version_name }}-${{ steps.get-sha.outputs.sha }}
           path: ./dxvk-*.wcp
 
       - name: Upload vegas config
         uses: actions/upload-artifact@v4
         with:
-          name: vegas-config-${{ steps.get-sha.outputs.sha }}
+          name: vegas-config-${{ steps.version.outputs.version_name }}-${{ steps.get-sha.outputs.sha }}
           path: vegas/
