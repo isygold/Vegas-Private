@@ -536,9 +536,8 @@ namespace dxvk {
     // Some games (e.g. Tomb Raider 2013) use DISCARD with BufferCount=2
     // and expect both buffers to be accessible via GetImage().
     // For the old bitblt effects with BufferCount=1, create 1 buffer.
-    uint32_t backBufferCount = 1u;
-    if (m_desc.BufferCount >= 2)
-      backBufferCount = m_desc.BufferCount;
+    // At least 2 backbuffers — games often call GetImage(1) even with BufferCount=1
+    uint32_t backBufferCount = std::max(2u, m_desc.BufferCount);
 
     // Create new back buffer
     D3D11_COMMON_TEXTURE_DESC desc;
