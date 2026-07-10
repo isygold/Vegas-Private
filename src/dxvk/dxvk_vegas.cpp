@@ -35,7 +35,7 @@ static uint32_t classifyAdrenoTier(const char* name) {
 }
 
 void Vegas::initializeProfile(uint32_t& threshold, bool& enabled, bool& bindSkip, uint32_t& tier, DxvkDevice* device) {
-  if (!device || !device->adapter()) return;
+  if (!device || device->adapter() == nullptr) return;
 
   // Check for Adreno GPU via device name
   const auto& props = device->adapter()->deviceProperties();
