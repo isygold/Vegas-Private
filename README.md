@@ -114,4 +114,4 @@ Pre-built releases are published on the **[releases page](https://github.com/isy
 
 ## 📄 License
 
-zlib/libpng — same as upstream DXVK.
+zlib/libpng - updated.
