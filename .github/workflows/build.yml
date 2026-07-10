@@ -3,15 +3,21 @@ name: Build VEGAS Port for DXVK-Sarek
 on:
   workflow_dispatch:
 
+env:
+  # Increase timeout since Fedora MinGW is slow
+  NINJAJOBS: 2
+
 jobs:
   build:
     runs-on: ubuntu-22.04
-    container: fedora:40
+    container:
+      image: fedora:40
+      options: --cpus 2
     strategy:
       matrix:
         arch: [x86_64, i686]
     steps:
-      # Install git first so checkout can use it
+      # Install git first so checkout uses proper git clone
       - name: Install git (needed for checkout)
         run: dnf install -y git
 
@@ -39,7 +45,7 @@ jobs:
 
       - name: Compile
         run: |
-          ninja -C build -j$(nproc)
+          ninja -C build -j${NINJAJOBS}
 
       - name: Package DLLs
         run: |
@@ -48,11 +54,13 @@ jobs:
             x86_64) bit=64 ;;
             i686)   bit=32 ;;
           esac
-          cp build/src/d3d11/libd3d11.so  artifacts/d3d11-${bit}.so || true
-          cp build/src/dxgi/libdxgi.so    artifacts/dxgi-${bit}.so   || true
-          cp build/src/dxvk/libdxvk.so    artifacts/libdxvk-${bit}.so || true
-          cp build/src/d3d10/libd3d10.so  artifacts/d3d10-${bit}.so || true
-          7z a "vegas-sarek-${bit}.7z" ./artifacts/*
+          # MinGW produces .dll files (PE format), not .so
+          cp build/src/d3d11/d3d11.dll  artifacts/d3d11-${bit}.dll || true
+          cp build/src/dxgi/dxgi.dll    artifacts/dxgi-${bit}.dll   || true
+          cp build/src/dxvk/dxvk.dll    artifacts/dxvk-${bit}.dll   || true
+          cp build/src/d3d10/d3d10.dll  artifacts/d3d10-${bit}.dll || true
+          # Fedora p7zip provides 7za, not 7z
+          7za a "vegas-sarek-${bit}.7z" ./artifacts/*
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
