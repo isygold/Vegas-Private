@@ -1,157 +1,114 @@
-# DXVK-Sarek:
+# 🎰 VEGAS Sarek — Adreno-Optimized DXVK-Sarek Port
 
-### Why Does This Repo Exist?
+[![Stars](https://img.shields.io/github/stars/isygold/Vegas-Private?style=social)](https://github.com/isygold/Vegas-Private)
 
-This repository was created to support users with Vulkan capable GPUs that do not meet the 1.3 requirement of the current builds. My goal is to ensure that everyone can benefit from the nice performance of DXVK, even if their hardware is slightly older.
+A lightweight port of select **VEGAS** optimizations to **DXVK-Sarek**, purpose-built for **Adreno 610‑class GPUs** running under Star Emulator / Winlator on Android.
 
-Additionally, this project is intended to be integrated into [Proton Sarek](https://github.com/pythonlover02/Proton-Sarek). The main idea is to backport Quality of Life (QOL) patches and per game configurations from the latest versions to the 1.10.x branch.
+This branch (`1.11.1`) contains the complete source code — self-contained, no patching required. Build artifacts are published separately on the [releases page](https://github.com/isygold/vegas-releases/releases).
 
-Also, a huge thank you to the following contributors for their invaluable help in making this project a reality:
+---
 
-- [Blisto91](https://github.com/Blisto91)
-- [AmerXz](https://github.com/AmerXz)
-- [Gcenx](https://github.com/Gcenx)
-- [WinterSnowfall](https://github.com/WinterSnowfall)
+## 📦 Backported Features
 
-Your contributions are greatly appreciated!
+| Feature | Description |
+|---------|-------------|
+| **Draw Threshold Governor** | Dynamically flushes the command buffer after N draws (tier-based: 100/200/350 for Adreno 610/640/700+). Reduces GPU pipeline stalls without sacrificing throughput. |
+| **Dynamic VRAM Swap** | Reports `dxgi.maxDeviceMemory` as 40% of physical RAM, clamped to 1024–4096 MB. Prevents OOM crashes on devices with limited VRAM heap (~900 MiB usable on Adreno 610). |
+| **GPU Persona Mask** | Spoofs Vendor/Device ID as an NVIDIA GPU (GTX 1050 Ti / GTX 1070 / RTX 3060 depending on Adreno tier). Tricks apps that blacklist unknown or mobile GPUs. |
 
-Full credit goes to doitsujin/ドイツ人 (Philip Rebohle) and everyone that have worked on the dxvk project. You can find the original DXVK repository here: [dxvk](https://github.com/doitsujin/dxvk).
+No transcoder, no FSR, no framegen — just the optimizations that matter most for low-VRAM Adreno GPUs.
 
+---
 
-----
+## 🧱 Base & Credits
 
-![Badge Language](https://img.shields.io/github/languages/top/pythonlover02/DXVK-Sarek)
-[![Stars](https://img.shields.io/github/stars/pythonlover02/DXVK-Sarek?style=social)](https://github.com/pythonlover02/Proton-Sarek/stargazers)
-[![Static Badge](https://img.shields.io/badge/Avaliable_on-ProtonPlus-blue)](https://github.com/Vysp3r/ProtonPlus)
+| Role | Author |
+|------|--------|
+| **Base** | [`zeyadadev/DXVK-Sarek`](https://github.com/zeyadadev/DXVK-Sarek) tag `v1.11.1-mali-fix` |
+| **Original DXVK** | [doitsujin/dxvk](https://github.com/doitsujin/dxvk) (Philip Rebohle) |
+| **Original Sarek** | [pythonlover02/DXVK-Sarek](https://github.com/pythonlover02/DXVK-Sarek) |
+| **VEGAS backport & integration** | [@isygold](https://github.com/isygold) |
 
-----
+Thanks to [Blisto91](https://github.com/Blisto91), [AmerXz](https://github.com/AmerXz), [Gcenx](https://github.com/Gcenx), [WinterSnowfall](https://github.com/WinterSnowfall) for their contributions to the Sarek project.
 
-## How to Use
-Please follow the official guide from the [upstream DXVK README](https://github.com/doitsujin/dxvk?tab=readme-ov-file#how-to-use).
+---
 
-Keep in mind that this is a manual installation method, which isn’t the most convenient. An easier approach is to use a Linux game launcher such as Lutris, Heroic, or similar. There you can simply select DXVK-Sarek as the DXVK version (for Wine) or Proton-Sarek (for Proton).  
+## ⚠️ Status
 
-If they’re not available by default, you can easily install them using [ProtonPlus](https://flathub.org/apps/com.vysp3r.ProtonPlus) and [ProtonUpQT](https://flathub.org/apps/net.davidotek.pupgui2).
+**This release is under active refinement.** The in-game HUD overlay and version string still reflect the base Sarek version — these will be updated in a future release to properly identify this build as VEGAS Sarek.
 
-## Build instructions
+Use at your own risk on non-Adreno hardware. Feedback and issue reports are welcome.
 
-In order to pull in all submodules that are needed for building, clone the repository using the following command/commands:
+---
 
-For Normal DXVK:
+## 🚀 Usage
+
+### Star Emulator
+Download the `.wcp` package from the [releases page](https://github.com/isygold/vegas-releases/releases) and import it as type **VEGAS**.
+
+### Manual install
+Extract the DLLs from the WCP/archive and place them in your emulator's DXVK directory (typically `{storage}/emulated/0/StarEmulator/dxvk/`).
+
+---
+
+## 🔧 Build Instructions
+
+This branch is designed to be built via **GitHub Actions** using the included workflow:
+
+1. Go to the **Actions** tab → **Build DXVK (x64 + x32)**
+2. Click **Run workflow**, select branch `1.11.1`
+3. Wait ~5 minutes for both 64-bit and 32-bit builds to complete
+4. Download the merged artifact (`dxvk-<sha>`)
+5. DLLs are inside under `x64/` and `x32/`
+
+The build uses a **Fedora 44** container with MinGW cross-compilers. It runs `meson setup` + `ninja install` directly for each architecture — no local toolchain needed.
+
+### Local build (alternative)
+If you prefer to build locally on Linux:
+
+```bash
+# Install dependencies (Fedora)
+sudo dnf install mingw64-gcc-c++ mingw64-winpthreads-static \
+  mingw32-gcc-c++ mingw32-winpthreads-static \
+  glslang meson ninja-build pkgconf
+
+# 64-bit
+meson setup build64 --cross-file build-win64.txt --buildtype release \
+  --prefix "$PWD/build" --bindir x64 --libdir x64 -Db_ndebug=if-release
+ninja -C build64 install
+
+# 32-bit
+meson setup build32 --cross-file build-win32.txt --buildtype release \
+  --prefix "$PWD/build" --bindir x32 --libdir x32 -Db_ndebug=if-release
+ninja -C build32 install
 ```
-git clone --branch Sarek --recurse https://github.com/pythonlover02/DXVK-Sarek.git DXVK
-```
-For DXVK with Async Patch:
-```
-git clone --branch Sarek-Async --recurse https://github.com/pythonlover02/DXVK-Sarek.git DXVK-Async
-```
 
-### Requirements:
-- [wine 7.1](https://www.winehq.org/) or newer
-- [Meson](https://mesonbuild.com/) build system (at least version 0.49)
-- [Mingw-w64](https://www.mingw-w64.org) compiler and headers (at least version 10.0)
-- [glslang](https://github.com/KhronosGroup/glslang) compiler
+Requirements: wine 7.1+, Meson 0.49+, MinGW-w64 10.0+, glslang.
 
-### Building DLLs
+---
 
-#### The simple way
-Inside the DXVK directory, run:
-```
-./package-release.sh master /your/target/directory --no-package
-```
+## ⚙️ Environment Variables
 
-This will create a folder `dxvk-master` in `/your/target/directory`, which contains both 32-bit and 64-bit versions of DXVK, which can be set up in the same way as the release versions as noted above.
+All standard DXVK environment variables work. Key ones for this fork:
 
-In order to preserve the build directories for development, pass `--dev-build` to the script. This option implies `--no-package`. After making changes to the source code, you can then do the following to rebuild DXVK:
-```
-# change to build.32 for 32-bit
-cd /your/target/directory/build.64
-ninja install
-```
+| Variable | Description |
+|---|---|
+| `DXVK_HUD=1` | Shows GPU name, FPS, and frame time |
+| `DXVK_FRAME_RATE=60` | Caps FPS to 60 |
+| `DXVK_STATE_CACHE=0` | Disables state cache |
+| `DXVK_ALL_CORES=1` | Uses all CPU cores for shader compilation |
+| `DXVK_FILTER_DEVICE_NAME="Adreno"` | Forces a specific Vulkan device |
 
-#### Compiling manually
-```
-# 64-bit build. For 32-bit builds, replace
-# build-win64.txt with build-win32.txt
-meson setup --cross-file build-win64.txt --buildtype release --prefix /your/dxvk/directory build.w64
-cd build.w64
-ninja install
-```
+See the [upstream DXVK README](https://github.com/doitsujin/dxvk) for the full list.
 
-The D3D9, D3D10, D3D11 and DXGI DLLs will be located in `/your/dxvk/directory/bin`. Setup has to be done manually in this case.
+---
 
-### Logs
-When used with Wine, DXVK will print log messages to `stderr`. Additionally, standalone log files can optionally be generated by setting the `DXVK_LOG_PATH` variable, where log files in the given directory will be called `app_d3d11.log`, `app_dxgi.log` etc., where `app` is the name of the game executable.
+## 📥 Downloads
 
-On Windows, log files will be created in the game's working directory by default, which is usually next to the game executable.
+Pre-built releases are published on the **[vegas-releases](https://github.com/isygold/vegas-releases/releases)** repository.
 
-### HUD
-The `DXVK_HUD` environment variable controls a HUD which can display the framerate and some stat counters. It accepts a comma-separated list of the following options:
-- `devinfo`: Displays the name of the GPU and the driver version.
-- `fps`: Shows the current frame rate.
-- `frametimes`: Shows a frame time graph.
-- `submissions`: Shows the number of command buffers submitted per frame.
-- `drawcalls`: Shows the number of draw calls and render passes per frame.
-- `pipelines`: Shows the total number of graphics and compute pipelines.
-- `memory`: Shows the amount of device memory allocated and used.
-- `gpuload`: Shows estimated GPU load. May be inaccurate.
-- `version`: Shows DXVK version.
-- `api`: Shows the D3D feature level used by the application.
-- `cs`: Shows worker thread statistics.
-- `compiler`: Shows shader compiler activity
-- `samplers`: Shows the current number of sampler pairs used *[D3D9 Only]*
-- `scale=x`: Scales the HUD by a factor of `x` (e.g. `1.5`)
-- `opacity=y`: Adjusts the HUD opacity by a factor of `y` (e.g. `0.5`, `1.0` being fully opaque).
+---
 
-Additionally, `DXVK_HUD=1` has the same effect as `DXVK_HUD=devinfo,fps`, and `DXVK_HUD=full` enables all available HUD elements.
+## 📄 License
 
-### Frame rate limit
-The `DXVK_FRAME_RATE` environment variable can be used to limit the frame rate. A value of `0` uncaps the frame rate, while any positive value will limit rendering to the given number of frames per second. Alternatively, the configuration file can be used.
-
-### Device filter
-Some applications do not provide a method to select a different GPU. In that case, DXVK can be forced to use a given device:
-- `DXVK_FILTER_DEVICE_NAME="Device Name"` Selects devices with a matching Vulkan device name, which can be retrieved with tools such as `vulkaninfo`. Matches on substrings, so "VEGA" or "AMD RADV VEGA10" is supported if the full device name is "AMD RADV VEGA10 (LLVM 9.0.0)", for example. If the substring matches more than one device, the first device matched will be used.
-
-**Note:** If the device filter is configured incorrectly, it may filter out all devices and applications will be unable to create a D3D device.
-
-### State cache
-DXVK caches pipeline state by default, so that shaders can be recompiled ahead of time on subsequent runs of an application, even if the driver's own shader cache got invalidated in the meantime. This cache is enabled by default, and generally reduces stuttering.
-
-The following environment variables can be used to control the cache:
-- `DXVK_STATE_CACHE=0` Disables the state cache.
-- `DXVK_STATE_CACHE_PATH=/some/directory` Specifies a directory where to put the cache files. Defaults to the current working directory of the application.
-
-### Shader compilation
-- `DXVK_ALL_CORES=1`
-When this env var is used, it overwrites the default way we assign cores to compile shaders. By default, DXVK-Sarek compiles D3D shaders at draw time, using half the available CPU cores and leaving the rest free for the game. The problem with this is that on CPUs with weak per core performance which rely on using all cores for good performance might experience longer loading times and a worse overall experience. When `DXVK_ALL_CORES=1` is set, DXVK-Sarek uses all available cores for both the game and shader compilation. This might cause the game to become unresponsive at times while compiling shaders. This non-default behavior may improve, worsen, or have no effect on performance, depending on the system. In the case you will use this env var i will recommend using it with the Async build.
-
-- `ASYNC_DRAW_CALL_THRESHOLD=value>=1` (For the Async Build only)
-This env var allows the user to configure how many draw calls a shader must be involved in before it's eligible for asynchronous pipeline compilation. This helps balance compilation latency and runtime performance by prioritizing commonly used shaders. The value should be bigger or equal than `1`.
-
-### Debugging
-The following environment variables can be used for **debugging** purposes.
-- `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` Enables Vulkan debug layers. Highly recommended for troubleshooting rendering issues and driver crashes. Requires the Vulkan SDK to be installed on the host system.
-- `DXVK_LOG_LEVEL=none|error|warn|info|debug` Controls message logging.
-- `DXVK_LOG_PATH=/some/directory` Changes path where log files are stored. Set to `none` to disable log file creation entirely, without disabling logging.
-- `DXVK_CONFIG_FILE=/xxx/dxvk.conf` Sets path to the configuration file.
-- `DXVK_CONFIG="dxgi.hideAmdGpu = True; dxgi.syncInterval = 0"` Can be used to set config variables through the environment instead of a configuration file using the same syntax. ; is used as a seperator.
-- `DXVK_PERF_EVENTS=1` Enables use of the VK_EXT_debug_utils extension for translating performance event markers.
-
-## Troubleshooting
-DXVK requires threading support from your mingw-w64 build environment. If you
-are missing this, you may see "error: ‘std::cv_status’ has not been declared"
-or similar threading related errors.
-
-On Debian and Ubuntu, this can be resolved by using the posix alternate, which
-supports threading. For example, choose the posix alternate from these
-commands:
-```
-update-alternatives --config x86_64-w64-mingw32-gcc
-update-alternatives --config x86_64-w64-mingw32-g++
-update-alternatives --config i686-w64-mingw32-gcc
-update-alternatives --config i686-w64-mingw32-g++
-```
-For non debian based distros, make sure that your mingw-w64-gcc cross compiler
-does have `--enable-threads=posix` enabled during configure. If your distro does
-ship its mingw-w64-gcc binary with `--enable-threads=win32` you might have to
-recompile locally or open a bug at your distro's bugtracker to ask for it.
+zlib/libpng — same as upstream DXVK.
