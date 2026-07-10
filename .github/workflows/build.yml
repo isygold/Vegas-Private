@@ -45,11 +45,17 @@ jobs:
 
       - name: Build x64
         run: |
-          chmod +x package-release.sh
-          ./package-release.sh \
-            "${{ needs.setup.outputs.version }}" \
-            build \
-            --no-package --64-only --build-id
+          VERSION="${{ needs.setup.outputs.version }}"
+          mkdir -p "build/dxvk-$VERSION"
+          meson setup "build/dxvk-$VERSION/build.64" \
+            --cross-file build-win64.txt \
+            --buildtype release \
+            --prefix "$PWD/build/dxvk-$VERSION" \
+            --bindir x64 --libdir x64 \
+            -Db_ndebug=if-release \
+            -Dbuild_id=true
+          ninja -C "build/dxvk-$VERSION/build.64" install
+          rm -f "build/dxvk-$VERSION/x64/"*.a
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -84,11 +90,17 @@ jobs:
 
       - name: Build x32
         run: |
-          chmod +x package-release.sh
-          ./package-release.sh \
-            "${{ needs.setup.outputs.version }}" \
-            build \
-            --no-package --32-only --build-id
+          VERSION="${{ needs.setup.outputs.version }}"
+          mkdir -p "build/dxvk-$VERSION"
+          meson setup "build/dxvk-$VERSION/build.32" \
+            --cross-file build-win32.txt \
+            --buildtype release \
+            --prefix "$PWD/build/dxvk-$VERSION" \
+            --bindir x32 --libdir x32 \
+            -Db_ndebug=if-release \
+            -Dbuild_id=true
+          ninja -C "build/dxvk-$VERSION/build.32" install
+          rm -f "build/dxvk-$VERSION/x32/"*.a
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
