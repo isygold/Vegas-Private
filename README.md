@@ -1,4 +1,4 @@
-> **📖 [Read the Build FAQ first →](./VEGAS-DXVK-SAREK-BUILD-FAQ.html)**
+> **📖 [Read the Build FAQ first →](./VEGAS-DXVK-SAREK-BUILD-FAQ.md)**
 > Important info about which file to download, VEGAS+VKD3D auto-install, and Unity compatibility.
 <br>
 
