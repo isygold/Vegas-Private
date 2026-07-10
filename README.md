@@ -1,6 +1,7 @@
 # 🎰 VEGAS Sarek — Adreno-Optimized DXVK-Sarek Port
 
 [![Stars](https://img.shields.io/github/stars/isygold/Vegas-Private?style=social)](https://github.com/isygold/Vegas-Private)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%24?logo=github&style=social)](https://github.com/sponsors/isygold)
 
 A lightweight port of select **VEGAS** optimizations to **DXVK-Sarek**, purpose-built for **Adreno 610‑class GPUs** running under Star Emulator / Winlator on Android.
 
