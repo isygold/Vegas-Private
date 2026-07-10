@@ -11,25 +11,21 @@ jobs:
       matrix:
         arch: [x86_64, i686]
     steps:
-      # Checkout without submodules first (REST API fallback works)
+      # Install git first so checkout can use it
+      - name: Install git (needed for checkout)
+        run: dnf install -y git
+
       - uses: actions/checkout@v4
         with:
-          submodules: false
+          submodules: true
 
-      # Now install git + everything else
       - name: Install build dependencies
         run: |
           dnf install -y \
-            git findutils \
             meson ninja-build \
             mingw64-gcc-c++ mingw64-winpthreads-static \
             mingw32-gcc-c++ mingw32-winpthreads-static \
             glslang p7zip
-
-      # Init submodules manually with git
-      - name: Init submodules
-        run: |
-          git submodule update --init --depth 1
 
       - name: Setup meson
         run: |
