@@ -1,3 +1,7 @@
+> **📖 [Read the Build FAQ first →](./VEGAS-DXVK-SAREK-BUILD-FAQ.html)**
+> Important info about which file to download, VEGAS+VKD3D auto-install, and Unity compatibility.
+<br>
+
 # 🎰 VEGAS Sarek — Adreno-Optimized DXVK-Sarek Port
 
 [![Stars](https://img.shields.io/github/stars/isygold/Vegas-Private?style=social)](https://github.com/isygold/Vegas-Private)
