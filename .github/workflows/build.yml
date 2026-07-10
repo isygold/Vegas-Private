@@ -4,7 +4,6 @@ on:
   workflow_dispatch:
 
 env:
-  # Increase timeout since Fedora MinGW is slow
   NINJAJOBS: 2
 
 jobs:
@@ -54,12 +53,10 @@ jobs:
             x86_64) bit=64 ;;
             i686)   bit=32 ;;
           esac
-          # MinGW produces .dll files (PE format), not .so
           cp build/src/d3d11/d3d11.dll  artifacts/d3d11-${bit}.dll || true
           cp build/src/dxgi/dxgi.dll    artifacts/dxgi-${bit}.dll   || true
           cp build/src/dxvk/dxvk.dll    artifacts/dxvk-${bit}.dll   || true
           cp build/src/d3d10/d3d10.dll  artifacts/d3d10-${bit}.dll || true
-          # Fedora p7zip provides 7za, not 7z
           7za a "vegas-sarek-${bit}.7z" ./artifacts/*
 
       - name: Upload artifacts
@@ -67,24 +64,3 @@ jobs:
         with:
           name: vegas-sarek-${{ matrix.arch }}
           path: vegas-sarek-*.7z
-
-  create-release:
-    needs: [build]
-    runs-on: ubuntu-22.04
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/1.11.1'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "sarek-port-$(date +%Y%m%d%H%M)"
-          name: "VEGAS Port for DXVK-Sarek (dev build)"
-          body: |
-            Automated build of VEGAS optimizations ported to DXVK-Sarek.
-            Draw threshold governor, dynamic VRAM swap, GPU persona mask.
-          files: |
-            vegas-sarek-*/vegas-sarek-*.7z
-          draft: false
-          prerelease: true
