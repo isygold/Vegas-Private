@@ -18,7 +18,7 @@ namespace dxvk {
     m_config.merge(Config::getAppConfig(env::getExePath()));
 
     // VEGAS: dynamic Adreno config injection
-    if (m_config.getOptionValue("dxgi.customVendorId").empty()) {
+    if (m_config.getOption<std::string>("dxgi.customVendorId").empty()) {
       Config vegasOpts;
       Vegas::applyVramSwap(vegasOpts);
       vegasOpts.setOption("dxgi.enableDummyCompositionSwapchain", "True");
