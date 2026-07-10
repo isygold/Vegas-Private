@@ -45,10 +45,18 @@ Use at your own risk on non-Adreno hardware. Feedback and issue reports are welc
 ## 🚀 Usage
 
 ### Star Emulator
-Download the `.wcp` package from the [releases page](https://github.com/isygold/vegas-releases/releases) and import it as type **VEGAS**.
+Download the **VEGAS-prefixed** `.wcp` package from the [releases page](https://github.com/isygold/vegas-releases/releases) and import it as type **VEGAS**.
+
+### Other emulators (WinNative, GameHub, BBoxHub, Winlator forks, etc.)
+Download the **DXVK-prefixed** `.wcp` package from the same [releases page](https://github.com/isygold/vegas-releases/releases) and import it as type **DXVK**. This works with any emulator that supports standard DXVK WCP packages.
+
+> The [vegas-releases](https://github.com/isygold/vegas-releases) repository is the central hub for all VEGAS releases, build structures, and source code. Both `.wcp` variants (VEGAS-type and DXVK-type) are published there for each release.
 
 ### Manual install
-Extract the DLLs from the WCP/archive and place them in your emulator's DXVK directory (typically `{storage}/emulated/0/StarEmulator/dxvk/`).
+Extract the DLLs from the WCP/archive and place them in your emulator's DXVK directory. Common paths:
+- **Star Emulator**: `{storage}/emulated/0/StarEmulator/dxvk/`
+- **Winlator**: `{storage}/emulated/0/Winlator/dxvk/`
+- **WinNative / GameHub / BBoxHub**: check the emulator's settings for the DXVK directory.
 
 ---
 
