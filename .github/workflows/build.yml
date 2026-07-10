@@ -30,7 +30,7 @@ jobs:
             meson ninja-build \
             g++-mingw-w64-x86-64 \
             g++-mingw-w64-i686 \
-            p7zip-full \
+            p7zip-full glslang-tools \
             libvulkan-dev
 
       # 3. Clone DXVK-Sarek
