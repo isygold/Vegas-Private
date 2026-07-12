@@ -154,3 +154,270 @@ crash detection.
 - Instant FPS computed from time between consecutive Present calls
 - Bucketed into a 25-bin histogram (0-120+ FPS, 5 FPS per bucket)
 - `endSession()` computes avg FPS (weighted) and 1st-percentile FPS from histogram
+
+---
+
+## 2026-07-12 — GitHub Issues as single destination + .vegas-github-issue.md
+
+### Summary
+Shifted the feedback system architecture to a single destination model:
+all reports land exclusively on `github.com/isygold/vegas-releases/issues`.
+Updated both the HTML spec and the DLL to reflect this.
+
+### Changes
+- **HTML spec** (`/sdcard/VEGAS-User-Feedback-System.html`): Rewrote Philosophy tenets
+  (user authority, crash-triggered reporting, single destination); simplified architecture
+  diagram to show GitHub Issues as the only backend; redesigned app UI section with crash
+  notification dialog; removed Google Sheets / custom webhook options; updated flow diagram.
+- **DLL** (`dxvk_vegas.cpp`): Added `writeIssueBody()` that generates
+  `<game>.vegas-github-issue.md` alongside the JSON report — a pre-formatted GitHub issue
+  with device info, config table, and placeholder fields for experience/notes.
+
+### Files on disk after a game session
+```
+<game-dir>/
+├── <game>.exe.vegas-crash-marker      (temporary, deleted on clean exit)
+├── <game>.exe.vegas-report.json       (machine-readable)
+└── <game>.exe.vegas-github-issue.md   (GitHub issue body, ready to paste)
+```
+
+### Commit: `926aa5e`
+
+---
+
+## 2026-07-12 — README update with full documentation
+
+### Summary
+Updated the 1.11.1 branch README to document all new features:
+configuration system, TBDR optimizations, session reports, and per-game profiles.
+
+### New sections added
+- **📦 VEGAS Features** — expanded table with Config Overrides, TBDR, Per-Game Profiles, Session Reports
+- **⚙️ Configuration** — all 5 `dxvk.vegas.*` options with types/defaults, per-game syntax with examples
+- **🌡️ TBDR Optimizations** — explains the 4 automatic changes and when they activate
+- **📊 Session Reports** — documents the 3 local files and how to submit them to GitHub Issues
+
+### Commit: `3299d2a`
+
+---
+
+## 2026-07-12 — Full Build Verification
+
+### Summary
+Both GitHub Actions workflows executed successfully on commit `3299d2a`:
+- **Build DXVK (x64 + x32)** — compiled without errors all modified files
+- **WCP Packaging** — produced release artifacts with dxvk.conf, README, FAQ
+
+### Commits on 1.11.1 (in order)
+| Commit | Description |
+|--------|-------------|
+| `8d1c219` | Option B: dxvk.vegas.* config + TBDR optimisations |
+| `a4d4b23` | Phase 1: VegasSessionReport — DLL-side session tracking |
+| `926aa5e` | Add .vegas-github-issue.md generation, update HTML spec |
+| `3299d2a` | Update README: config docs, TBDR, session reports, per-game profiles |
+
+### Release (corrected naming)
+- Created release [`v1.11.2-3299d2a`](https://github.com/isygold/vegas-releases/releases/tag/v1.11.2-3299d2a) on vegas-releases
+- Assets: `vegas-1.11.2-3299d2a.wcp`, `dxvk-1.11.2-3299d2a.wcp`, `dxvk.conf`, `VEGAS-DXVK-SAREK-BUILD-FAQ.html`
+- Same release published identically on both vegas-releases and Vegas-Private
+- Version bumped from 1.11.1 to 1.11.2 in the build
+
+---
+
+## FUTURE FEATURE — Release Card in Bannerlator / Star Emulator
+
+### Problem
+Users install a new VEGAS WCP but have no way of knowing what changed.
+They may miss important updates (new config options, TBDR fixes, per-game
+profiles).  An in-app card should appear after an update to inform them.
+
+### Two-part solution
+
+#### Part A: `release.json` manifest inside the WCP (DLL-side)
+
+Add a file `release.json` to the WCP package so the app can read release
+notes without a network call.  Generated at build time.
+
+**Schema** (`release.json`):
+```json
+{
+  "version": "1.11.2-3299d2a",
+  "released": "2026-07-12",
+  "title": "VEGAS Sarek v1.11.2",
+  "notes": [
+    "New dxvk.vegas.* config options — tune every behaviour without rebuilding",
+    "TBDR optimisations for Adreno/Mali/PowerVR — cooler running, less heat",
+    "Per-game profiles for Unity, Source, CryEngine, RAGE, Creation Engine",
+    "Session reports (.vegas-report.json + .vegas-github-issue.md)",
+    "Updated dxvk.conf with 15+ game presets"
+  ],
+  "configChanged": true,
+  "docsUrl": "https://github.com/isygold/vegas-releases/releases/tag/v1.11.2-3299d2a"
+}
+```
+
+**Where to add in the build**:
+- In `wcpbuild.yml`, after the WCP archive is created, inject `release.json`
+  into it using `7za a <wcp-file> release.json`
+- The `release.json` content can be generated from the workflow context
+  (version from `meson.project_version()`, date from `date -u +%Y-%m-%d`,
+  notes from a static file or variable)
+
+**App reads it**:
+- When a WCP is imported/installed, Bannerlator extracts `release.json`
+  from the archive
+- If the version differs from the previously installed version, show a card
+
+#### Part B: GitHub API polling (optional enhancement)
+
+For the "new version available" badge or notification when the user hasn't
+updated yet:
+
+```
+GET https://api.github.com/repos/isygold/vegas-releases/releases/latest
+```
+
+Response contains `tag_name`, `body` (release notes markdown), `html_url`.
+
+**App logic**:
+1. On startup (or periodic), fetch the latest release tag
+2. Compare against installed version
+3. If newer, show a subtle badge: "🆕 v1.11.2 available"
+4. No action required — just an informational indicator
+
+**Rate limits**: Unauthenticated GitHub API allows 60 requests/hour.
+Authenticated (via the user's PAT, if stored) allows 5000/hour.
+For just a version check once per session, 60/hr is plenty.
+
+#### App UI: The Card
+
+Two states:
+
+**State 1 — After update (release.json in WCP)**:
+```
+┌──────────────────────────────────────────────────────┐
+│  🆕  What's New in VEGAS 1.11.2                      │
+│                                                      │
+│  ✓ New dxvk.vegas.* config options                   │
+│  ✓ TBDR optimisations — cooler gaming                │
+│  ✓ Per-game profiles for 15+ titles                  │
+│  ✓ Session reports for issue reporting               │
+│                                                      │
+│           [📄 Full Notes]  [✕ Dismiss]               │
+└──────────────────────────────────────────────────────┘
+```
+- Shown once after version change
+- `[📄 Full Notes]` opens the release URL in browser
+- `[✕ Dismiss]` marks as read (store version in SharedPreferences)
+
+**State 2 — New version available (GitHub API)**:
+```
+┌──────────────────────────────────────────────────────┐
+│  🆕  VEGAS 1.11.3 Available                          │
+│  A new version is out. Tap to see what's new.        │
+│                                                      │
+│           [📄 Release Notes]  [✕]                    │
+└──────────────────────────────────────────────────────┘
+```
+- Shown subtly in the VEGAS settings panel, not obtrusive
+- Dismiss persists until next version bump
+
+#### Bannerlator implementation notes (for Banner)
+
+**Detection timing**:
+- `release.json` check: during WCP install (`ContentsManager` or
+  `extractDxWrapperFiles`)
+- GitHub API check: on VEGAS settings page open, or once per day via
+  `WorkManager`
+
+**Storage**:
+- `SharedPreferences` key: `vegas_last_seen_version` (string)
+- On card dismiss: write the current version tag
+- On next install: compare, show if different
+
+**Dismiss behaviour**:
+- One dismiss per version — same version never shows again
+- Cross-version: if user dismisses 1.11.2 then installs 1.11.3, show again
+
+### Implementation order
+1. Add `release.json` generation to `wcpbuild.yml` (simplest, no app changes)
+2. Banner reads `release.json` on install and shows card
+3. (Optional) GitHub API check for "new version available" badge
+
+### Notes
+- The release card content comes from the DLL/WCP side, not hardcoded in the app
+- This keeps the app generic — you update the notes by updating the build,
+  not by pushing an APK update
+
+---
+
+## 2026-07-12 — AI Translation Plan for Non-English GitHub Issues
+
+### Decision
+Instead of using a rigid translation API (Google Translate, DeepL), use an
+**AI model (LLM)** for translating non-English GitHub issues. An LLM handles
+nuance, context, and technical domain terms far better than traditional
+translation APIs.
+
+### Three implementation options
+
+#### A. 💬 Manual forwarding (immediate, zero setup)
+- User pastes any non-English issue link or text into this conversation
+- AI reads, translates, and helps craft a response in the original language
+- **Pros**: Highest accuracy (AI understands VEGAS technical context), no infrastructure
+- **Cons**: Manual — user must copy the issue here
+- **Status**: Already how Issue #15 ("Questão") was handled
+
+#### B. 🤖 GitHub Action with AI API key
+- Workflow auto-detects non-English issues and posts a translation comment
+- Detects language, adds label (`lang-pt`, `lang-es`, etc.)
+- Posts: "🔄 Translated from Portuguese: [English text]"
+- When user replies in English, Action translates back and tags the issue author
+- **Effort**: ~2 hours to write workflow; needs an API key (OpenAI / Anthropic)
+- **Cost**: GPT-4o-mini ~$0.15/MTok → ~2500 issues per dollar
+
+#### C. 🧠 Hybrid — Action notifies, AI translates on demand
+- Light Action that:
+  1. Detects non-English issue
+  2. Posts a minimal comment: "Issue detected in Portuguese. @isygold will respond shortly."
+  3. Sends webhook or just the user is informed
+- Actual translation is handled here in conversation (best of both worlds)
+
+### Recommendation
+**Start with A (manual), build B when volume grows.** Current volume is zero
+active non-English issues.
+
+---
+
+## 2026-07-12 — Release Naming Correction + Dual-Repo Consistency
+
+### Problem
+The v1.11.2-3299d2a release used wrong asset naming:
+- `VEGAS-1.11.2-3299d2a.wcp` → should be `vegas-1.11.2-3299d2a.wcp` (lowercase `vegas-`)
+- `DXVK-1.11.2-3299d2a.wcp` → should be `dxvk-1.11.2-3299d2a.wcp` (lowercase `dxvk-`)
+- Missing `VEGAS-DXVK-SAREK-BUILD-FAQ.html` on both repos
+- WCPs only on vegas-releases, missing from Vegas-Private
+
+### Fix performed
+1. **Deleted** both releases and tags from vegas-releases and Vegas-Private
+2. **Re-created** both releases with identical content:
+   - Release name: `VEGAS Sarek v1.11.2-3299d2a`
+   - Tag: `v1.11.2-3299d2a`
+3. **Uploaded** identical assets to both:
+   - `vegas-1.11.2-3299d2a.wcp` (35 MB)
+   - `dxvk-1.11.2-3299d2a.wcp` (35 MB)
+   - `dxvk.conf` (12 KB)
+   - `VEGAS-DXVK-SAREK-BUILD-FAQ.html` (1.7 KB)
+
+### Naming convention confirmed
+| Type | Pattern | Example |
+|------|---------|---------|
+| VEGAS wrapper | `vegas-{version}-{hash}.wcp` | `vegas-1.11.2-3299d2a.wcp` |
+| DXVK wrapper | `dxvk-{version}-{hash}.wcp` | `dxvk-1.11.2-3299d2a.wcp` |
+| Config | `dxvk.conf` | — |
+| FAQ | `VEGAS-DXVK-SAREK-BUILD-FAQ.html` | — |
+
+### Verification
+Both releases verified identical via GitHub API. Release URLs:
+- https://github.com/isygold/vegas-releases/releases/tag/v1.11.2-3299d2a
+- https://github.com/isygold/Vegas-Private/releases/tag/v1.11.2-3299d2a
