@@ -17,16 +17,32 @@ namespace dxvk {
     m_config = Config::getUserConfig();
     m_config.merge(Config::getAppConfig(env::getExePath()));
 
+    // VEGAS: read dxvk.vegas.* config options into static state
+    Vegas::configure(m_config);
+
     // VEGAS: dynamic Adreno config injection
     if (m_config.getOption<std::string>("dxgi.customVendorId").empty()) {
       Config vegasOpts;
-      Vegas::applyVramSwap(vegasOpts);
+      // VRAM swap is only applied when the option is not explicitly False
+      if (m_config.getOption<bool>("dxvk.vegas.vramSwap", true)) {
+        Vegas::applyVramSwap(vegasOpts);
+      }
       vegasOpts.setOption("dxgi.enableDummyCompositionSwapchain", "True");
       vegasOpts.setOption("dxgi.deferSurfaceCreation", "True");
       vegasOpts.setOption("dxgi.hideNvidiaGpu", "False");
-      Vegas::applyGpuMask(vegasOpts);
+      // GPU persona mask is only applied when the option is not explicitly False
+      Tristate gpuMask = m_config.getOption<Tristate>("dxvk.vegas.gpuMask", Tristate::Auto);
+      if (gpuMask != Tristate::False)
+        Vegas::applyGpuMask(vegasOpts);
       m_config.merge(vegasOpts);
       Logger::info("VEGAS: Dynamic VRAM & GPU persona applied.");
+    }
+
+    // VEGAS: TBDR-aware optimisations for tile-based GPUs
+    if (Vegas::isTbdrArch(m_config)) {
+      Config tbdrOpts;
+      Vegas::applyTbdrOptimizations(tbdrOpts);
+      m_config.merge(tbdrOpts);
     }
 
     m_config.logOptions();

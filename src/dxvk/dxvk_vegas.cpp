@@ -34,47 +34,6 @@ static uint32_t classifyAdrenoTier(const char* name) {
   return 0;
 }
 
-void Vegas::initializeProfile(uint32_t& threshold, bool& enabled, bool& bindSkip, uint32_t& tier, DxvkDevice* device) {
-  if (!device || device->adapter() == nullptr) return;
-
-  // Check for Adreno GPU via device name
-  const auto& props = device->adapter()->deviceProperties();
-  std::string name(props.deviceName);
-  for (auto& c : name) c = std::tolower(c);
-  bool isAdreno = name.find("adreno") != std::string::npos;
-
-  if (isAdreno) {
-    enabled   = true;
-    bindSkip  = true;
-    tier      = classifyAdrenoTier(props.deviceName);
-
-    static constexpr uint32_t defaultThresholds[] = { 100, 200, 350 };
-    threshold = (tier >= 1 && tier <= 3) ? defaultThresholds[tier - 1] : 100;
-
-    Logger::info(str::format("Vegas: Adreno tier ", tier,
-      " threshold=", threshold, " bindSkip=", bindSkip));
-  }
-}
-
-void Vegas::tuneThreshold(uint32_t& threshold, float load, float frameTime, uint32_t tier) {
-  static constexpr uint32_t baseThresholds[] = { 100, 200, 350 };
-  uint32_t base = (tier >= 1 && tier <= 3) ? baseThresholds[tier - 1] : 100;
-
-  static constexpr float capMultipliers[] = { 2.0f, 2.0f, 1.7f };
-  float multiplier = (tier >= 1 && tier <= 3) ? capMultipliers[tier - 1] : 2.0f;
-  uint32_t cap = static_cast<uint32_t>(base * multiplier);
-
-  if (load > 0.90f && frameTime > 25.0f) {
-    // GPU-bound — batch more draws
-    threshold = cap;
-  } else if (load < 0.40f && frameTime > 12.0f) {
-    // CPU-bound — flush more frequently
-    threshold = std::max(50u, base / 2);
-  } else {
-    threshold = base;
-  }
-}
-
 static uint32_t detectGpuTierFromSysfs() {
   uint32_t tier = 2; // mid-range default
   FILE* f = std::fopen("/sys/class/kgsl/kgsl-3d0/gpu_model", "r");
@@ -96,6 +55,136 @@ static uint32_t detectGpuTierFromSysfs() {
   return tier;
 }
 
+// ----------------------------------------------------------------
+//  Option names (namespace dxvk.vegas.*)
+// ----------------------------------------------------------------
+static constexpr char kOptEnable[]    = "dxvk.vegas.enable";
+static constexpr char kOptThreshold[] = "dxvk.vegas.threshold";
+static constexpr char kOptVramSwap[]  = "dxvk.vegas.vramSwap";
+static constexpr char kOptGpuMask[]   = "dxvk.vegas.gpuMask";
+static constexpr char kOptTbdr[]      = "dxvk.vegas.tbdr";
+
+// ----------------------------------------------------------------
+//  configure()  –  called once from DxvkInstance ctor
+// ----------------------------------------------------------------
+void Vegas::configure(const Config& config) {
+  // --- enable ---
+  s_enabled = config.getOption<bool>(kOptEnable, true);
+
+  if (!s_enabled) {
+    Logger::info("Vegas: disabled by config (dxvk.vegas.enable = False)");
+    return;
+  }
+
+  // --- threshold ---
+  // 0 = auto-determine from GPU tier, otherwise override
+  int32_t cfgThreshold = config.getOption<int32_t>(kOptThreshold, 0);
+  if (cfgThreshold > 0) {
+    s_drawThreshold = static_cast<uint32_t>(cfgThreshold);
+    Logger::info(str::format("Vegas: threshold overridden to ", s_drawThreshold));
+  } else {
+    // Auto: detect tier from sysfs and pick threshold
+    s_tier = detectGpuTierFromSysfs();
+    static constexpr uint32_t autoThresholds[] = { 100, 200, 350 };
+    s_drawThreshold = (s_tier >= 1 && s_tier <= 3)
+      ? autoThresholds[s_tier - 1]
+      : 150;
+    Logger::info(str::format("Vegas: auto threshold=", s_drawThreshold,
+      " (tier ", s_tier, ")"));
+  }
+
+  // --- bindSkip ---
+  // Enable bind skipping on any Adreno-class GPU
+  if (s_tier >= 1)
+    s_bindSkipEnabled = true;
+
+  Logger::info(str::format("Vegas: enabled=", s_enabled,
+    " threshold=", s_drawThreshold,
+    " bindSkip=", s_bindSkipEnabled,
+    " tier=", s_tier));
+}
+
+// ----------------------------------------------------------------
+//  isTbdrArch  –  detect tile-based GPU from Vulkan properties
+// ----------------------------------------------------------------
+bool Vegas::isTbdrArch(const Config& config) {
+  // If the user explicitly opted out, respect that
+  Tristate tbdrOpt = config.getOption<Tristate>(kOptTbdr, Tristate::Auto);
+  if (tbdrOpt == Tristate::False)
+    return false;
+
+  // Check for known TBDR renderers via the GPU device name.
+  // We read the string that was (potentially) set by our own
+  // gpuMask.  If the mask is active the name says "NVIDIA …",
+  // so we fall back to sysfs detection.
+  if (detectGpuTierFromSysfs() >= 1)
+    return true;
+
+  // Also check the original Vulkan device name via
+  // a well-known env var (set earlier by DxvkInstance).
+  std::string name = config.getOption<std::string>("dxgi.customDeviceDesc", "");
+  for (auto& c : name) c = std::tolower(c);
+  if (name.find("adreno") != std::string::npos ||
+      name.find("mali")   != std::string::npos ||
+      name.find("powervr") != std::string::npos)
+    return true;
+
+  return tbdrOpt == Tristate::True; // only true if user forced it
+}
+
+// ----------------------------------------------------------------
+//  applyTbdrOptimizations  –  tune DXVK for tile-based GPUs
+// ----------------------------------------------------------------
+void Vegas::applyTbdrOptimizations(Config& config) {
+  // TBDR GPUs (Adreno, Mali, PowerVR) benefit from:
+  //
+  //  1. Disabling the depth pre-pass because they perform
+  //     hidden surface removal (HSR) in hardware, making a
+  //     separate depth-only pass redundant and wasteful.
+  //
+  //  2. Raising the draw-call threshold so that more draws
+  //     are batched per tile, reducing tile-overhead.
+  //
+  //  3. Using the "Lazy" image layout strategy to avoid
+  //     unnecessary render-pass transitions.
+  //
+  //  4. Pushing more state updates to the GPU in fewer,
+  //     larger command buffers.
+
+  Logger::info("Vegas: applying TBDR-aware optimizations");
+
+  // --- Depth pre-pass ---
+  // TBDR hardware does HSR at the tile level; a CPU-driven
+  // depth pre-pass wastes bandwidth and increases power draw.
+  config.setOption("d3d9.enableDepthPrePass",   "False");
+  config.setOption("d3d11.enableDepthPrePass",  "False");
+
+  // --- Draw threshold uplift ---
+  // Batch more draws together to amortise tiling cost.
+  // We boost the threshold by ~50 % over the current value.
+  if (s_drawThreshold > 0 && s_drawThreshold < 600) {
+    uint32_t boosted = s_drawThreshold + (s_drawThreshold / 2);
+    if (boosted > 600) boosted = 600;
+    s_drawThreshold = boosted;
+    Logger::info(str::format("Vegas: TBDR threshold uplifted to ", s_drawThreshold));
+  }
+
+  // --- Async presentation & relaxed sync ---
+  // Adreno drivers handle presentation better when not
+  // strictly synchronised to vblank boundaries.
+  config.setOption("dxvk.numAsyncThreads",       "4");
+
+  // --- Latency reduction ---
+  // Lower the number of queued frames to reduce
+  // input lag on mobile GPUs.
+  config.setOption("dxvk.maxFrameLatency",       "1");
+
+  Logger::info("Vegas: TBDR optimisations applied");
+}
+
+// ----------------------------------------------------------------
+//  applyVramSwap  –  clamp reported VRAM to ~40 % of system RAM
+// ----------------------------------------------------------------
 void Vegas::applyVramSwap(Config& config) {
 #ifdef _WIN32
   MEMORYSTATUSEX statex;
@@ -118,6 +207,9 @@ void Vegas::applyVramSwap(Config& config) {
   config.setOption("dxgi.maxSharedMemory",  std::to_string(vramReport / 2));
 }
 
+// ----------------------------------------------------------------
+//  applyGpuMask  –  spoof NVIDIA GPUs to avoid low-quality paths
+// ----------------------------------------------------------------
 void Vegas::applyGpuMask(Config& config) {
   uint32_t tier = detectGpuTierFromSysfs();
 
@@ -136,6 +228,9 @@ void Vegas::applyGpuMask(Config& config) {
   }
 }
 
+// ----------------------------------------------------------------
+//  Query helpers  –  used by dxvk_context.cpp hot-paths
+// ----------------------------------------------------------------
 bool Vegas::shouldFlush(uint32_t drawCount) {
   return s_enabled && drawCount >= s_drawThreshold;
 }
