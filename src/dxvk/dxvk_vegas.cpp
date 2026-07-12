@@ -264,6 +264,39 @@ void Vegas::endSession() {
   if (s_report.p1Fps > 9990.0)
     s_report.p1Fps = s_report.avgFps;
 
+  // ── Write GitHub Issue markdown ─────────────────────────────
+  {
+    std::string issuePath = s_reportPath + ".md";  // .vegas-report.json.md
+    // Use the correct extension: <game>.vegas-github-issue.md
+    issuePath = s_reportDir + "/" + s_report.gameName + ".vegas-github-issue.md";
+
+    FILE* m = std::fopen(issuePath.c_str(), "w");
+    if (m) {
+      std::fprintf(m, "## VEGAS Game Report\n\n");
+      std::fprintf(m, "**Game**: %s\n", s_report.gameName.c_str());
+      std::fprintf(m, "**Device**: %s &middot; Tier %u &middot; %s\n",
+        s_report.deviceName.c_str(), s_report.gpuTier, s_report.gpuArch.c_str());
+      std::fprintf(m, "**DXVK**: %s\n", s_report.dxvkVersion.c_str());
+      std::fprintf(m, "**Session**: %.0f fps avg &middot; %.0f fps p1 &middot; %llds &middot; %s\n",
+        s_report.avgFps, s_report.p1Fps,
+        static_cast<long long>(s_report.durationSec),
+        s_report.crashed ? "crashed" : "no crash");
+      std::fprintf(m, "\n### Config\n");
+      std::fprintf(m, "| Option | Value |\n");
+      std::fprintf(m, "|--------|-------|\n");
+      std::fprintf(m, "| dxvk.vegas.enable | %s |\n",  s_report.vegasEnabled ? "True" : "False");
+      std::fprintf(m, "| dxvk.vegas.threshold | %u |\n", s_report.drawThreshold);
+      std::fprintf(m, "| dxvk.vegas.vramSwap | %s |\n",  s_report.vramSwapApplied ? "True" : "False");
+      std::fprintf(m, "| dxvk.vegas.gpuMask | %s |\n",   s_report.gpuMaskApplied ? "Auto" : "False");
+      std::fprintf(m, "| dxvk.vegas.tbdr | %s |\n",      s_report.tbdrMode ? "Auto" : "False");
+      std::fprintf(m, "\n### Experience\n");
+      std::fprintf(m, "<!-- 😊 Smooth / 🤷 Okay / 😵 Stuttery / 💀 Crashed -->\n");
+      std::fprintf(m, "\n### Notes\n");
+      std::fprintf(m, "<!-- What did you tweak? What worked? What didn't? -->\n");
+      std::fclose(m);
+    }
+  }
+
   // ── Write JSON report ────────────────────────────────────────
   FILE* f = std::fopen(s_reportPath.c_str(), "w");
   if (!f) {
