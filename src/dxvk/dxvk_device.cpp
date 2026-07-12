@@ -1,5 +1,6 @@
 #include "dxvk_device.h"
 #include "dxvk_instance.h"
+#include "dxvk_vegas.h"
 
 namespace dxvk {
   
@@ -22,10 +23,16 @@ namespace dxvk {
     auto queueFamilies = m_adapter->findQueueFamilies();
     m_queues.graphics = getQueue(queueFamilies.graphics, 0);
     m_queues.transfer = getQueue(queueFamilies.transfer, 0);
+
+    // VEGAS: begin session tracking
+    Vegas::beginSession(m_instance->config(), m_adapter.ptr());
   }
   
   
   DxvkDevice::~DxvkDevice() {
+    // VEGAS: finalise and write session report
+    Vegas::endSession();
+
     // If we are being destroyed during/after DLL process detachment
     // from TerminateProcess, etc, our CS threads are already destroyed
     // and we cannot synchronize against them.
@@ -217,6 +224,9 @@ namespace dxvk {
     
     std::lock_guard<sync::Spinlock> statLock(m_statLock);
     m_statCounters.addCtr(DxvkStatCounter::QueuePresentCount, 1);
+
+    // VEGAS: per-frame sampling
+    Vegas::onPresent();
   }
 
 

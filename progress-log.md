@@ -89,3 +89,68 @@ VEGAS behaviour.
 - **Config file**: `dxvk.conf` must be bundled with the release artifact
 - **Games covered in dxvk.conf**: Hollow Knight, Subnautica, Celeste, L4D2, HL2, Portal 2,
   CS:S, Crysis + Warhead, GTA V, Skyrim, Oblivion, Fallout NV/3, NFS Most Wanted, NFS Carbon
+
+---
+
+## 2026-07-12 — User Feedback Collection System Design
+
+### Summary
+Designed a comprehensive three-layer user feedback collection system for
+VEGAS game configuration data and wrote a detailed integration specification
+as an HTML document for Banner (Bannerlator developer).
+
+### Design decisions
+- **Passive data generation, active sharing**: DLL writes report silently;
+  user initiates share in the app
+- **Three layers**: DLL (report generation) → App (share UI) → Backend (aggregation)
+- **Funnel-first approach**: capture the 60% who'd tap a smiley, not just
+  the 5% who write GitHub issues
+- **Privacy by design**: no PII, no auto-upload without explicit opt-in consent
+- **Layered rollout**: clipboard (Phase 1) → rating widget (Phase 2) →
+  compatibility view (Phase 3) → auto-upload opt-in (Phase 4)
+
+### File created
+- `VEGAS-User-Feedback-System.html` — 668-line self-contained spec document
+  covering JSON schema, screen wireframes, UI states, backend options,
+  implementation roadmap, and privacy guidelines. Ready to send to Banner.
+
+---
+
+## 2026-07-12 — Phase 1 DLL Feedback: VegasSessionReport
+
+### Summary
+Implemented the DLL-side session report generation (Phase 1 of the feedback
+system). Every DXVK session now produces a `<game>.vegas-report.json` file
+next to the game executable and uses a `<game>.vegas-crash-marker` file for
+crash detection.
+
+### Files modified
+| File | Change |
+|------|--------|
+| `src/dxvk/dxvk_vegas.h` | Added `VegasSessionReport` struct with GPU info, FPS histogram, config snapshot; added `beginSession()`, `endSession()`, `onPresent()` statics; added session tracking state |
+| `src/dxvk/dxvk_vegas.cpp` | Implemented `beginSession()` (crash detection, marker write, device info, config snapshot, timer start), `endSession()` (FPS histogram → p1/avg, JSON writer, marker cleanup), `onPresent()` (frame counter, instant FPS → histogram) |
+| `src/dxvk/dxvk_device.cpp` | Added `Vegas::beginSession()` at end of constructor, `Vegas::endSession()` at top of destructor, `Vegas::onPresent()` inside `presentImage()` |
+
+### Report JSON schema (written to `<game>.vegas-report.json`)
+```json
+{
+  "version": 1,
+  "game": "Hollow Knight.exe",
+  "dxvk": "1.11.1-vegas-sarek",
+  "device": { "name", "driverVersion", "vendorId", "deviceId", "gpuTier", "gpuArch" },
+  "session": { "durationSec", "totalFrames", "avgFps", "minFps", "p1Fps", "crashed" },
+  "config": { "vegasEnabled", "drawThreshold", "bindSkip", "tbdrMode", "vramSwapApplied", "gpuMaskApplied" },
+  "rating": null
+}
+```
+
+### Crash detection
+- A `.vegas-crash-marker` file is written at session start, deleted at clean exit
+- If the marker persists to the next launch, the report's `crashed` field is set to `true`
+- This detects: game crashes, power loss, force-kill, driver hangs
+
+### FPS tracking
+- `onPresent()` is called once per DxvkDevice::presentImage() (once per frame)
+- Instant FPS computed from time between consecutive Present calls
+- Bucketed into a 25-bin histogram (0-120+ FPS, 5 FPS per bucket)
+- `endSession()` computes avg FPS (weighted) and 1st-percentile FPS from histogram
