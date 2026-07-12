@@ -13,15 +13,102 @@ This branch (`1.11.1`) contains the complete source code — self-contained, no 
 
 ---
 
-## 📦 Backported Features
+## 📦 VEGAS Features
 
 | Feature | Description |
 |---------|-------------|
 | **Draw Threshold Governor** | Dynamically flushes the command buffer after N draws (tier-based: 100/200/350 for Adreno 610/640/700+). Reduces GPU pipeline stalls without sacrificing throughput. |
 | **Dynamic VRAM Swap** | Reports `dxgi.maxDeviceMemory` as 40% of physical RAM, clamped to 1024–4096 MB. Prevents OOM crashes on devices with limited VRAM heap (~900 MiB usable on Adreno 610). |
 | **GPU Persona Mask** | Spoofs Vendor/Device ID as an NVIDIA GPU (GTX 1050 Ti / GTX 1070 / RTX 3060 depending on Adreno tier). Tricks apps that blacklist unknown or mobile GPUs. |
+| **Config Overrides** | Every VEGAS behaviour can be enabled/disabled/tuned via `dxvk.vegas.*` options in `dxvk.conf` — no rebuild needed. |
+| **TBDR Optimizations** | Automatic tile-based GPU detection (Adreno, Mali, PowerVR) with depth prepass disable, draw threshold uplift, and latency reduction for reduced heat & power draw. |
+| **Per-Game Profiles** | Built-in optimised presets for Unity, Source, CryEngine, RAGE, Creation, and racing engine titles. |
+| **Session Reports** | Automatic `.vegas-report.json` generation with FPS, crash detection, and GPU info. Ready to submit as a GitHub issue. |
 
 No transcoder, no FSR, no framegen — just the optimizations that matter most for low-VRAM Adreno GPUs.
+
+---
+
+## ⚙️ Configuration
+
+VEGAS is controlled via the standard DXVK configuration file — place a `dxvk.conf` next to your game executable or set the `DXVK_CONFIG_FILE` environment variable.
+
+### `dxvk.vegas.*` Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `dxvk.vegas.enable` | bool | `True` | Master switch. Set to `False` to disable all VEGAS optimizations. |
+| `dxvk.vegas.threshold` | int32 | `0` (auto) | Draw-call flush threshold. `0` = auto-detect from GPU tier. Set to `100`–`600` to override. |
+| `dxvk.vegas.vramSwap` | bool | `True` | Report VRAM as ~40% of system RAM. Prevents OOM in VRAM-hungry titles. |
+| `dxvk.vegas.gpuMask` | Tristate | `Auto` | Spoof NVIDIA GPU persona. `Auto` = enable on Adreno, `False` = disable, `True` = force. |
+| `dxvk.vegas.tbdr` | Tristate | `Auto` | TBDR-aware optimizations. `Auto` = enable on tile-based GPUs, `False` = disable, `True` = force. |
+
+### Per-Game Configuration
+
+Create sections matching the game executable name:
+
+```ini
+[Hollow Knight.exe]
+dxvk.vegas.threshold = 0
+dxvk.vegas.vramSwap  = True
+d3d9.maxFrameRate    = 60
+
+[left4dead2.exe]
+dxvk.vegas.enable    = True
+dxvk.vegas.threshold = 0
+d3d9.maxFrameRate    = 60
+d3d9.presentInterval = 1
+
+[GTA5.exe]
+dxvk.vegas.threshold = 0
+dxvk.vegas.vramSwap  = True
+dxvk.vegas.gpuMask   = Auto
+d3d9.maxFrameRate    = 60
+```
+
+If a game has compatibility issues, disable VEGAS for that title only:
+
+```ini
+[ProblematicGame.exe]
+dxvk.vegas.enable = False
+```
+
+A complete reference `dxvk.conf` with presets for Unity, Source, CryEngine, RAGE, Creation Engine, and racing games is included in this repository.
+
+---
+
+## 🌡️ TBDR-Aware Optimizations
+
+On tile-based GPUs (Adreno, Mali, PowerVR), VEGAS automatically applies:
+
+1. **Depth prepass disabled** — TBDR hardware performs hidden surface removal at the tile level. A CPU-driven depth prepass wastes bandwidth and increases power draw.
+2. **Draw threshold uplifted ~50%** — batches more work per tile, reducing tile-overhead overhead and improving GPU utilisation.
+3. **Async compute threads = 4** — better async compute pipeline utilisation on mobile GPUs.
+4. **Frame latency = 1** — reduces queued frame pressure and input lag.
+
+These activate automatically when the GPU is detected as tile-based (`dxvk.vegas.tbdr = Auto`). They can be forced on or off via the config.
+
+---
+
+## 📊 Session Reports
+
+Every game session produces a report file next to the executable — **no data is sent anywhere unless you explicitly choose to submit it**.
+
+### Files created
+
+| File | When | Purpose |
+|------|------|---------|
+| `<game>.vegas-crash-marker` | During play | Deleted on clean exit. If it persists, the session crashed. |
+| `<game>.vegas-report.json` | On exit | Machine-readable: GPU info, FPS histogram, config snapshot, crash flag. |
+| `<game>.vegas-github-issue.md` | On exit | Pre-formatted GitHub issue body ready to copy & paste. |
+
+### How to report an issue
+
+1. Play the game through VEGAS
+2. If you encounter a crash or performance issue, attach the `.vegas-report.json` and `.vegas-github-issue.md` files to a new issue at [vegas-releases/issues](https://github.com/isygold/vegas-releases/issues)
+3. Or open the `.vegas-github-issue.md` — it's already formatted as a complete bug report, just paste it in
+
+This gives me your exact GPU model, config, FPS data, and crash status — no guesswork.
 
 ---
 
@@ -60,18 +147,16 @@ Download the **DXVK-prefixed** `.wcp` package from the [Vegas-Private page](http
 
 ## 🔧 Build Instructions
 
-This branch is designed to be built via **GitHub Actions** using the included workflow:
+### Via GitHub Actions (recommended)
 
-1. Go to the **Actions** tab → **Build DXVK (x64 + x32)**
+1. Go to the **Actions** tab → **Build DXVK (x64 + x32)** (or **WCP Packaging** for a complete release archive)
 2. Click **Run workflow**, select branch `1.11.1`
-3. Wait ~5 minutes for both 64-bit and 32-bit builds to complete
-4. Download the merged artifact (`dxvk-<sha>`)
-5. DLLs are inside under `x64/` and `x32/`
+3. Wait ~5 minutes for the build to complete
+4. Download the artifact:
+   - `dxvk-<sha>` — raw DLLs under `x64/` and `x32/`
+   - `VEGAS-prefixed` or `DXVK-prefixed` `.wcp` — ready-to-import package
 
-The build uses a **Fedora 44** container with MinGW cross-compilers. It runs `meson setup` + `ninja install` directly for each architecture — no local toolchain needed.
-
-### Local build (alternative)
-If you prefer to build locally on Linux:
+### Local build (Linux)
 
 ```bash
 # Install dependencies (Fedora)
