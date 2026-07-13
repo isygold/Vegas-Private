@@ -149,9 +149,9 @@ void Vegas::beginSession(const Config& config, DxvkAdapter* adapter) {
   s_reportDir = dirnameOf(exePath);
   std::string exeName = env::getExeName();
 
-  // Paths
-  s_markerPath = s_reportDir + "/" + exeName + ".vegas-crash-marker";
-  s_reportPath = s_reportDir + "/" + exeName + ".vegas-report.json";
+  // Paths — visible convention (no leading dot, vegas- prefix)
+  s_markerPath = s_reportDir + "/vegas-" + exeName + ".marker.txt";
+  s_reportPath = s_reportDir + "/vegas-" + exeName + ".report.json";
 
   // ── Crash detection ──────────────────────────────────────────
   // If the marker from a previous session still exists, that
@@ -165,6 +165,9 @@ void Vegas::beginSession(const Config& config, DxvkAdapter* adapter) {
         s_markerPath, ")"));
     }
   }
+
+  // Backward compat: remove old-format marker files so they don't accumulate
+  std::remove((s_reportDir + "/" + exeName + ".vegas-crash-marker").c_str());
 
   // Write current-session marker
   {
@@ -266,9 +269,7 @@ void Vegas::endSession() {
 
   // ── Write GitHub Issue markdown ─────────────────────────────
   {
-    std::string issuePath = s_reportPath + ".md";  // .vegas-report.json.md
-    // Use the correct extension: <game>.vegas-github-issue.md
-    issuePath = s_reportDir + "/" + s_report.gameName + ".vegas-github-issue.md";
+    std::string issuePath = s_reportDir + "/vegas-" + s_report.gameName + ".issue.md";
 
     FILE* m = std::fopen(issuePath.c_str(), "w");
     if (m) {
@@ -301,6 +302,9 @@ void Vegas::endSession() {
   FILE* f = std::fopen(s_reportPath.c_str(), "w");
   if (!f) {
     Logger::warn(str::format("Vegas: cannot write report to ", s_reportPath));
+    // Remove marker so we don't false-detect a crash next session
+    if (std::remove(s_markerPath.c_str()) != 0)
+      Logger::warn(str::format("Vegas: failed to remove marker ", s_markerPath));
     s_sessionActive = false;
     return;
   }
@@ -343,7 +347,8 @@ void Vegas::endSession() {
   std::fclose(f);
 
   // ── Remove crash marker (clean exit) ─────────────────────────
-  std::remove(s_markerPath.c_str());
+  if (std::remove(s_markerPath.c_str()) != 0)
+    Logger::warn(str::format("Vegas: failed to remove marker ", s_markerPath));
 
   Logger::info(str::format("Vegas: report written to ", s_reportPath,
     " (", s_report.durationSec, "s, ", s_report.totalFrames, " frames, ",
