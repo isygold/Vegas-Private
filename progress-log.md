@@ -421,3 +421,52 @@ The v1.11.2-3299d2a release used wrong asset naming:
 Both releases verified identical via GitHub API. Release URLs:
 - https://github.com/isygold/vegas-releases/releases/tag/v1.11.2-3299d2a
 - https://github.com/isygold/Vegas-Private/releases/tag/v1.11.2-3299d2a
+
+---
+
+## 2026-07-13 — Marker Persistence Bugfix + Visible File Naming
+
+### Bug found
+In `endSession()`, if the JSON report file could not be written (permissions,
+weird path, disk issue), the function returned early WITHOUT removing the crash
+marker. On the next launch, the code would find the orphaned marker and falsely
+set `crashed = true`.
+
+### Fix applied (commit `7a4fb1c`)
+1. **Marker removal in failure path**: Added `std::remove(s_markerPath)` before
+   the early return when JSON write fails, with a logged warning on failure.
+2. **Error logging on success path**: Changed the existing `std::remove` call
+   to check its return value and log a warning if it fails.
+3. **Backward compat cleanup**: `beginSession()` now also removes old-format
+   marker files (`<game>.vegas-crash-marker`) so they don't accumulate after
+   the naming change.
+
+### Naming change (all 3 files)
+| File | Old (hidden dotfile) | New (visible prefix) |
+|------|---------------------|---------------------|
+| Crash marker | `{game}.vegas-crash-marker` | `vegas-{game}.marker.txt` |
+| Session report | `{game}.vegas-report.json` | `vegas-{game}.report.json` |
+| GitHub issue | `{game}.vegas-github-issue.md` | `vegas-{game}.issue.md` |
+
+Also removed a stale line in the issue markdown section where `issuePath` was
+assigned twice.
+
+---
+
+## 2026-07-13 — HUD Branding + Version Bump
+
+### Changes
+- **HUD label**: `dxvk_hud_item.cpp` line 94 changed from
+  `"DXVK-Sarek " DXVK_VERSION` to `"VEGAS Sarek " DXVK_VERSION`
+- **Version string**: `version.h.in` changed from `"v1.11.0"` to `"1.11.2"`
+  (clean version, no `v` prefix)
+
+### Result
+In-game HUD now shows: **VEGAS Sarek 1.11.2** instead of `DXVK-Sarek v1.11.0`.
+
+### Full commit log
+| Hash | Description |
+|------|-------------|
+| `7a4fb1c` | Fix marker cleanup bug + rename VEGAS files to visible naming |
+| `2db8e6b` | Update HUD branding to VEGAS Sarek |
+| `05e0ed7` | Bump version to 1.11.2 |
