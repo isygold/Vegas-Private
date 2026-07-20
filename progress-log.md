@@ -470,3 +470,18 @@ In-game HUD now shows: **VEGAS Sarek 1.11.2** instead of `DXVK-Sarek v1.11.0`.
 | `7a4fb1c` | Fix marker cleanup bug + rename VEGAS files to visible naming |
 | `2db8e6b` | Update HUD branding to VEGAS Sarek |
 | `05e0ed7` | Bump version to 1.11.2 |
+
+---
+
+## PENDING / NEXT STEPS (ready to resume)
+
+### High priority
+1. **Trigger new build** — Run build.yml + wcpbuild.yml to produce WCP with all recent changes (HUD branding, marker fix, file rename, version bump)
+2. **Build release.json generation** into `wcpbuild.yml` — so the WCP carries release notes for the in-app "What's New" card
+
+### Medium priority
+3. **GitHub Action for issue translation** — auto-detect non-English issues and post translation comment (AI Translation Plan, Option B)
+
+### Low priority / optional
+4. **GitHub API polling** in Bannerlator for "new version available" badge
+5. Any new feature requests from testing or community feedback
