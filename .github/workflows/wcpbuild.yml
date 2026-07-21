@@ -21,7 +21,7 @@ on:
 
 permissions:
   actions: read
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -155,16 +155,3 @@ jobs:
         with:
           name: vegas-config-${{ steps.version.outputs.version_name }}-${{ steps.get-sha.outputs.sha }}
           path: vegas/
-
-      - name: Upload WCPs to vegas-releases (if configured)
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
-        run: |
-          if [ -n "${{ secrets.PAT_TOKEN }}" ] || [ "${{ github.token }}" != "" ]; then
-            git clone --depth 1 https://x-access-token:${GH_TOKEN}@github.com/isygold/vegas-releases.git /tmp/vegas-releases 2>/dev/null || true
-            mkdir -p /tmp/vegas-releases/wcp
-            cp ./*.wcp /tmp/vegas-releases/wcp/ 2>/dev/null || true
-            cd /tmp/vegas-releases
-            git add wcp/
-            git diff --cached --quiet || (git -c user.name="GitHub Actions" -c user.email="actions@github.com" commit -m "Add WCP packages for ${{ steps.version.outputs.version_name }}-${{ steps.get-sha.outputs.sha }}" && git push)
-          fi
