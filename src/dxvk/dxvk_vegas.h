@@ -262,6 +262,7 @@ namespace dxvk {
     static bool                s_initialized;
     static bool                s_enabled;
     static bool                s_bindSkipEnabled;
+    static bool                s_useFastPath;
     static uint32_t            s_tier;
     static uint32_t            s_drawThreshold;
     static uint32_t            s_haaeThreshold;

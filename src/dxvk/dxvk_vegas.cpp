@@ -32,6 +32,7 @@ namespace dxvk {
   bool     Vegas::s_initialized    = false;
   bool     Vegas::s_enabled        = false;
   bool     Vegas::s_bindSkipEnabled = false;
+  bool     Vegas::s_useFastPath    = true;
   uint32_t Vegas::s_tier           = 0;
   uint32_t Vegas::s_drawThreshold  = 150;
   uint32_t Vegas::s_haaeThreshold  = 65;
@@ -178,7 +179,7 @@ namespace dxvk {
           // TBDR-aware: Adreno (tile-based) benefits from EARLIER flushes
           // to avoid tile buffer overflow. Desktop thresholds (600-2000)
           // cause tile thrashing on mobile. Halved for TBDR safety.
-          static constexpr uint32_t defaultThresholds[] = {100, 200, 350};
+          static constexpr uint32_t defaultThresholds[] = {50, 150, 300};
           threshold = (tier >= 1 && tier <= 3) ? defaultThresholds[tier - 1] : 100;
       }
   }
@@ -211,7 +212,7 @@ namespace dxvk {
       // TBDR-aware base thresholds — Adreno tile-based renderers need
       // frequent flushes to avoid tile buffer overflow. Halved from
       // desktop values.
-      static constexpr uint32_t baseThresholds[] = { 100, 200, 350 };
+      static constexpr uint32_t baseThresholds[] = { 50, 150, 300 };
       uint32_t base = (tier >= 1 && tier <= 3) ? baseThresholds[tier - 1] : 100;
 
       // Tier-based cap multiplier (TBDR: conservative caps to prevent
@@ -516,7 +517,7 @@ namespace dxvk {
     // Desktop values (600-2000) cause tile thrashing on all mobile GPUs.
     // Tier 2/3 bumped slightly from original for better throughput on
     // mid/high-end Adreno while keeping Tier 1 conservative.
-    static constexpr uint32_t drawThresholdTable[] = { 100, 250, 400 };
+    static constexpr uint32_t drawThresholdTable[] = { 50, 150, 300 };
     // HAAE thresholds: Tier 1 (low-end) needs MORE frequent pacing (lower
     // threshold) to prevent tile buffer overflow. Tier 3 (high-end) can
     // batch more before HAAE submission.
@@ -571,7 +572,7 @@ namespace dxvk {
   // ============================================================
 
   bool Vegas::shouldFlush(uint32_t drawCount) {
-    return s_enabled && drawCount >= s_drawThreshold;
+    return s_useFastPath && s_enabled && drawCount >= s_drawThreshold;
   }
 
   bool Vegas::shouldSkipBind() {
