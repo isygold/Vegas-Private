@@ -1,109 +1,100 @@
-# VEGAS Developer Guide — DXVK v2.7.3 Fork
+# VEGAS Developer Guide — DXVK 2.4.1 Backport
 
-Welcome to the VEGAS (formerly Star Engine) developer documentation.
-This guide is for DXVK developers working on the VEGAS codebase — it maps
-every feature to its exact file, function, and line numbers so you can
-navigate and modify the code efficiently.
+Welcome to the VEGAS (formerly Star Engine) developer documentation for the
+**stability backport branch (`build-fix-2.4.1`)**. This branch combines:
+- DXVK v2.4.1 base (proven stable with Hollow Knight)
+- Ph42oN's GPLAsync v2.4-1 patch (async shader compilation)
+- VEGAS performance features: FSR 1.0, framegen, TBDR governor, VegaHud
+
+Unlike the feature branch (`2.7.4-beta`), this branch does NOT include the GPU
+BCn-to-ASTC transcoder or leegao's DxvkFence timeline semaphore.
 
 ---
 
 ## Table of Contents
 
 1. [Architecture Overview](#1-architecture-overview)
-2. [Source Map: Every File & What It Does](#2-source-map)
-3. [Feature Reference: Lines & Functions](#3-feature-reference)
-   - 3.1  Tier Classification
-   - 3.2  Adaptive Governor
-   - 3.3  GPU Pacing (HAAE)
-   - 3.4  Pipeline Bind-Skip
-   - 3.5  Shader Zero-Init
-   - 3.6  Shader Cache Periodic Flush
-   - 3.7  Compiler Thread Cap
-   - 3.8  Swapchain Buffer Count Fix
-   - 3.9  FSR 1.0 Upscaler
-   - 3.10 Frame Generation (3-Pass)
-    - 3.11 BCn→ASTC Transcoder (Gated)
-    - 3.12 GPU Persona & VRAM Masking
-    - 3.13 Performance Analysis & Logging
-    - 3.14 Frametime Graph Performance Colors
+2. [Source Map](#2-source-map)
+3. [Feature Reference](#3-feature-reference)
+   - 3.1  GPLAsync — Async Pipeline Compilation
+   - 3.2  Tier Classification
+   - 3.3  Adaptive Governor (TBDR-Inverted)
+   - 3.4  GPU Pacing (HAAE)
+   - 3.5  Pipeline Bind-Skip
+   - 3.6  Shader Zero-Init
+   - 3.7  FSR 1.0 Upscaler
+   - 3.8  Frame Generation (3-Pass)
+   - 3.9  VegaHud Performance Overlay
+   - 3.10  GPU Persona & VRAM Masking
+   - 3.11  Performance Analysis & Logging
 4. [Config Options Reference](#4-config-options)
 5. [Adding a New Feature](#5-adding-a-new-feature)
 6. [Testing Methodology](#6-testing-methodology)
 7. [Common Pitfalls](#7-common-pitfalls)
+8. [CI Pipeline & WCP Dual Build](#8-ci-pipeline--wcp-dual-build)
+9. [Credits & Contributors](#9-credits--contributors)
 
 ---
 
 ## 1. Architecture Overview
 
-VEGAS extends DXVK with ~55 static functions and ~40 static variables that
+VEGAS extends DXVK with ~60 static functions and ~45 static variables that
 modify Vulkan command buffer dispatch, swapchain behavior, shader compilation,
-GPU pacing, and HUD rendering — all gated behind a single master switch
-(`dxvk.enableStarProfile`).
+GPU pacing, and HUD rendering — all gated behind a configurable feature set.
 
 ### Integration Points
 
 ```
  Game (D3D11/D3D9)
-     │
-     ▼
- ┌──────────────────────────────┐
- │  d3d11_swapchain.cpp         │  backbuffer creation fix
- │  dxgi_swapchain.cpp          │  async FSR (tryBlit→upscaleAsync),
- │                              │  framegen, governor, aspect ratio,
- │                              │  pushMetrics() for VegasHud
- ├──────────────────────────────┤
- │  dxvk_context.cpp            │  draw()/drawIndexed() flush, bindSkip
- │  dxvk_device.cpp             │  HAAE submission throttle
- │  dxvk_pipemanager.cpp        │  compiler thread cap
- │  dxvk_shader_cache.cpp       │  periodic cache flush
- │  dxvk_swapchain_blitter.cpp  │  HUD composition (DXVK upstream path only)
- ├──────────────────────────────┤
- │  dxvk_vegas.cpp              │  ALL feature logic, decision helpers,
- │  dxvk_vegas.h                │  metrics push + FT history ring buffer
- │  hud/dxvk_hud_item.cpp       │  Frametime graph with Vegas perf colors
- │  hud/shaders/hud_graph_frag  │  Dynamic line_color from push constant
- │  dxvk_fence.h/.cpp           │  DxvkFence timeline semaphore (leegao)
- │  dxvk_options.h/.cpp         │  config option declarations
- ├──────────────────────────────┤
- │  star_fsr_spv.h              │  FSR 1.0 EASU SPIR-V
- │  star_fg_spv.h               │  Framegen 3-pass SPIR-V
- └──────────────────────────────┘
+     |
+     v
+ +------------------------------+
+ |  dxvk_context.cpp            |  draw()/drawIndexed() flush, bindSkip,
+ |                              |  GPLAsync compat check
+ +------------------------------+
+ |  dxvk_device.cpp             |  HAAE submission throttle, VEGAS signature
+ +------------------------------+
+ |  dxvk_graphics.cpp           |  GPLAsync: async pipeline compilation path
+ |  dxvk_graphics.h             |  fast-link fallback, async worker
+ +------------------------------+
+ |  dxvk_image.h                |  RT binding frame tracking (GPLAsync)
+ +------------------------------+
+ |  dxvk_vegas.cpp              |  ALL VEGAS feature logic, decision helpers,
+ |  dxvk_vegas.h                |  FSR, framegen, VegaHud, governor
+ +------------------------------+
+ |  hud/dxvk_hud_item.cpp       |  HUD version display ("VEGAS" branding)
+ +------------------------------+
+ |  dxvk_options.h/.cpp         |  Config: enableAsync, gplAsyncCache,
+ |                              |  enableStarProfile, vegasForceTier
+ +------------------------------+
+ |  star_fsr_spv.h              |  FSR 1.0 EASU SPIR-V
+ |  star_fg_spv.h               |  Framegen 3-pass SPIR-V
+ +------------------------------+
 ```
 
 ### Data Flow
 
 ```
 InitializeProfile(DxvkDevice*)
-  → detect Adreno, classify tier, bake thresholds
-  → store VkDevice/VkQueue for FSR/FG
-  → called once from initVegasProfile() in DxvkContext
+  -> detect Adreno, classify tier, bake thresholds
+  -> store VkDevice/VkQueue for FSR/FG
+  -> called once from dxvk_vegas.cpp configure()
 
 Per-Frame (PresentBase):
   measure frameTime
-  → compute GPU load from frameTime/target ratio
-  → analyzePerformance() → tuneThreshold() → TBDR-inverted governor adjusts draw
-     threshold: raises when GPU-bound (load>0.90, ft>25ms), lowers when CPU-bound
-     (load<0.40, ft>12ms), resets to base on balanced load
-  → shouldUpscale() → fsrUpscaleAsync() (non-blocking EASU compute, signals
-     DxvkFence timeline semaphore, returns immediately)
-  → fsrTryBlitResult() (non-blocking getValue() check, blits completed
-     intermediate → swapchain, ~0.1ms sync blit)
-  → needsFrameGen() → framegenDispatch() if eligible
-   → pushMetrics() → stores gpuLoad, frameTime, perfState, fsrActive, fgActive
-                      in Vegas static members for frametime graph consumption
-
-Per-Draw (drawFrameTimeGraph, hud_item.cpp):
-  → drawFrameTimeGraph()
-    → Vegas::getLastPerfState() + getGraphColor()
-    → passes stateColor as push constant to hud_graph_frag
-    → renderer.drawText() for state label (NORMAL/LAGGING/STUTTERING/OVERHEATING)
+  -> compute GPU load from frameTime/target ratio
+  -> analyzePerformance() -> tuneThreshold() -> TBDR-inverted governor
+  -> shouldUpscale() -> FSR dispatch
+  -> needsFrameGen() -> framegenDispatch() if eligible
+  -> pushMetrics() -> stores gpuLoad, frameTime, perfState in Vegas statics
 
 Per-Draw (draw/drawIndexed):
-  shouldFlush(drawCount) → spill render pass + flush command list if over threshold
-  shouldSkipBind() → skip vkCmdBindPipeline if same handle
+  shouldFlush(drawCount) -> spill render pass if over threshold
+  shouldSkipBind() -> skip vkCmdBindPipeline if same handle
+  checkAsyncCompilationCompat() -> async mode for RT-bound shaders
 
 Per-Submit (submitCommandList):
-  shouldSubmitHaae() → inject empty fence submit for GPU pacing
+  shouldSubmitHaae() -> inject empty fence submit for GPU pacing
 ```
 
 ---
@@ -114,124 +105,146 @@ Per-Submit (submitCommandList):
 
 | File | Purpose | Key Contents |
 |------|---------|--------------|
-| `src/dxvk/dxvk_vegas.h` | All declarations | `Vegas` class (55+ static methods), `VegasProfile` struct, `VegasPerformanceState` enum, `VegasFsrConstants` struct, 40+ static member variables including FT history ring buffer |
-| `src/dxvk/dxvk_vegas.cpp` | All implementations | ~3650 lines. Tier classifier, TBDR-inverted governor, async FSR via DxvkFence, FG dispatch, BCn→ASTC transcoder, pushMetrics() + getters, static variable definitions, anonymous namespace helpers |
-| `src/dxvk/hud/dxvk_hud_item.h` | Frametime graph (extended) | `RenderPushConstants` extended with `stateColor`. Includes `dxvk_vegas.h` |
-| `src/dxvk/hud/dxvk_hud_item.cpp` | Frametime graph rendering | `drawFrameTimeGraph()` reads `Vegas::getLastPerfState()`, passes color to shader, draws state label |
-| `src/dxvk/hud/shaders/hud_graph_frag.frag` | Graph fragment shader | Accepts `state_color` push constant, unpacks to dynamic RGB line color |
-| `src/dxvk/dxvk_fence.h` | DxvkFence timeline semaphore (leegao) | Non-blocking GPU completion check via `getValue()` for async FSR |
-| `src/dxvk/dxvk_fence.cpp` | DxvkFence implementation | Timeline semaphore wrapper with `getValue()`, `wait()`, `handle()` |
+| `src/dxvk/dxvk_vegas.h` | All declarations | `Vegas` class (60+ static methods), `VegasProfile` struct, `VegasPerformanceState` enum, 45+ static member variables |
+| `src/dxvk/dxvk_vegas.cpp` | All implementations | ~3100 lines. Tier classifier, TBDR-inverted governor, FSR dispatch, FG dispatch, VegaHud, pushMetrics() + getters, static variable definitions |
+
+### GPLAsync Integration Points
+
+| File | Purpose |
+|------|---------|
+| `src/dxvk/dxvk_graphics.cpp` | `getPipelineHandle(..., bool async)` — fast-link fallback when async |
+| `src/dxvk/dxvk_graphics.h` | `m_asyncMutex`, `m_async` flag, `gplAsyncCache` |
+| `src/dxvk/dxvk_context.cpp` | `checkAsyncCompilationCompat()` — RT frame tracking |
+| `src/dxvk/dxvk_image.h` | `m_rtBindingFrameId` / `m_rtBindingFrameCount` — 5-frame minimum |
+| `src/dxvk/dxvk_options.cpp` | enableAsync (default true), gplAsyncCache (default false) |
+| `src/dxvk/dxvk_options.h` | Option declarations |
+| `meson.build` | vcs_tag with `--dirty=-1-vegas` |
 
 ### DXVK Integration Points
 
-| File | Lines | What Vegas Does There |
-|------|-------|-----------------------|
-| `src/dxvk/dxvk_context.cpp` | 83-103, 839-862, 949-973, 5891-5904, 9500-9519 | HUD version override, draw/drawIndexed flush, bindSkip, initVegasProfile |
-| `src/dxvk/dxvk_context.h` | 830-834 | `m_vegasProfile`, `m_drawsSinceSubmit` (atomic), `initVegasProfile()`, `checkAsyncCompilationCompat()` |
-| `src/dxvk/dxvk_device.cpp` | 628-636 | HAAE submission throttle in `submitCommandList()` |
-| `src/dxvk/dxvk_pipemanager.cpp` | 95-102 | ARM64 compiler thread cap |
-| `src/dxvk/dxvk_shader_cache.cpp` | 444-502 | 60s periodic flush in `runWriter()` |
-| `src/dxvk/dxvk_fence.h` | all | DxvkFence timeline semaphore class declaration |
-| `src/dxvk/dxvk_fence.cpp` | all | Timeline semaphore wrapper: `getValue()`, `wait()`, `handle()` |
-| `src/dxvk/dxvk_options.h` | 76-91 | Vegas config options |
-| `src/dxvk/dxvk_options.cpp` | 26-29 | Config parsing |
+| File | Lines (approx) | What Vegas Does There |
+|------|----------------|-----------------------|
+| `src/dxvk/dxvk_context.cpp` | 83-103, 839-862, 949-973 | Draw flush, bindSkip, GPLAsync compat |
+| `src/dxvk/dxvk_context.h` | 830-834 | Vegas profile members |
+| `src/dxvk/dxvk_device.cpp` | 260-264 | VEGAS signature comment |
+| `src/dxvk/hud/dxvk_hud_item.cpp` | 86-98 | HUD shows "VEGAS" version string |
 
-### DXGI/D3D11 Integration Points
+### DXGI Integration Points
 
-| File | Lines | What Vegas Does There |
-|------|-------|-----------------------|
-| `src/dxgi/dxgi_swapchain.cpp` | 348-503 | frame timing + governor (unconditional analysis), FSR dispatch, framegen dispatch, pushMetrics() |
-| `src/dxgi/dxgi_swapchain.h` | 205-210 | Vegas state members (m_lastPresentTime, m_lastPerfState, m_needsFrameGen, etc.) |
-| `src/dxgi/dxgi_options.h` | 63-64 | `vegasEnableUpscaler` Tristate option |
-| `src/d3d11/d3d11_swapchain.cpp` | — | Backbuffer count fix (respect BufferCount ≥2) |
+| File | Lines (approx) | What Vegas Does There |
+|------|----------------|-----------------------|
+| `src/dxgi/dxgi_swapchain.cpp` | 348-503 | Frame timing, governor, FSR, framegen, pushMetrics() |
 
 ### SPIR-V Shaders
 
 | File | Purpose |
 |------|---------|
-| `src/dxvk/star_fsr_spv.h` | FSR 1.0 EASU compute shader (dxvk_fsr_easu_code[]) |
-| `src/dxvk/star_fg_spv.h` | 3-pass framegen shaders: dxvk_fg_motion_code[], dxvk_fg_median_code[], dxvk_fg_warp_code[] |
+| `src/dxvk/star_fsr_spv.h` | FSR 1.0 EASU compute shader |
+| `src/dxvk/star_fg_spv.h` | 3-pass framegen shaders (motion, median, warp) |
 
 ---
 
 ## 3. Feature Reference
 
-### 3.1 Tier Classification
+### 3.1 GPLAsync — Async Pipeline Compilation
+
+**Files:** `src/dxvk/dxvk_graphics.cpp`, `src/dxvk/dxvk_graphics.h`, `src/dxvk/dxvk_options.cpp`
+
+This is a backport of Ph42oN's `dxvk-gplasync` patch for DXVK 2.4
+(commit `4e5658e97b6c`). It enables asynchronous shader compilation via a
+worker thread, eliminating the stutter that occurs when a game encounters
+a new shader for the first time.
+
+**Core mechanism:**
+```
+getPipelineHandle(state, async):
+  if instance not found AND async:
+    -> return empty handle immediately (no wait)
+    -> pipeline will compile in background worker thread
+    -> fast-link fallback renders the frame with a base pipeline
+
+  if instance not found AND NOT async:
+    -> block until pipeline is compiled (standard DXVK path)
+```
+
+**RT frame tracking:**
+To prevent missing geometry from shaders that haven't finished compiling,
+GPLAsync requires 5+ consecutive frames with the same render-target binding
+before enabling async mode. This ensures critical shaders (depth-pass,
+shadow-map) are compiled synchronously.
+
+**Config:**
+- `dxvk.enableAsync = true` (default) — async compilation ON
+- `dxvk.gplAsyncCache = false` (default) — state cache OFF (uses fast-linking)
+- `DXVK_ASYNC=0` — env var to disable
+- `DXVK_GPLASYNCCACHE=1` — env var to enable state cache
+
+---
+
+### 3.2 Tier Classification
 
 **File:** `src/dxvk/dxvk_vegas.cpp`
 
 | Function | Lines | Purpose |
 |----------|-------|---------|
-| `classifyAdrenoTier(const char* deviceName)` | 89-122 | Parses device name → tier 1/2/3 |
-| `Vegas::initializeProfile(DxvkDevice*)` | 893-989 | Master init: calls classifyAdrenoTier, applies vegasForceTier override |
-| `Vegas::getTier()` | 995 | Returns `s_tier` |
+| `classifyAdrenoTier(const char* deviceName)` | 89-122 | Parses device name into tier 1/2/3 |
+| `Vegas::configure()` | 450-560 | Master init: classify tier, bake thresholds |
+| `Vegas::getTier()` | ~560 | Returns `s_tier` |
 
-**Tier Mapping (TBDR-aware — halved from desktop defaults):**
+**Tier Mapping:**
 
-| Condition | Tier | Draw Threshold (base) | HAAE Threshold | Cap Multiplier |
-|-----------|------|----------------------|----------------|----------------|
-| gen ≤ 5, or 6xx < 620 | 1 (entry) | 100 | 30 | 2.0× |
-| 6xx 620-689, or 7xx < 730 | 2 (mid) | 200 | 50 | 2.0× |
-| 690+, 7xx ≥ 730, or 8xx+ | 3 (high) | 350 | 80 | 1.7× |
+| Condition | Tier | Draw Threshold | HAAE Threshold | Cap Multiplier |
+|-----------|------|----------------|----------------|----------------|
+| gen <= 5, or 6xx < 620 | 1 (entry) | 50 | 30 | 1.5x |
+| 6xx 620-689, or 7xx < 730 | 2 (mid) | 150 | 50 | 1.8x |
+| 690+, 7xx >= 730, or 8xx+ | 3 (high) | 300 | 100 | 2.5x |
 
 **Config override:** `vegas.forceTier = 0` (auto), `1`/`2`/`3` (manual)
 
-**D3D9 override:** D3D9 games issue more draw calls per frame; thresholds are
-higher but still TBDR-aware: `{300, 500, 800}` for D3D9 games.
+**D3D9 override:** Higher thresholds for D3D9 games: `{300, 500, 800}`.
 
 ---
 
-### 3.2 Adaptive Governor (TBDR-Inverted)
+### 3.3 Adaptive Governor (TBDR-Inverted)
 
 **File:** `src/dxvk/dxvk_vegas.cpp`
 
 | Function | Lines | Purpose |
 |----------|-------|---------|
-| `tuneThreshold(uint32_t&, float, float, uint32_t)` | 209-243 | TBDR-inverted governor: lowers threshold when CPU-bound, raises when GPU-bound |
-| `tuneThreshold(float, float)` | 247-269 | Self-contained: EMA smoothing + 15-frame cooldown → delegates to 4-arg |
-
-**Called from:** `src/dxgi/dxgi_swapchain.cpp` line 378 (`PresentBase`)
+| `tuneThreshold(uint32_t&, float, float, uint32_t)` | 210-249 | TBDR-inverted governor |
+| `tuneThreshold(float, float)` | 253-275 | Self-contained: EMA + adaptive cooldown |
 
 **Governor Logic (TBDR-inverted):**
 ```
-if (load > 0.90f AND frameTime > 25.0f)   → cap (GPU-bound, RAISE threshold)
-                                           → batching more amortizes submission overhead
-if (load < 0.40f AND frameTime > 12.0f)    → floor (CPU-bound, LOWER threshold)
-                                           → over-batching starves TBDR; flush earlier
-else                                       → base (balanced, reset)
+if (load > 0.85f AND frameTime > 20.0f)   -> cap (GPU-bound, RAISE threshold)
+if (load < 0.45f AND frameTime > 10.0f)    -> floor (CPU-bound, LOWER threshold)
+else                                        -> base (balanced, reset)
 ```
 
-In desktop DXVK, the governor raises the threshold for both
-CPU-bound AND GPU-bound scenarios. On TBDR Adreno, raising the
-threshold when CPU-bound makes the problem WORSE — more draws
-accumulate in the tile buffer, increasing driver overhead and
-starving the GPU. The inverted path (load<0.40, ft>12ms) correctly
-**reduces** the threshold to force earlier flushes.
+**Cap Multipliers (C2 re-tune):**
+- Tier 1: 1.5x (50 -> 75 max)
+- Tier 2: 1.8x (150 -> 270 max)
+- Tier 3: 2.5x (300 -> 750 max)
 
-**Cap Multipliers:**
-- Tier 1: 2.0× (100 → 200 max)
-- Tier 2: 2.0× (200 → 400 max)
-- Tier 3: 1.7× (350 → 595 max)
-
-**Floor (CPU-bound flush):** `max(50, base/2)` — ensures the GPU
-starts tiling early when the CPU is the bottleneck.
+**Floor (CPU-bound flush):** `max(50, base / 2)`
 
 **EMA Smoothing:** `s_smoothFt = s_smoothFt * 0.9 + frameTime * 0.1`
-**Cooldown:** 15 frames (~250ms at 60fps)
+
+**Adaptive Cooldown:** `ceil(ft * 0.3)`, clamped [5, 30] frames
+- At 60fps (16.7ms): ~5 frame cooldown
+- At 30fps (33.3ms): ~10 frame cooldown
 
 ---
 
-### 3.3 GPU Pacing (HAAE)
+### 3.4 GPU Pacing (HAAE)
 
 **File:** `src/dxvk/dxvk_vegas.cpp`
 
 | Function | Lines | Purpose |
 |----------|-------|---------|
-| `shouldSubmitHaae(uint32_t&, uint32_t)` | 1009-1016 | Returns true when accumulated draws ≥ threshold |
+| `shouldSubmitHaae(uint32_t&, uint32_t)` | ~575 | Returns true when accumulated draws >= threshold |
 
-**Called from:** `src/dxvk/dxvk_device.cpp` line 632 (`submitCommandList`)
-
-**Threshold per tier:** `{50, 100, 150}` — Tier 1 gets MOST frequent pacing.
+**Threshold per tier:** `{30, 50, 100}` (Tier 1 gets most frequent pacing).
 
 **Behavior:** When triggered, submits an empty `DxvkSubmitInfo` with a fence.
 This acts as a GPU pacemaker, preventing the submission queue from growing
@@ -239,223 +252,121 @@ too large on TBDR architectures.
 
 ---
 
-### 3.4 Pipeline Bind-Skip
+### 3.5 Pipeline Bind-Skip
 
 **File:** `src/dxvk/dxvk_vegas.cpp`
 
 | Function | Lines | Purpose |
 |----------|-------|---------|
-| `shouldSkipBind()` | 1005-1007 | Returns `s_enabled && s_bindSkipEnabled` |
-| `isBindSkipEnabled()` | 992 | Returns `s_bindSkipEnabled` |
+| `shouldSkipBind()` | ~570 | Returns `s_enabled && s_bindSkipEnabled` |
 
-**Enabled:** On Adreno (set during `initializeProfile`, lines 920/933)
-**Checked in:** `src/dxvk/dxvk_context.cpp` line 5891 (`updateGraphicsPipelineState`)
-
-**What it skips:** `vkCmdBindPipeline` when `pipelineInfo.handle == m_vegasProfile.lastBoundVkPipeline`
-AND `GpDirtyPipelineState` flag is NOT set.
-
-**State tracking:** `m_vegasProfile.lastBoundVkPipeline` is reset to `VK_NULL_HANDLE`
-on `beginRecording()` (line 124) and `flushCommandList()` (line 187).
+**What it skips:** `vkCmdBindPipeline` when the same pipeline handle was
+already bound and pipeline state has not changed. Reduces CPU overhead on
+the draw call path.
 
 ---
 
-### 3.5 Shader Zero-Init
+### 3.6 Shader Zero-Init
 
 **File:** `src/dxvk/dxvk_vegas.cpp`
 
 | Function | Lines | Purpose |
 |----------|-------|---------|
-| `shouldZeroInit(uint32_t tier)` | 233-235 | Returns `tier < 3` |
+| `shouldZeroInit(uint32_t tier)` | ~280 | Returns `tier < 3` |
 
 **Behavior:**
-- Tier 1/2 → zero-init ON (safety against Turnip hangs from uninitialized workgroup memory)
-- Tier 3 → zero-init OFF (~1-2% shader performance gain)
+- Tier 1/2 -> zero-init ON (safety against Turnip hangs from uninitialized workgroup memory)
+- Tier 3 -> zero-init OFF (~1-2% shader performance gain)
 
 ---
 
-### 3.6 Shader Cache Periodic Flush
-
-**File:** `src/dxvk/dxvk_shader_cache.cpp`
-
-| Function | Lines | Purpose |
-|----------|-------|---------|
-| `runWriter()` | 444-502 | Writer thread loop |
-
-**The Vegas change:** Lines 454-461 — the `wait_for` uses a 60-second timeout:
-```cpp
-m_writeCond.wait_for(lock, std::chrono::seconds(60), ...)
-```
-
-This replaces the indefinite `wait()` from upstream, ensuring that partially-filled
-cache batches are flushed even if the emulator is killed (SIGKILL). Previously,
-all pending writes were lost on unclean shutdown.
-
----
-
-### 3.7 Compiler Thread Cap
-
-**File:** `src/dxvk/dxvk_pipemanager.cpp`
-
-| Function | Lines | Purpose |
-|----------|-------|---------|
-| `startWorkers()` | 83-131 | Spawns shader compiler threads |
-
-**The Vegas change:** Lines 95-102 (`#ifdef __aarch64__`):
-```cpp
-if (m_device->config().numCompilerThreads <= 0)
-    workerCount = std::min(workerCount, 4u);
-```
-
-Caps auto-detected compiler threads to 4 on ARM64 to prevent CPU contention
-on big.LITTLE SoCs. User override via `dxvk.numCompilerThreads` is still
-respected (checked at line 104).
-
----
-
-### 3.8 Swapchain Buffer Count Fix
-
-**File:** `src/d3d11/d3d11_swapchain.cpp`
-
-| Function | Lines | Purpose |
-|----------|-------|---------|
-| `CreateBackBuffers()` | — | Creates D3D11 backbuffers for the swapchain |
-
-**The fix:** Changed backbuffer allocation to check `m_desc.BufferCount >= 2`
-directly instead of checking the swap effect type. Previously, only flip-model
-effects (FLIP_DISCARD, FLIP_SEQUENTIAL) got multiple buffers; DISCARD mode
-with BufferCount=2 was treated as single-buffer, causing "GetImage: Invalid
-buffer ID" errors (e.g., Tomb Raider: 2813 errors → 0).
-
-**Also uses** `small_vector<Com<D3D11Texture2D, false>, 4>` for the temp
-backbuffer array and atomically swaps via `std::move` to prevent race
-conditions on resize.
-
----
-
-### 3.9 FSR 1.0 Upscaler — Async Dispatch
-
-**File:** `src/dxvk/dxvk_vegas.cpp`, `src/dxvk/dxvk_fence.h/.cpp`
-
-| Function | Lines | Purpose |
-|----------|-------|---------|
-| `Vegas::fsrUpscaleAsync(...)` | 1409-1776 | **Async** EASU compute dispatch — signals DxvkFence, returns immediately |
-| `Vegas::fsrTryBlitResult(...)` | 1300-1350 | Non-blocking `getValue()` check → blits completed intermediate to swapchain |
-| `Vegas::fsrDrain(...)` | 1355-1390 | Blocking wait for in-flight async compute (called by `ensureFsrIntermediate` on resize) |
-| `Vegas::calculateFsrConstants(...)` | 335-340 | Computes EASU push constants |
-| `Vegas::shouldUpscale(Tristate, ...)` | 1018-1025 | Resolves Tristate + extent check |
-| `initFsrPipeline(VkDevice)` | 1186-1305 | Creates FSR compute pipeline (one-time) |
-| `ensureFsrIntermediate(VkDevice, VkExtent3D)` | 1311-1406 | Manages intermediate storage image |
-
-**Called from:** `src/dxgi/dxgi_swapchain.cpp` lines 399-448 (`PresentBase`)
-
-**Async dispatch pattern (leegao's DxvkFence):**
-
-1. **`fsrUpscaleAsync()`** submits EASU compute with a timeline semaphore signal,
-   then returns *immediately* — does NOT wait for GPU completion.
-2. **`fsrTryBlitResult()`** on the *next* frame: non‑blocking `getValue()` check
-   → if the compute shader finished, blits the intermediate image to swapchain
-   (~0.1ms sync blit). If not yet done, skips the blit (1‑frame upscale latency).
-3. **`fsrDrain()`** does a blocking `wait()` — called only on resize to safely
-   destroy the intermediate image while no compute is in flight.
-
-The `getValue()`‑only hot‑path avoids **Turnip‑kgsl timeline emulation bug**
-(naive `wait()` over‑waits on intermediate values). This gives:
-- **Zero CPU blocking** on the hot path
-- **~0.1ms sync blit** vs 0.5‑1.0ms synchronous EASU
-- **GPU load improved 40‑60% → 70‑85%** on Tomb Raider 2013 (low‑end Adreno)
-
-**Persistent command pool/buffer:** The async submit uses a dedicated command
-pool and buffer that live across frames — destroying a pool while a submitted
-command buffer is pending is illegal per Vulkan spec.
-
-**DxvkFence API:**
-- `getValue()` — non‑blocking completion check (hot path)
-- `wait(value)` — blocking wait (resize only)
-- `handle()` — raw `VkSemaphore` for `VkSubmitInfo` pNext
-
-**Pipeline:** FSR 1.0 EASU compute → intermediate image (R8G8B8A8_UNORM,
-STORAGE+TRANSFER_SRC) → blit to swapchain image.
-
-**Guard:** Only dispatches on UNORM swapchain formats. Fail-closed (returns
-false on any error, never crashes the frame).
-
-**Config:** `vegas.enableUpscaler = Auto` (upscales when src.width < dst.width)
-
-**Intermediate image:** Created in device-local memory. Recreated on resolution
-change. Destroyed on FSR teardown. `fsrDrain()` ensures no compute is in flight
-before destruction.
-
----
-
-### 3.10 Frame Generation (3-Pass)
+### 3.7 FSR 1.0 Upscaler
 
 **File:** `src/dxvk/dxvk_vegas.cpp`
 
 | Function | Lines | Purpose |
 |----------|-------|---------|
-| `Vegas::framegenDispatch(...)` | 2141-2911 | Full 3-pass motion-compensated FG |
-| `Vegas::isFrameGenReady()` | 2126-2128 | Returns `s_device != nullptr` |
-| `Vegas::needsFrameGen(float, uint32_t)` | 329-333 | Tier-based eligibility |
-| `initFgPipeline(VkDevice)` | 1817-1969 | Creates 3 compute pipelines (one-time) |
-| `ensureFgIntermediateImages(...)` | 1975-2118 | Manages 4 intermediate images |
+| `Vegas::fsrDispatch()` | ~1200-1800 | FSR 1.0 EASU compute dispatch |
+| `Vegas::shouldUpscale()` | ~570 | Resolves Tristate + extent check |
+| `initFsrPipeline(VkDevice)` | ~1000-1200 | Creates FSR compute pipeline |
 
-**Called from:** `src/dxgi/dxgi_swapchain.cpp` lines 450-482 (`PresentBase`)
+**Called from:** `src/dxgi/dxgi_swapchain.cpp` (PresentBase)
+
+**Behavior:**
+- Upscales when swapchain extent > render extent
+- Uses compute shader dispatch (EASU)
+- Configurable via `dxvk.enableStarProfile` (master switch)
+
+**FSR ratio guard (C1):** Skips FSR if source is already >= 85% of target
+resolution in both dimensions. Prevents useless GPU dispatch when upscaling
+would not be visually beneficial.
+
+---
+
+### 3.8 Frame Generation (3-Pass)
+
+**File:** `src/dxvk/dxvk_vegas.cpp`
+
+| Function | Lines | Purpose |
+|----------|-------|---------|
+| `Vegas::framegenDispatch()` | ~2000-3000 | Full 3-pass motion-compensated FG |
+| `Vegas::needsFrameGen()` | ~330 | Tier-based eligibility |
+| `initFgPipeline(VkDevice)` | ~1800-2000 | Creates 3 compute pipelines |
 
 **3 Passes:**
-1. **Motion search** (FG_PASS_MOTION: 16×16 tiles) — block SAD between prev/cur frames
-2. **Median filter** (FG_PASS_MEDIAN: 8×8 tiles) — 3×3 spatial denoise on motion field
-3. **Warp + blend** (FG_PASS_WARP: 8×8 tiles) — warp prev frame by filtered motion, blend at weight 0.5
+1. Motion search (block SAD on prev/cur frames)
+2. Median filter (3x3 spatial denoise on motion field)
+3. Warp + blend (warp prev frame by filtered motion, alpha-blend at 0.5)
 
 **Eligibility:**
 - Tier 1: never (compute budget insufficient)
-- Tier 2: frameTime ≤ 29ms (≥34 FPS headroom)
-- Tier 3: frameTime ≤ 33ms (≥30 FPS headroom)
+- Tier 2: frameTime <= 29ms
+- Tier 3: frameTime <= 33ms
 
-**Guards:** Only on UNORM formats, only when VkDevice/VkQueue are valid,
-fail-closed on any error.
-
----
-
-### 3.11 BCn→ASTC Transcoder (Gated)
-
-**File:** `src/dxvk/dxvk_vegas.cpp`
-
-**Status:** ⚠️ GATED — code is implemented but NOT wired into the upload pipeline.
-See comment at lines 499-518 for rationale.
-
-| Component | Lines | Purpose |
-|-----------|-------|---------|
-| `formatIsBcn(VkFormat)` | 387-409 | Returns true for all 16 BCn formats |
-| `getAstcFormat(VkFormat)` | 411-449 | Maps BCn→ASTC (BC1→6×6, BC2/3/5/7→5×5, BC4→6×6) |
-| `shouldTranscodeFormat(...)` | 456-487 | Returns ASTC format if eligible (usage, size, support checks) |
-| `decodeBC1(...)` | 523-549 | CPU decoder for BC1 (4×4 from 8 bytes) |
-| `decodeBC3(...)` | 574-580 | CPU decoder for BC3 (BC1 + BC4 alpha) |
-| `decodeBC4(...)` | 570-572 | CPU decoder for BC4 (single-channel) |
-| `decodeBC5(...)` | 582-590 | CPU decoder for BC5 (two-channel) |
-| `decodeBC7(...)` | 592-619 | CPU decoder for BC7 (mode 0) |
-| `encodeAstcBlock(...)` | 684-775 | Simplified ASTC encoder (1 partition, LDR) |
-| `transcodeImageData(...)` | 779-886 | Full BCn→ASTC conversion: decode→pixels→encode |
-
-**To activate, you would need to:**
-1. In `DxvkDevice::createImage()`: swap `createInfo.format` to the ASTC format
-2. In `DxvkContext::uploadImageFb|Hw()`: call `transcodeImageData()` on staging buffer
-3. Verify block-size alignment on real Adreno 6xx/7xx hardware
-
-**Block-size risk:** BCn is always 4×4 blocks. ASTC uses 5×5 or 6×6 blocks.
-Most game textures are power-of-2 (512, 1024, 2048) which are NOT multiples
-of 5 or 6. The partial edge texels at the right/bottom may cause issues on
-Turnip. This must be verified on hardware before activation.
+**Framegen timeout:** If GPU dispatch takes longer than 50ms, the frame is
+skipped (calls `fgCleanup(8)` and returns false). Prevents present thread
+deadlock on stalled GPU.
 
 ---
 
-### 3.12 GPU Persona & VRAM Masking
+### 3.9 VegaHud Performance Overlay
 
 **File:** `src/dxvk/dxvk_vegas.cpp`
 
 | Function | Lines | Purpose |
 |----------|-------|---------|
-| `applyGpuMask(Config&)` | 285-323 | Maps Adreno tier → NVIDIA vendor/device ID |
-| `applyVramSwap(Config&)` | 272-282 | Sets VRAM to 40% of system RAM |
+| `pushMetrics()` | ~3100 | Stores per-frame metrics (load, ft, state) |
+| `getDrawThreshold()` | ~558 | Returns current draw threshold |
+| `getDrawCount()` | ~560 | Returns accumulated draw count |
+
+**Render path:** The HUD renders via the standard `DXVK_HUD` frametime graph.
+The version string shows "VEGAS" branding instead of "DXVK".
+
+**Frame-skip optimization (C3):** `pushMetrics()` writes data only every 5th
+call via `thread_local s_hudSkip` counter. HUD updates at ~12fps instead of
+~60fps — smooth enough for monitoring, zero impact on render path.
+
+**Data flow:**
+```
+dxgi_swapchain.cpp:PresentBase
+  -> Vegas::pushMetrics(gpuLoad, frameTime, perfState, ...)
+    -> writes to Vegas static members (every 5th call)
+
+hud/dxvk_hud_item.cpp
+  -> reads Vegas static members for HUD display
+  -> shows "VEGAS 2.4.1" version string from @VCS_TAG@
+```
+
+---
+
+### 3.10 GPU Persona & VRAM Masking
+
+**File:** `src/dxvk/dxvk_vegas.cpp`
+
+| Function | Lines | Purpose |
+|----------|-------|---------|
+| `applyGpuMask(Config&)` | ~285-323 | Maps Adreno tier -> NVIDIA vendor/device ID |
+| `applyVramSwap(Config&)` | ~272-282 | Sets VRAM to 40% of system RAM |
 
 **GPU Persona Mapping:**
 
@@ -465,134 +376,55 @@ Turnip. This must be verified on hardware before activation.
 | 2 | GTX 1070 | 10de | 1b81 |
 | 3 | RTX 3060 | 10de | 2503 |
 
-**Sources:** Reads `/sys/class/kgsl/kgsl-3d0/gpu_model` on Android (sysfs).
-
-**VRAM:** Sets `dxgi.maxDeviceMemory` to 40% of total RAM (clamped 1-4 GB),
-`dxgi.maxSharedMemory` to half that.
+**VRAM:** Sets `dxgi.maxDeviceMemory` to 40% of total RAM (clamped 1-4 GB).
 
 ---
 
-### 3.13 Performance Analysis & Logging
+### 3.11 Performance Analysis & Logging
 
 **File:** `src/dxvk/dxvk_vegas.cpp`
 
 | Function | Lines | Purpose |
 |----------|-------|---------|
-| `analyzePerformance(float, float, float)` | 343-363 | Classifies frame as Normal/Lagging/Stuttering/Overheating |
-| `getGraphColor(VegasPerformanceState)` | 365-373 | Maps state → HEX color |
-| `getStatusString(VegasPerformanceState)` | 376-384 | Maps state → "NORMAL" string |
+| `analyzePerformance(float, float, float)` | ~343-363 | Classifies frame state |
+| `getStatusString(VegasPerformanceState)` | ~376-384 | Maps state -> "NORMAL" etc. |
 
 **Thresholds:**
-- Overheating: load ≥ 0.95 AND frameTime ≥ 3.0× target
-- Stuttering: frame-to-frame delta > 1.25× target
-- Lagging: frameTime ≥ 1.5× target
 - Normal: everything else
+- Lagging: frameTime >= 1.5x target
+- Stuttering: frame-to-frame delta > 1.25x target
+- Overheating: load >= 0.95 AND frameTime >= 3.0x target
 
-**GPU Load Estimate** (in `PresentBase`, `dxgi_swapchain.cpp` lines 355-371):
-
-⚠️ *Current metric: ftRatio-based — planned for replacement with real GPU idle
-ticks (`DxvkSubmissionQueue::gpuIdleTicks()`). The ftRatio proxy works well
-enough for the TBDR-inverted governor to make correct decisions (Fix 4), but
-the HUD load percentage is an approximation.*
+**GPU Load Estimate (ftRatio proxy):**
 ```
 ftRatio = frameTime / targetFrameTime
-> 2.0  → 0.96 (overheating)
-> 1.5  → 0.92 (badly lagging)
-> 1.2  → 0.85 (saturated)
-> 0.9  → 0.65 (near capacity)
-> 0.5  → 0.40 (some headroom)
-else   → 0.25 (lots of headroom)
-```
-
-**Planned enhancement (Fix 3):** Replace with `gpuIdleTicks()` delta for
-accurate load display and governor input. Requires plumbing the tick delta
-through the present path and storing previous tick for per-frame computation.
-
-**Log Line Format:**
-```
-Vegas: Perf=LAGGING ftRatio=1.5 load=0.92 frameTime=25.0ms frameGen=no
+> 2.0  -> 0.96 (overheating)
+> 1.5  -> 0.92 (badly lagging)
+> 1.2  -> 0.85 (saturated)
+> 0.9  -> 0.65 (near capacity)
+> 0.5  -> 0.40 (some headroom)
+else   -> 0.25 (lots of headroom)
 ```
 
 ---
 
-### 3.14 Frametime Graph Performance Colors
-
-**Files modified:** `src/dxvk/hud/dxvk_hud_item.cpp`, `src/dxvk/hud/dxvk_hud_item.h`,
-`src/dxvk/hud/shaders/hud_graph_frag.frag`, `src/dxvk/hud/shaders/hud_graph_vert.vert`
-
-The standalone VegasHud overlay has been **removed**. Its functionality is now
-integrated directly into the upstream DXVK frametime graph (`DXVK_HUD=frametimes`):
-
-| Component | Location | Purpose |
-|-----------|----------|---------|
-| `DrawFrameTimeGraph()` | `dxvk_hud_item.cpp:365-405` | Queries `Vegas::getLastPerfState()` + `getGraphColor()`, passes color via push constant |
-| `RenderPushConstants::stateColor` | `dxvk_hud_item.h:287` | New uint32_t field added at end of push constant struct (+4 bytes) |
-| `hud_graph_frag.frag` | `shaders/hud_graph_frag.frag:31,79-83` | Accepts `state_color` push constant, unpacks to dynamic RGB line color |
-| `Vegas::getGraphColor()` | `dxvk_vegas.cpp:408-416` | Returns `0x00FF00`/`0xFFFF00`/`0xFF8800`/`0xFF0000` based on state |
-| `Vegas::getStatusString()` | `dxvk_vegas.cpp:419-427` | Returns `"NORMAL"`/`"LAGGING"`/`"STUTTERING"`/`"OVERHEATING"` |
-
-**Push constant layout (36 bytes total):**
-```
-offset 0:  uvec2 surface_size   (VkExtent2D, 8 bytes)
-offset 8:  float opacity        (4 bytes)
-offset 12: float scale          (4 bytes)
-offset 16: uint samplerIndex    (4 bytes)
-offset 20: uint packed_xy       (2×int16 → 4 bytes)
-offset 24: uint packed_wh       (2×int16 → 4 bytes)
-offset 28: uint frame_index     (4 bytes)
-offset 32: uint state_color     (4 bytes)  ← NEW
-```
-
-**Color extraction in shader:**
-```glsl
-vec4 line_color = vec4(
-    float((state_color >> 16) & 0xFFu) / 255.0f,  // R
-    float((state_color >> 8)  & 0xFFu) / 255.0f,  // G
-    float((state_color >> 0)  & 0xFFu) / 255.0f,  // B
-    1.0f);
-```
-
-**Data flow:**
-```
-dxgi_swapchain.cpp:PresentBase
-  → Vegas::pushMetrics(gpuLoad, frameTime, perfState, ...)
-    → writes to Vegas static members
-
-dxvk_hud_item.cpp:drawFrameTimeGraph()
-  → Vegas::getLastPerfState()           → determines state
-  → Vegas::getGraphColor(perfState)     → gets 0x00RRGGBB color
-  → sets pushConstants.stateColor       → passed to GPU
-  → renderer.drawText()                 → draws state label on graph
-```
-
-**Color mapping:**
-| State | Color | Hex | When |
-|-------|-------|-----|------|
-| NORMAL | Green | `0x00FF00` | Frame time < 1.5× target |
-| LAGGING | Yellow | `0xFFFF00` | Frame time ≥ 1.5× target |
-| STUTTERING | Orange | `0xFF8800` | Frame-to-frame delta > 1.25× target |
-| OVERHEATING | Red | `0xFF0000` | Load ≥ 95% AND ft ≥ 3× target |
-
-**Shader compilation:** Both `hud_graph_frag.frag` and `hud_graph_vert.vert` are
-compiled via `glslangValidator` to SPIR-V C headers at build time (meson
-`glsl_generator`). The generated `hud_graph_frag.h` and `hud_graph_vert.h` are
-placed in `src/dxvk/hud/` and included with quoted paths for local resolution.
-
-**Deleted:**
-- `src/dxvk/dxvk_vegas_hud.cpp` (216 lines — standalone overlay)
-- `src/dxvk/dxvk_vegas_hud.h` (67 lines — class declaration)
-- `vegas.enableHud` config option (removed from `dxvk_options.h/.cpp`,
-  `dxgi_options.h/.cpp`)
-
 ## 4. Config Options
 
-| Config Key | Type | Default | Declared In | Read In | Purpose |
-|---|---|---|---|---|---|
-| `dxvk.enableStarProfile` | Tristate | Auto | `dxvk_options.h:79` | `dxvk_options.cpp:26`, `vegas.cpp:898` | Master switch for ALL Vegas features |
-| `vegas.enableUpscaler` | Tristate | Auto | `dxvk_options.h:83` | `dxvk_options.cpp:27`, `dxgi_options.cpp:130` | FSR 1.0 spatial upscaler |
-| `vegas.forceTier` | int32_t | 0 | `dxvk_options.h:91` | `dxvk_options.cpp:28`, `vegas.cpp:947-949` | Override GPU tier detection |
-| `dxvk.enableAsync` | bool | false | `dxvk_options.h:15` | `dxvk_options.cpp:24`, `context.cpp:5874` | Async pipeline compilation |
-| `dxvk.numCompilerThreads` | int32_t | 0 | `dxvk_options.h:22` | `dxvk_options.cpp:8` | Override compiler thread count |
+| Config Key | Type | Default | Declaration | Purpose |
+|---|---|---|---|---|
+| `dxvk.enableAsync` | bool | true | `dxvk_options.h:29` | Async pipeline compilation |
+| `dxvk.gplAsyncCache` | bool | false | `dxvk_options.h:31` | GPL state cache with fixes |
+| `dxvk.enableStarProfile` | Tristate | Auto | `dxvk_options.h:52` | Master switch for VEGAS features |
+| `vegas.forceTier` | int32 | 0 | `dxvk_options.h:55` | Override GPU tier detection |
+| `dxvk.enableGraphicsPipelineLibrary` | Tristate | Auto | `dxvk_options.h:23` | Vulkan GPL support |
+| `dxvk.numCompilerThreads` | int32 | 0 | `dxvk_options.h:20` | Override compiler thread count |
+
+**Environment variable overrides:**
+| Env Var | Effect |
+|---------|--------|
+| `DXVK_ASYNC=0` | Disable async compilation (overrides `dxvk.enableAsync`) |
+| `DXVK_GPLASYNCCACHE=1` | Enable GPL state cache (overrides `dxvk.gplAsyncCache`) |
+| `DXVK_HUD=...` | Standard DXVK HUD configuration |
 
 ---
 
@@ -608,62 +440,27 @@ placed in `src/dxvk/hud/` and included with quoted paths for local resolution.
 2. **Implement in `dxvk_vegas.cpp`:**
    - Define static variables at the top (lines 31-75 area)
    - Implement the method
-   - If it needs device information, integrate with `initializeProfile(DxvkDevice*)`
+   - If it needs device information, integrate with `Vegas::configure()`
    - If it's a per-frame decision, expose a `shouldX()` or `xDispatch()` method
 
 3. **Wire into the DXVK pipeline:**
-   - Find the right integration point (draw, present, submit, create, blitter)
+   - Find the right integration point (draw, present, submit, create)
    - Add the Vegas call behind a guard:
      ```cpp
      if (unlikely(Vegas::shouldX(...))) { ... }
      ```
-   - For HUD overlays, wire into `DxvkSwapchainBlitter::present()` and
-     `renderHudImage()` in `dxvk_swapchain_blitter.cpp`
    - Use `unlikely()` macro for branches that are infrequently taken
 
 4. **Add config option if needed:**
    - Declare in `dxvk_options.h`
    - Read in `dxvk_options.cpp`
-   - Use `Tristate` for three-state options (Auto/True/False)
 
 5. **Add logging:**
    - Use `Logger::debug()` for diagnostic messages
-   - Wrap in `#ifndef NDEBUG` if the log would be chatty
-   - One-time startup logs belong in `initializeProfile()`
 
 6. **Test:**
    - Test on real Adreno hardware (6xx, 7xx if possible)
    - Test with `dxvk.enableStarProfile = False` (feature should be a no-op)
-   - Verify no validation errors with Vulkan validation layers
-
-### Pattern: Decision Helper
-
-Most features follow this pattern:
-```cpp
-// 1. Static decision function (no side effects)
-bool Vegas::shouldX(...) {
-    return s_enabled && <condition>;
-}
-
-// 2. Guard at call site
-if (unlikely(Vegas::shouldX(...))) {
-    this->doX();
-}
-```
-
-### Pattern: Static Baked State
-
-Baked state (set once in `initializeProfile()`, never changed):
-```cpp
-// In dxvk_vegas.h (declaration)
-static uint32_t s_xThreshold;
-
-// At top of dxvk_vegas.cpp (definition with default)
-uint32_t Vegas::s_xThreshold = 0;
-
-// In initializeProfile() (baking)
-s_xThreshold = computeThreshold(s_tier);
-```
 
 ---
 
@@ -677,36 +474,31 @@ s_xThreshold = computeThreshold(s_tier);
 ### Test Games
 | Game | Engine | What It Tests |
 |------|--------|---------------|
-| Tomb Raider (2013) | Crystal Dynamics (D3D11) | Swapchain DISCARD mode, governor, draw batching |
-| Prey (2017) | Unity (D3D11) | General stability, framepacing |
-| (any Unity game) | Unity | FLIP_DISCARD swapchain, descriptor binding |
+| Hollow Knight | Unity (D3D11) | Draw threshold correctness, GPLAsync stability |
+| Tomb Raider (2013) | Crystal Dynamics (D3D11) | Swapchain, governor, draw batching |
+| Subnautica | Unity (D3D11) | General stability, FSR |
 
 ### What to Monitor
 ```bash
-# Real-time Vegas diagnostics
 adb logcat -s "DXVK" | grep -E "Vegas:|GetImage|tuneThreshold|compiler"
-
-# Vulkan validation (if available)
-adb logcat -s "DXVK" | grep -E "ERROR|WARN|VUID"
 ```
-
-### Key Metrics
-- **GetImage errors:** Should be 0 (indicates swapchain buffer count bug)
-- **tuneThreshold log:** Shows governor adapting threshold dynamically
-- **ftRatio:** Should vary between 0.5-2.0 during gameplay
-- **Frametime graph color:** Graph line changes color with performance state (green→yellow→orange→red); state label (NORMAL/LAGGING/etc.) visible at top-left of graph
-- **Compiler threads:** "Using N compiler threads" — should be ≤4 on ARM64
 
 ### Regression Checklist
 - [ ] Game launches without crash
-- [ ] `dxvk.enableStarProfile = False` disables all Vegas features (emergency escape)
+- [ ] `dxvk.enableStarProfile = False` disables all Vegas features
+- [ ] `dxvk.enableAsync = False` disables async compilation (useful for debugging)
 - [ ] No new Vulkan validation errors
 - [ ] FPS and framepacing are not worse than previous build
-- [ ] Config override (`vegas.forceTier`, `dxvk.numCompilerThreads`) works
 
 ---
 
 ## 7. Common Pitfalls
+
+### "This is a backport, not a full DXVK upgrade"
+- VEGAS 2.4.1 is based on DXVK v2.4.1, NOT v2.7.3
+- The GPU BCn-to-ASTC transcoder from release-v2 is NOT present
+- leegao's DxvkFence timeline semaphore is NOT present
+- GPLAsync was backported from Ph42oN's patch, not from DXVK 2.7+ native GPL
 
 ### "Desktop Vulkan assumptions are invalid on Adreno"
 - TBDR architecture hates unbounded draw batching — always cap thresholds
@@ -715,88 +507,61 @@ adb logcat -s "DXVK" | grep -E "ERROR|WARN|VUID"
 - Device-local memory is limited — watch allocation sizes
 
 ### "Static state is thread-unsafe"
-- All baked state (`s_*` variables) is written once from `initializeProfile()`
-  and read-only afterwards — no synchronization needed
-- The one exception: `m_drawsSinceSubmit` (per-context atomic) and
-  `m_vegasProfile.lastBoundVkPipeline` (per-context, reset on flush)
-- `thread_local` in `tuneThreshold()` and `analyzePerformance()` prevents
-  cross-context interference
-
-### "The gated BCn→ASTC transcoder is NOT ready"
-- Do NOT enable it without wiring the upload pipeline
-- Block-size alignment (4×4 BCn → 5×5/6×6 ASTC) will cause validation errors
-- Test each ASTC block size on target hardware before activation
+- All baked state (`s_*` variables) is written once from `configure()` and
+  read-only afterwards — no synchronization needed
+- `thread_local` variables in `tuneThreshold()` and `analyzePerformance()`
+  prevent cross-context interference
 
 ### "Config option namespaces"
 - `dxvk.*` — DXVK core options (in `dxvk_options.cpp`)
-- `vegas.*` — Vegas-specific options (in `dxvk_options.cpp` and `dxgi_options.cpp`)
-- Don't add options under `dxgi.*` unless they're DXGI-specific
+- `dxvk.enableStarProfile` — VEGAS master switch
+- `vegas.*` — VEGAS-specific options (tier override, etc.)
 
-### "D3D9 vs D3D11 thresholds"
-D3D9 games typically issue more draw calls per frame. The D3D9-aware
-`initializeProfile()` override uses higher base thresholds:
-`{300, 500, 800}` vs D3D11 `{100, 200, 350}` (both TBDR-tuned).
-
----
-
-## 8. Credits & Contributors
-
-### Timeline Semaphore (DxvkFence) — leegao
-
-The non-blocking async FSR dispatch (Section 3.9) depends on **leegao's timeline
-semaphore wrapper** (`DxvkFence` in `src/dxvk/dxvk_fence.h/.cpp`). This is a
-clean-room implementation of `VK_KHR_timeline_semaphore` that provides:
-
-- **`getValue()`** — Non-blocking completion check (used on hot path, avoids
-  Turnip-kgsl emulation bug that over-waits on intermediate values)
-- **`wait(value)`** — Blocking wait (used only in `fsrDrain()` on resize)
-- **`handle()`** — Raw `VkSemaphore` for `VkSubmitInfo` pNext
-
-Without leegao's `DxvkFence`, the async FSR path would block on every frame
-with a naive fence wait, destroying the frametime stability that Fix 2 achieves.
-The `getValue()`-only hot-path pattern is the key innovation that makes async
-FSR viable on Turnip.
-
-**Files:** `src/dxvk/dxvk_fence.h`, `src/dxvk/dxvk_fence.cpp`
-
-### Project Credits
-
-- **Lead Developer:** isygold
-- **Base Project:** DXVK v2.7.1+ by doitsujin
-- **Timeline Semaphore:** leegao (DxvkFence)
-- **License:** zlib/libpng
+### "Low thresholds are intentional"
+- Draw thresholds are {50, 150, 300} (not {100, 200, 350}) to fix 2D game
+  pop-in/missing sprites. This does NOT affect rendering correctness — every
+  draw call still renders, just with more frequent flushes.
 
 ---
 
-## 9. CI Pipeline & WCP Dual Build
+## 8. CI Pipeline & WCP Dual Build
 
 ### Workflows
 
 | Workflow | Trigger | Produces |
 |----------|---------|----------|
 | `build.yml` | `workflow_dispatch` | x64 + x32 DLLs (via MinGW cross-build) |
-| `wcpbuild.yml` | `workflow_dispatch` | WCP packages + vegas config artifact |
+| `wcpbuild.yml` | `workflow_dispatch` | WCP packages from latest build artifact |
 
 ### WCP Dual Build
 
-`wcpbuild.yml` builds **two** `.wcp` archives from the same DLLs. The only
-difference is the embedded `profile.json` metadata:
+`wcpbuild.yml` builds **two** `.wcp` archives from the same DLLs:
 
-| Artifact | `profile.json` type | Archive Name | Purpose |
-|----------|---------------------|--------------|---------|
-| `wcp-dxvk-<sha>` | `"type": "DXVK"` | `dxvk-2.7.3-vegas-<sha>.wcp` | Stock Winlator compatibility |
-| `wcp-vegas-<sha>` | `"type": "VEGAS"` | `vegas-2.7.3-<sha>.wcp` | Star Emulator (latest build) |
+| Artifact | Profile Type | Archive Name | Purpose |
+|----------|-------------|--------------|---------|
+| `wcp-dxvk-<sha>` | DXVK | `dxvk-2.4.1-vegas-<sha>.wcp` | Stock Winlator compatibility |
+| `wcp-vegas-<sha>` | VEGAS | `vegas-2.4.1-<sha>.wcp` | Star Emulator |
 
-The `vegas-config-<sha>` artifact ships the `vegas/dxvk.conf` alongside.
-
-### Adding a New Package Type
-
-If you need a third type variant:
-1. Add a new `Package WCP (<type>)` step in `wcpbuild.yml` — same DLLs, different
-   `profile.json` content and archive filename
-2. Add a matching `Upload WCP (<type>)` step
-3. Update this table
+### Workflow Security
+- `build.yml` is build-only (no release creation, no external pushes)
+- `wcpbuild.yml` has permissions: `actions: read, contents: read`
+- No pushes to `vegas-releases` repo — user controls publication
 
 ---
 
-*Last updated: 2026-06-07 | Branch: vegas*
+## 9. Credits & Contributors
+
+### GPLAsync Backport
+The GPLAsync patch for DXVK 2.4 was created by **Ph42oN**
+(commit `4e5658e97b6c` of `dxvk-gplasync`). Upstream GPLAsync by
+**ishitatsuyuki** provided the async pipeline compilation foundation.
+
+### Project Credits
+- **Lead Developer:** isygold
+- **Base Project:** DXVK v2.4.1 by doitsujin
+- **FSR 1.0:** AMD GPUOpen (EASU compute shader)
+- **License:** zlib/libpng
+
+---
+
+*Last updated: 2026-07-22 | Branch: build-fix-2.4.1*

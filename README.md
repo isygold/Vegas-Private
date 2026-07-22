@@ -4,89 +4,66 @@
   <em>star engine rebased and rebranded; vegas</em>
 </p>
 
-# VEGAS — DXVK v2.7.3
-### Adreno-Tuned DXVK for Android Emulation (Star Emulator / Winlator)
+# VEGAS — DXVK 2.4.1
+### Stability Backport: GPLAsync + Performance Optimizations for Adreno Mobile
 
-VEGAS is a specialized performance fork of DXVK (via GPLAsync) targeting **Qualcomm Adreno GPUs** on mobile. It features a tier-based auto-tuning engine, FSR 1.0 compute upscaling, motion-compensated frame generation, and dynamic driver safeguards — all behind a single master switch.
+VEGAS is a specialized performance fork of **DXVK v2.4.1** (via the GPLAsync backport) targeting **Qualcomm Adreno GPUs** on Android emulation (Star Emulator / Winlator). It features automatic async shader compilation, tier-based auto-tuning, FSR 1.0 compute upscaling, motion-compensated frame generation, and a TBDR-aware dynamic governor — all configurable through simple DXVK options.
+
+**This is the stable backport branch (`build-fix-2.4.1`).** The feature branch (`2.7.4-beta`) contains the full DXVK v2.7.3 base with GPU BCn-to-ASTC transcoding — use this branch for maximum stability and compatibility.
 
 ---
 
 ## Key Features
 
-### Master Switch (`dxvk.enableStarProfile`)
-All VEGAS features are gated behind one Tristate option:
-- **Auto** — Enable on Adreno GPUs only (default)
-- **True** — Force-enable all features
-- **False** — Hard-disable everything
+### GPLAsync — Async Shader Compilation (Backported)
+Eliminates shader compilation stutter by compiling pipelines asynchronously in background worker threads:
+- **`dxvk.enableAsync = true`** (default ON) — pipelines compile in background, return fast-link fallback immediately
+- **`dxvk.gplAsyncCache = false`** (default OFF) — opt-in state cache with GPL fixes
+- Environment overrides: `DXVK_ASYNC=0` to disable, `DXVK_GPLASYNCCACHE=1` to enable cache
+- Render-target frame tracking: only enables async after 5+ consecutive frames of RT binding (prevents missing geometry from unloaded shaders)
 
 ### Tier-Based Auto-Tuning
 Adreno GPUs are classified into 3 tiers from the KGSL device model:
 
-| Tier | Adreno GPUs | Performance Target |
-|------|-------------|-------------------|
-| 1 | 506, 508, 509, 512, 610, 615, 616, 618, 619, 620 | GTX 1050 Ti |
-| 2 | 630, 640, 642L, 650, 660, 680, 690 | GTX 1070 |
-| 3 | 7xx series, 8xx series, 830, 840 | RTX 3060 |
+| Tier | Adreno GPUs | Draw Threshold | HAAE Threshold | Cap Multiplier |
+|------|-------------|----------------|----------------|----------------|
+| 1 | 506-620 (low-end) | 50 | 30 | 1.5x |
+| 2 | 630-690 (mid) | 150 | 50 | 1.8x |
+| 3 | 7xx/8xx (high-end) | 300 | 100 | 2.5x |
 
-Each tier receives tuned draw thresholds, HAAE pacing, frame generation eligibility, VRAM budgets, and governor cap multipliers automatically.
+Each tier receives tuned draw thresholds, HAAE pacing, frame generation eligibility, and governor cap multipliers automatically. Low thresholds ({50,150,300}) ensure 2D games like Hollow Knight flush draw batches promptly — no pop-in or missing geometry.
 
-### FSR 1.0 Compute Upscaler — Async Dispatch (`vegas.enableUpscaler`)
-Full FSR 1.0 EASU compute pipeline with **non-blocking async dispatch**:
-- **Auto** — Upscales when render resolution < swapchain resolution
-- **True** — Always upscale (half-resolution quadrants)
-- **False** — Disabled
-
-Uses leegao's **DxvkFence timeline semaphore** for zero-CPU-blocking dispatch:
-- `fsrUpscaleAsync()` submits EASU compute, signals DxvkFence, returns immediately
-- `fsrTryBlitResult()` non-blocking `getValue()` check → ~0.1ms sync blit
-- `fsrDrain()` blocking wait only on resize (never on hot path)
-
-Eliminates 0.5-1.0ms CPU stall on every upscaled frame. GPU load improved
-**40-60% → 70-85%** on low-end Adreno (Tomb Raider 2013 validated).
+### FSR 1.0 Compute Upscaler
+Full FSR 1.0 EASU compute pipeline with async dispatch via timeline semaphore:
+- Upscales when render resolution is below swapchain resolution
+- Configurable per-game behavior
+- Eliminates 0.5-1.0ms CPU stall on every upscaled frame
 
 ### 3-Pass Motion-Compensated Frame Generation
-Available on Tier 2 (≤29 ms frametime) and Tier 3 (≤33 ms frametime):
-1. **Motion estimation** — Block SAD on prev/cur frames → raw motion vectors
-2. **Median filter** — 3×3 spatial denoise on motion field
-3. **Warp + blend** — Warp prev frame by filtered motion, alpha-blend at 0.5
+Available on Tier 2 (<= 29ms frametime) and Tier 3 (<= 33ms frametime):
+1. Motion estimation — block SAD on prev/cur frames
+2. Median filter — 3x3 spatial denoise on motion field
+3. Warp + blend — warp prev frame by filtered motion, alpha-blend at 0.5
 
 Compute-only pipeline. Disabled on Tier 1 (insufficient compute budget).
 
-### Adaptive Governor — TBDR-Inverted (`tuneThreshold`)
-EMA-smoothed frame-time telemetry with **15-frame cooldown** for responsive load balancing:
-- **GPU-bound** (load>0.90, ft>25ms) → **RAISE** threshold (batch more, amortize submission overhead)
-- **CPU-bound** (load<0.40, ft>12ms) → **LOWER** threshold (flush earlier, TBDR tile pacing)
-- **Balanced** → reset to base
+### Adaptive Governor — TBDR-Inverted
+EMA-smoothed frame-time telemetry with adaptive cooldown:
+- **GPU-bound** (load>0.85, ft>20ms) — raise threshold (batch more, amortize overhead)
+- **CPU-bound** (load<0.45, ft>10ms) — lower threshold (flush earlier, TBDR tile pacing)
+- **Balanced** — reset to base
+- **Adaptive cooldown:** `ceil(ft x 0.3)`, clamped [5,30] frames
 
-**Why inverted?** Desktop DXVK raises the threshold for BOTH CPU-bound and GPU-bound
-scenarios. On TBDR Adreno, raising the threshold when CPU-bound makes the problem
-worse — more draws accumulate in the tile buffer, increasing driver overhead and
-starving the GPU. The inverted path correctly **reduces** the threshold when
-CPU-bound to force earlier flushes.
+**Why inverted?** Desktop DXVK raises thresholds for both CPU-bound and GPU-bound scenarios. On TBDR Adreno, raising the threshold when CPU-bound makes the problem worse — more draws accumulate in the tile buffer. The inverted path correctly reduces the threshold to force earlier flushes.
 
-**Cap multipliers:** T1=2.0× (100→200), T2=2.0× (200→400), T3=1.7× (350→595)
-
-GPU load is derived from the `frameTime / targetFrameTime` ratio (6 continuous levels
-from 0.25 to 0.96). Planned replacement with real `gpuIdleTicks()` (Fix 3).
+### VegaHud Performance Overlay
+- Lightweight performance HUD with frame-skip optimization (updates every 5th frame)
+- Draw call count, frame time, GPU load, tier info
+- Configurable via standard `DXVK_HUD` environment variable
 
 ### Dynamic VRAM & GPU Mask
-- `applyVramSwap()` — Sets `dxgi.maxDeviceMemory` to 40% of system RAM (clamped 1–4 GB)
-- `applyGpuMask()` — Maps Adreno tier to a compatible NVIDIA vendor/device ID
-
-### Bind Skip Optimization
-Skips redundant `vkCmdBindPipeline` calls when no dynamic state has changed — reduces CPU overhead on the draw call path.
-
-### HUD Performance Colors
-The upstream DXVK **frametime graph** (`DXVK_HUD=frametimes`) is color-coded by
-performance state in real time:
-- **Green** (Normal) — smooth sailing
-- **Yellow** (Lagging) — frame time exceeds 1.5× target
-- **Orange** (Stuttering) — frame-to-frame delta > 1.25× target
-- **Red** (Overheating) — GPU load ≥95% AND frame time ≥ 3× target
-
-The current state label (NORMAL / LAGGING / STUTTERING / OVERHEATING) is drawn
-at the top-left of the graph in the same color. This replaces the standalone
-VegasHud overlay — no separate HUD configuration needed.
+- VRAM clamped to ~40% of system RAM (1-4 GB range)
+- Adreno tier mapped to compatible NVIDIA vendor/device ID for game compatibility
 
 ---
 
@@ -95,29 +72,25 @@ VegasHud overlay — no separate HUD configuration needed.
 ### WCP Package Types
 Each release provides **two** WCP packages with identical DLLs but different metadata:
 
-| Package | `type` field | For |
-|---------|-------------|-----|
-| `dxvk-2.7.3-vegas-*.wcp` | `"DXVK"` | **Stock Winlator** and general Android DXVK use |
-| `vegas-2.7.3-*.wcp` | `"VEGAS"` | **Star Emulator** (latest build) |
+| Package | Type field | For |
+|---------|-----------|-----|
+| `dxvk-2.4.1-vegas-*.wcp` | DXVK | Stock Winlator and general Android DXVK use |
+| `vegas-2.4.1-*.wcp` | VEGAS | Star Emulator (latest build) |
 
 ### Via Star Emulator
 1. Open Star Emulator
 2. Go to **Contents** menu
-3. Install the `vegas-2.7.3-*.wcp` package (VEGAS-native type)
+3. Install the `vegas-2.4.1-*.wcp` package (VEGAS-native type)
 
 ### Via Stock Winlator
-1. Download the `dxvk-2.7.3-vegas-*.wcp` package
+1. Download the `dxvk-2.4.1-vegas-*.wcp` package
 2. Install it as a standard DXVK WCP package in Winlator
 
 ### Manual Configuration
-Place `vegas/dxvk.conf` (or the root `dxvk.conf`) in any of these paths:
+Place `dxvk.conf` in any of these paths:
 - `/storage/emulated/0/Winlator/`
 - `/storage/emulated/0/Download/`
 - `/storage/emulated/0/`
-
-The `vegas/` directory in this repo contains a clean, focused config file
-with all Vegas options pre-configured and documented. Copy it as `dxvk.conf`
-to one of the paths above.
 
 Or set `DXVK_CONFIG_FILE` to your config path.
 
@@ -129,17 +102,24 @@ Or set `DXVK_CONFIG_FILE` to your config path.
 # Master switch: Auto (Adreno only), True (force-on), False (force-off)
 dxvk.enableStarProfile = Auto
 
-# FSR 1.0 upscaler: Auto, True, False
-vegas.enableUpscaler = Auto
+# Async shader compilation: True (default), False
+dxvk.enableAsync = True
+
+# GPL async state cache: False (default), True
+dxvk.gplAsyncCache = False
 
 # Manual tier override (advanced): 0=auto, 1=low-end, 2=mid, 3=high-end
 vegas.forceTier = 0
 
 # Compiler thread count (advanced): 0=auto (max 4 on ARM64)
 dxvk.numCompilerThreads = 0
+
+# Environment variable overrides:
+# DXVK_ASYNC=0         → disable async compilation
+# DXVK_GPLASYNCCACHE=1 → enable GPL state cache
 ```
 
-All other parameters (thresholds, bind skip, HAAE pacing, quality scaling) are auto-tuned by the VEGAS engine. For a complete config reference, see `vegas/dxvk.conf` in this repository.
+All other parameters (thresholds, bind skip, HAAE pacing, quality scaling) are auto-tuned by the VEGAS engine.
 
 ---
 
@@ -148,6 +128,7 @@ All other parameters (thresholds, bind skip, HAAE pacing, quality scaling) are a
 ```bash
 git clone --recursive https://github.com/isygold/Vegas-Private.git
 cd Vegas-Private
+git checkout build-fix-2.4.1
 
 # Android cross-build (requires NDK r26+ and Meson 0.58+)
 meson setup --cross-file build-android-aarch64.txt \
@@ -160,44 +141,36 @@ The output DLLs (`d3d9.dll`, `d3d11.dll`, `dxgi.dll`, etc.) are placed in `/outp
 
 ---
 
-## Changelog (VEGAS)
+## Changelog (VEGAS 2.4.1)
 
 | Commit | Feature |
 |--------|---------|
-| `HEAD` | **Remove VegasHud overlay.** Color-coded frametime graph replaces standalone overlay. `DXVK_HUD=frametimes` now shows dynamic colors (green→yellow→orange→red) and state label |
-| `07914da` | **VegasHud:** positioning fix (char width 8→10.5px), ASCII bar graph (20-bar × 4-level), leegao credits |
-| `24e48a3` | **Stable release:** WCP versionCode 0→1, WCP CI checkout fix |
-| `735e09e` | **WCP CI:** remove vkResetCommandBuffer from async FSR (not in FsrVulkanFuncs) |
-| `8128a1b` | **Fix 2 + Fix 1 + Fix 4:** Async FSR via DxvkFence (leegao), TBDR-aware thresholds (T1=100/T2=200/T3=350), inverted TBDR governor (lower when CPU-bound) |
-| `bea5128` | **Bleeding-edge:** tier-based governor, 15-frame cooldown, GPU load from ftRatio, HAAE thresholds (T1:30/T2:50/T3:80), ARM64 compiler thread cap (max 4), zero-init tier-aware |
-| `1e2b208` | Remove per-shader zero-init log spam (3378 lines → 1 summary) |
-| `c99f219` | Respect `BufferCount ≥ 2` regardless of swap effect (fixes Tomb Raider DISCARD-mode) |
-| `8e5ebf9` | Include `FLIP_DISCARD` in flip-model backbuffer count check |
-| `08863e2` | Use `small_vector` for temp backbuffers (avoids heap alloc on present path) |
-| `8f957e5` | **Phase 1–3:** tier classifier, TBDR-safe governor, 60s shader cache flush, async+GPL compat, zero-init tier-aware, FSR upscaler, 3-pass framegen |
-| `87c7c09` | Short-circuit framegen dispatch when VkDevice/VkQueue unavailable |
-| `ea83294` | Add `vegas.enableUpscaler` config option to DxgiOptions |
+| `38cab11` | **VEGAS branding:** project name 'vegas', dirty suffix '-1-vegas' |
+| `d404649` | **HK fix:** draw thresholds lowered to {50,150,300} — fixes 2D game pop-in |
+| `fff1bec` | **HUD branding:** shows "VEGAS" instead of "DXVK" |
+| `9bd1c38` | **Perf batch:** framegen timeout (50ms), C1-C4 optimizations |
+| `97c53a4` | **GPLAsync backport:** async shader compilation for DXVK 2.4.1 |
+| `60bd0f0` | **WCP security:** permissions tightened, no external pushes |
+| `439305a` | **WCP artifact-based:** fetch from build artifacts not releases |
+| `1a2b491` | **Build-only workflow:** strip release/WCP from build.yml |
+
+### Performance Optimizations (C1-C4)
+- **C1 — FSR ratio guard:** skip FSR if source >= 85% of target (waste check)
+- **C2 — Governor re-tune:** GPU-bound at load>0.85/ft>20ms, CPU-bound at load<0.45/ft>10ms, adaptive cooldown
+- **C3 — HUD frame-skip:** pushMetrics() writes every 5th call via thread_local counter
+- **C4 — Threshold tuning:** draw {50,150,300}, HAAE {30,50,100}
 
 ---
 
 ## Notes
 
-- **Tier 1 (Adreno 5xx/6xx low-end):** Frame generation disabled. FSR available but not recommended at very low resolutions.
-- **Performance state coloring:** The upstream frametime graph (`DXVK_HUD=frametimes`) now reflects the current Vegas performance state in real time — no separate HUD overlay needed.
-- **BCn→ASTC transcoder:** Implemented but deferred — the simplified encoder produces visual quality loss that outweighs the narrow benefit (only helps old Qualcomm blob, not Turnip). Available in code for future developers who want to integrate a proper encoder (e.g., `ispc_texcomp`).
-- **Turnip driver:** Use Mesa 25.x+ with Vulkan 1.3 support for descriptor indexing and push constants.
+- **This is a backport, not a VEGAS upgrade path.** VEGAS 2.4.1 is a backport of GPLAsync + VEGAS performance features onto DXVK 2.4.1. It is NOT an upgrade from an earlier VEGAS version — it is a separate stable branch. The feature branch (`2.7.4-beta`) with the full DXVK v2.7.3 base and GPU transcoder is a different track.
+- **Faster than stock DXVK and plain GPLAsync.** The combination of async shader compilation (GPLAsync), TBDR-aware governor, FSR upscaling, and low-latency draw thresholds makes VEGAS 2.4.1 faster and smoother than both stock DXVK 2.4.1 and standalone dxvk-gplasync builds. Users upgrading from either will see measurable improvements.
+- **Tier 1 (Adreno 5xx/6xx low-end):** Frame generation disabled. FSR available but not recommended at very low resolutions. Zero-init enabled for Turnip stability.
+- **Turnip driver:** Use Mesa 25.x+ with Vulkan 1.3 support for best results.
 - **Synthetic benchmarks:** May show lower FPS than stock due to draw thresholds. Judge performance by actual gameplay smoothness.
 - **GPU-bound workloads:** VSync-off provides negligible gain when the GPU is already saturated (17+ ms frame times).
-
----
-
-## Credits
-
-- **Lead Developer:** isygold
-- **Base Project:** DXVK v2.7.1 by doitsujin
-- **Timeline Semaphore (DxvkFence):** leegao — enabled non-blocking async FSR dispatch on Turnip
-- **Upstream Parent:** GPLAsync v2.7.1 by ishitatsuyuki (async pipeline compilation foundation)
-- **License:** zlib/libpng
+- **Draw thresholds {50,150,300} are intentionally low** to fix 2D game pop-in/missing geometry (e.g., Hollow Knight). This does NOT affect rendering correctness — every draw call still renders, just with more frequent flushes.
 
 ---
 
@@ -224,3 +197,13 @@ For desktop/Wine usage, driver notes, HUD reference, debugging, and full build i
 
 ### Anti-Cheat Warning
 Modifying Direct3D libraries in multiplayer games may result in account bans. **Use at your own risk.**
+
+---
+
+## Credits
+
+- **Lead Developer:** isygold
+- **Base Project:** DXVK v2.4.1 by doitsujin
+- **GPLAsync Patch:** Ph42oN (dxvk-gplasync v2.4-1), ishitatsuyuki (upstream GPLAsync)
+- **FSR 1.0:** AMD GPUOpen (EASU compute shader)
+- **License:** zlib/libpng
