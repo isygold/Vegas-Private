@@ -1,4 +1,4 @@
-project('dxvk', ['c', 'cpp'], version : 'v2.4.1', meson_version : '>= 0.58', default_options : [ 'cpp_std=c++17', 'warning_level=2' ])
+project('vegas', ['c', 'cpp'], version : 'v2.4.1', meson_version : '>= 0.58', default_options : [ 'cpp_std=c++17', 'warning_level=2' ])
 
 pkg = import('pkgconfig')
 cpu_family = target_machine.cpu_family()
@@ -190,7 +190,7 @@ glsl_generator = generator(
 )
 
 dxvk_version = vcs_tag(
-  command: ['git', 'describe', '--dirty=-1-gplasync'],
+  command: ['git', 'describe', '--dirty=-1-vegas'],
   input:  'version.h.in',
   output: 'version.h',
 )
