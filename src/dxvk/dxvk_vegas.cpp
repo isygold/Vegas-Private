@@ -216,25 +216,30 @@ namespace dxvk {
 
       // Tier-based cap multiplier (TBDR: conservative caps to prevent
       // tile buffer thrashing at high batch counts)
-      static constexpr float capMultipliers[] = { 2.0f, 2.0f, 1.7f };
-      float multiplier = (tier >= 1 && tier <= 3) ? capMultipliers[tier - 1] : 2.0f;
+      // Tier-based cap multiplier (TBDR: entry tiers need tighter caps
+      // to prevent sudden memory bandwidth saturation across Adreno
+      // system bus.  Higher tiers can batch deeper.)
+      static constexpr float capMultipliers[] = { 1.5f, 1.8f, 2.5f };
+      float multiplier = (tier >= 1 && tier <= 3) ? capMultipliers[tier - 1] : 1.8f;
       uint32_t cap = static_cast<uint32_t>(base * multiplier);
 
       // TBDR-aware governor logic:
       //
-      // High sustained GPU load (load>0.90, ft>25ms):
-      //   → GPU-bound, batch more to amortize submission overhead
+      // High sustained GPU load (load>0.85, ft>20ms):
+      //   → GPU-bound, batch more to amortize submission overhead.
+      //     Catching at 85% (not 90%) gives the governor room to
+      //     adapt before the SoC hits a thermal wall on mobile.
       //
-      // Low GPU load with high frame time (load<0.40, ft>12ms):
-      //   → CPU-bound! TBDR driver overhead from over-batching is
-      //     starving the GPU. REDUCE threshold aggressively to let
-      //     GPU start tiling earlier.
+      // Low GPU load with high frame time (load<0.45, ft>10ms):
+      //   → CPU-bound! TBDR draw-call overhead from over-batching is
+      //     starving the GPU.  REDUCE threshold to let GPU start
+      //     tiling earlier instead of uselessly boosting GPU clocks.
       //
       // Everything else: reset to base to prevent sticky thresholds.
-      if (load > 0.90f && frameTime > 25.0f) {
+      if (load > 0.85f && frameTime > 20.0f) {
           // GPU-bound — batch more draws
           threshold = cap;
-      } else if (load < 0.40f && frameTime > 12.0f) {
+      } else if (load < 0.45f && frameTime > 10.0f) {
           // CPU-bound — flush more frequently for TBDR pacing
           threshold = std::max(50u, base / 2);
       } else {
@@ -250,12 +255,16 @@ namespace dxvk {
       thread_local float s_smoothFt = 16.6f;
       s_smoothFt = s_smoothFt * 0.9f + frameTime * 0.1f;
 
-      // 2. Frame-count cooldown — re-evaluate at most once every 15 calls
-      //    (~250 ms at 60 fps, ~500 ms at 30 fps).
-      //    Reduced from 30 → 15 for faster governor response.
+      // 2. Adaptive frame-count cooldown — re-evaluate at most once every
+      //    ceil(frameTime_ms / 3.33) frames (~5 frames at 60 FPS, ~10
+      //    frames at 30 FPS).  Using frameTime × 2 would be ~33 frames at
+      //    60 FPS — far too slow to prevent hitching on mobile.
+      //    Clamped to [5, 30] to avoid oscillation or starvation.
       thread_local uint32_t s_framesSinceAdj = 0;
       s_framesSinceAdj++;
-      if (s_framesSinceAdj < 15)
+      uint32_t cooldown = std::clamp(
+          static_cast<uint32_t>(frameTime * 0.3f), 5u, 30u);
+      if (s_framesSinceAdj < cooldown)
           return;
       s_framesSinceAdj = 0;
 
@@ -505,11 +514,13 @@ namespace dxvk {
     // low enough that the GPU's tile buffer (~256KB-1MB depending on tier)
     // doesn't overflow within a single render pass.
     // Desktop values (600-2000) cause tile thrashing on all mobile GPUs.
-    static constexpr uint32_t drawThresholdTable[] = { 100, 200, 350 };
+    // Tier 2/3 bumped slightly from original for better throughput on
+    // mid/high-end Adreno while keeping Tier 1 conservative.
+    static constexpr uint32_t drawThresholdTable[] = { 100, 250, 400 };
     // HAAE thresholds: Tier 1 (low-end) needs MORE frequent pacing (lower
-    // threshold) to prevent tile buffer overflow. Tier 3 (mid-end) can
-    // batch slightly more but still TBDR-limited.
-    static constexpr uint32_t haaeThresholdTable[] = { 30, 50, 80 };
+    // threshold) to prevent tile buffer overflow. Tier 3 (high-end) can
+    // batch more before HAAE submission.
+    static constexpr uint32_t haaeThresholdTable[] = { 30, 50, 100 };
 
     uint32_t idx = (s_tier >= 1 && s_tier <= 3) ? s_tier - 1 : 0;
     s_drawThreshold = drawThresholdTable[idx];
@@ -581,8 +592,11 @@ namespace dxvk {
       return false;
     if (upscalerState == Tristate::True)
       return true;
-    // Auto: only upscale when source is smaller than destination
-    return src.width < dst.width;
+    // Auto: only upscale when source is meaningfully smaller than destination
+    static constexpr float kMinUpscaleRatio = 0.85f;
+    return src.width < dst.width
+        && static_cast<float>(src.width) / static_cast<float>(dst.width) < kMinUpscaleRatio
+        && static_cast<float>(src.height) / static_cast<float>(dst.height) < kMinUpscaleRatio;
   }
 
 
@@ -2986,9 +3000,10 @@ namespace dxvk {
       fgCleanup(8); return false;
     }
 
-    vr = s_vk.vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+    vr = s_vk.vkWaitForFences(device, 1, &fence, VK_TRUE, 50'000'000);
     if (vr != VK_SUCCESS) {
-      Logger::warn(str::format("Vegas FG: vkWaitForFences failed (", vr, ")"));
+      Logger::warn(str::format("Vegas FG: vkWaitForFences timeout (", vr, ")"));
+      fgCleanup(8); return false;
     }
 
     // Cleanup views
@@ -3010,12 +3025,22 @@ namespace dxvk {
   // ============================================================
   // VegasHud metrics
   // ============================================================
+  // Frame-skip counter for VegaHud metric updates.  We only write
+  // metrics every N frames to reduce cross-DLL write overhead.
+  // The HUD updates at ~12 fps instead of ~60 fps — still smooth
+  // enough for monitoring, zero impact on the render path.
+  static thread_local uint32_t s_hudSkip = 0;
+
   void Vegas::pushMetrics(
           float                gpuLoad,
           float                frameTime,
           VegasPerformanceState state,
           bool                 fsrActive,
           bool                 fgActive) {
+    // Throttle: only update every 5th call
+    s_hudSkip++;
+    if (s_hudSkip % 5 != 0)
+      return;
     // Always write to static vars for backward compat
     s_lastGpuLoad     = gpuLoad;
     s_lastFrameTime   = frameTime;
