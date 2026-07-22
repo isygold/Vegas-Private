@@ -1324,6 +1324,8 @@ namespace dxvk {
       this->flushCommandList(nullptr);
     }
 
+    Vegas::recordDrawCall();
+
     if (this->commitGraphicsState<false, false>()) {
       m_cmd->cmdDraw(
         vertexCount, instanceCount,
@@ -1341,6 +1343,7 @@ namespace dxvk {
           VkDeviceSize      offset,
           uint32_t          count,
           uint32_t          stride) {
+    Vegas::recordDrawCall();
     if (this->commitGraphicsState<false, true>()) {
       auto descriptor = m_state.id.argBuffer.getDescriptor();
       
@@ -1359,6 +1362,7 @@ namespace dxvk {
           VkDeviceSize      countOffset,
           uint32_t          maxCount,
           uint32_t          stride) {
+    Vegas::recordDrawCall();
     if (this->commitGraphicsState<false, true>()) {
       auto argDescriptor = m_state.id.argBuffer.getDescriptor();
       auto cntDescriptor = m_state.id.cntBuffer.getDescriptor();
@@ -1392,6 +1396,8 @@ namespace dxvk {
       this->flushCommandList(nullptr);
     }
 
+    Vegas::recordDrawCall();
+
     if (this->commitGraphicsState<true, false>()) {
       m_cmd->cmdDrawIndexed(
         indexCount, instanceCount,
@@ -1410,6 +1416,7 @@ namespace dxvk {
           VkDeviceSize      offset,
           uint32_t          count,
           uint32_t          stride) {
+    Vegas::recordDrawCall();
     if (this->commitGraphicsState<true, true>()) {
       auto descriptor = m_state.id.argBuffer.getDescriptor();
       
@@ -1428,6 +1435,7 @@ namespace dxvk {
           VkDeviceSize      countOffset,
           uint32_t          maxCount,
           uint32_t          stride) {
+    Vegas::recordDrawCall();
     if (this->commitGraphicsState<true, true>()) {
       auto argDescriptor = m_state.id.argBuffer.getDescriptor();
       auto cntDescriptor = m_state.id.cntBuffer.getDescriptor();
@@ -1448,6 +1456,7 @@ namespace dxvk {
     const DxvkBufferSlice&  counterBuffer,
           uint32_t          counterDivisor,
           uint32_t          counterBias) {
+    Vegas::recordDrawCall();
     if (this->commitGraphicsState<false, false>()) {
       auto physSlice = counterBuffer.getSliceHandle();
 

@@ -99,6 +99,12 @@ namespace dxvk {
   bool     Vegas::s_fsrActive          = false;
   bool     Vegas::s_fgActive           = false;
 
+  // Draw count histogram
+  uint32_t Vegas::s_drawHistory[DRAW_HISTORY_SIZE] = {};
+  uint32_t Vegas::s_drawHead           = 0;
+  uint32_t Vegas::s_frameDrawCount     = 0;
+  uint32_t Vegas::s_dumpCounter        = 0;
+
 
   // ============================================================
   // Adreno GPU tier classifier — replaces opaque upstream
@@ -3052,6 +3058,20 @@ namespace dxvk {
     s_ftHistory[s_ftHead] = frameTime;
     s_ftHead = (s_ftHead + 1) % FT_HISTORY_SIZE;
 
+    // Record per-frame draw count to circular history, reset counter
+    if (s_frameDrawCount > 0) {
+      s_drawHistory[s_drawHead] = s_frameDrawCount;
+      s_drawHead = (s_drawHead + 1) % DRAW_HISTORY_SIZE;
+      s_frameDrawCount = 0;
+    }
+
+    // Dump CSV every DRAW_HISTORY_SIZE frames (roughly ~1s at 60fps)
+    s_dumpCounter++;
+    if (s_dumpCounter >= DRAW_HISTORY_SIZE) {
+      s_dumpCounter = 0;
+      dumpDrawCsv();
+    }
+
     // Also write to shared DxvkDevice metrics (cross-DLL safe).
     // The device object is the same pointer in both d3d11.dll and
     // dxgi.dll, so metrics written by PresentBase (dxgi.dll) are
@@ -3121,6 +3141,33 @@ namespace dxvk {
     if (dev != nullptr && dev->m_vegasMetrics.initialized)
       return dev->m_vegasMetrics.fgActive;
     return s_fgActive;
+  }
+
+
+  // ============================================================
+  // Draw count histogram — per-frame count for threshold tuning
+  // ============================================================
+
+  void Vegas::recordDrawCall() {
+    s_frameDrawCount++;
+  }
+
+  void Vegas::dumpDrawCsv() {
+    // Dump draw count history to /sdcard/vegas_drawcount.csv
+    // (Android internal storage, always writable without permissions)
+    FILE* fp = fopen("/sdcard/vegas_drawcount.csv", "w");
+    if (!fp) return;
+
+    fprintf(fp, "frame,drawCount\n");
+    uint32_t h = s_drawHead;
+    for (uint32_t i = 0; i < DRAW_HISTORY_SIZE; i++) {
+      uint32_t idx = (h + i) % DRAW_HISTORY_SIZE;
+      fprintf(fp, "%u,%u\n", i, s_drawHistory[idx]);
+    }
+    fclose(fp);
+    Logger::debug(str::format(
+        "Vegas: draw histogram written to /sdcard/vegas_drawcount.csv (",
+        DRAW_HISTORY_SIZE, " frames)"));
   }
 
 } // namespace dxvk

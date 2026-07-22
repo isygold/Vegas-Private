@@ -316,6 +316,15 @@ namespace dxvk {
     static float               s_lastFrameTime;
     static bool                s_fsrActive;
 
+    // ---- Draw count histogram (per-frame count, circular history, CSV dump) ----
+    static constexpr uint32_t  DRAW_HISTORY_SIZE = 60;
+    static uint32_t            s_drawHistory[DRAW_HISTORY_SIZE];
+    static uint32_t            s_drawHead;
+    static uint32_t            s_frameDrawCount;
+    static uint32_t            s_dumpCounter;
+    static void recordDrawCall();
+    static void dumpDrawCsv();
+
     // DxvkDevice stored for DxvkFence creation (set by initializeProfile)
     static DxvkDevice*         s_dxvkDevice;
 
