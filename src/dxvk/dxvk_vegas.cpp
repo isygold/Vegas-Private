@@ -17,6 +17,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cerrno>
 #include <inttypes.h>
 
 #ifdef _WIN32
@@ -3167,7 +3168,12 @@ namespace dxvk {
     // Production mode (default) overwrites — zero file I/O unless called.
     const char* mode = s_profileActive ? "a" : "w";
     FILE* fp = fopen("/sdcard/vegas_drawcount.csv", mode);
-    if (!fp) return;
+    if (!fp) {
+      Logger::err(str::format(
+        "Vegas: failed to open /sdcard/vegas_drawcount.csv: ",
+        strerror(errno)));
+      return;
+    }
 
     uint32_t h = s_drawHead;
 
