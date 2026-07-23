@@ -3170,7 +3170,7 @@ namespace dxvk {
     FILE* fp = fopen("/sdcard/vegas_drawcount.csv", mode);
     if (!fp) {
       Logger::err(str::format(
-        "Vegas: failed to open /sdcard/vegas_drawcount.csv: ",
+        "Vegas: failed to open /sdcard/vegas_drawcount.csv for writing: ",
         strerror(errno)));
       return;
     }
