@@ -17,6 +17,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <inttypes.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -104,6 +105,8 @@ namespace dxvk {
   uint32_t Vegas::s_drawHead           = 0;
   uint32_t Vegas::s_frameDrawCount     = 0;
   uint32_t Vegas::s_dumpCounter        = 0;
+  bool     Vegas::s_profileActive      = false;
+  uint64_t Vegas::s_profileFrame       = 0;
 
 
   // ============================================================
@@ -457,6 +460,12 @@ namespace dxvk {
     }
 
     s_dxvkDevice = device;
+
+    // Profiling: VEGAS_PROFILE_DRAWS=1 enables append-mode CSV dump
+    // (off by default — zero production impact)
+    s_profileActive = (env::getEnvVar("VEGAS_PROFILE_DRAWS") == "1");
+    if (s_profileActive)
+      Logger::debug("Vegas: draw count profiling active (VEGAS_PROFILE_DRAWS=1)");
 
     // Master switch: dxvk.enableStarProfile
     // Auto  → Adreno detection (current behavior)
@@ -3153,17 +3162,35 @@ namespace dxvk {
   }
 
   void Vegas::dumpDrawCsv() {
-    // Dump draw count history to /sdcard/vegas_drawcount.csv
-    // (Android internal storage, always writable without permissions)
-    FILE* fp = fopen("/sdcard/vegas_drawcount.csv", "w");
+    // Profiling mode (VEGAS_PROFILE_DRAWS=1) appends to the file with
+    // session-relative frame numbers instead of overwriting with ring-buffer indices.
+    // Production mode (default) overwrites — zero file I/O unless called.
+    const char* mode = s_profileActive ? "a" : "w";
+    FILE* fp = fopen("/sdcard/vegas_drawcount.csv", mode);
     if (!fp) return;
 
-    fprintf(fp, "frame,drawCount\n");
     uint32_t h = s_drawHead;
-    for (uint32_t i = 0; i < DRAW_HISTORY_SIZE; i++) {
-      uint32_t idx = (h + i) % DRAW_HISTORY_SIZE;
-      fprintf(fp, "%u,%u\n", i, s_drawHistory[idx]);
+
+    if (s_profileActive) {
+      // Append: write header only on first dump (new file), then
+      // session-relative frame numbers so rows are unique across dumps.
+      if (s_profileFrame == 0)
+        fprintf(fp, "session_frame,drawCount\n");
+      for (uint32_t i = 0; i < DRAW_HISTORY_SIZE; i++) {
+        uint32_t idx = (h + i) % DRAW_HISTORY_SIZE;
+        fprintf(fp, "%" PRIu64 ",%u\n",
+                s_profileFrame + i, s_drawHistory[idx]);
+      }
+      s_profileFrame += DRAW_HISTORY_SIZE;
+    } else {
+      // Production: overwrite with ring-buffer index (0..DRAW_HISTORY_SIZE-1)
+      fprintf(fp, "frame,drawCount\n");
+      for (uint32_t i = 0; i < DRAW_HISTORY_SIZE; i++) {
+        uint32_t idx = (h + i) % DRAW_HISTORY_SIZE;
+        fprintf(fp, "%u,%u\n", i, s_drawHistory[idx]);
+      }
     }
+
     fclose(fp);
     Logger::debug(str::format(
         "Vegas: draw histogram written to /sdcard/vegas_drawcount.csv (",

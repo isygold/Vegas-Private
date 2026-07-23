@@ -322,6 +322,8 @@ namespace dxvk {
     static uint32_t            s_drawHead;
     static uint32_t            s_frameDrawCount;
     static uint32_t            s_dumpCounter;
+    static bool                s_profileActive;
+    static uint64_t            s_profileFrame;
     static void recordDrawCall();
     static void dumpDrawCsv();
 
