@@ -3178,9 +3178,11 @@ namespace dxvk {
     uint32_t h = s_drawHead;
 
     if (s_profileActive) {
-      // Append: write header only on first dump (new file), then
-      // session-relative frame numbers so rows are unique across dumps.
-      if (s_profileFrame == 0)
+      // Append: write header only if file is brand new (empty),
+      // so data from multiple sessions accumulates without duplicate headers.
+      fseek(fp, 0, SEEK_END);
+      bool fileEmpty = (ftell(fp) == 0);
+      if (fileEmpty)
         fprintf(fp, "session_frame,drawCount\n");
       for (uint32_t i = 0; i < DRAW_HISTORY_SIZE; i++) {
         uint32_t idx = (h + i) % DRAW_HISTORY_SIZE;
