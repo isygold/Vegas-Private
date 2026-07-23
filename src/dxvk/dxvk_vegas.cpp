@@ -465,7 +465,7 @@ namespace dxvk {
     // (off by default — zero production impact)
     s_profileActive = (env::getEnvVar("VEGAS_PROFILE_DRAWS") == "1");
     if (s_profileActive)
-      Logger::debug("Vegas: draw count profiling active (VEGAS_PROFILE_DRAWS=1)");
+      Logger::info("Vegas: draw count profiling active (VEGAS_PROFILE_DRAWS=1)");
 
     // Master switch: dxvk.enableStarProfile
     // Auto  → Adreno detection (current behavior)
