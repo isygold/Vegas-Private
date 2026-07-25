@@ -160,32 +160,26 @@ All other parameters (draw thresholds, bind skip, HAAE pacing, quality scaling) 
 
 ## FAQ
 
-**Q: Which emulator frontends are supported?**
-A: Tested on Star Emulator (recommended) and Winlator. Any Android DXVK-based frontend should work. The WCP packages include both DXVK-type and VEGAS-type metadata for compatibility.
+**Q: What is VEGAS?**
+A: VEGAS is a performance fork of DXVK 2.4.1 with GPLAsync async pipeline compilation, specifically tuned for Qualcomm Adreno GPUs on Android emulation (Star Emulator / Winlator). It adds a tier-based auto-tuning engine, FSR 1.0 compute upscaling, motion-compensated frame generation, a TBDR-aware adaptive draw governor, per-game config presets, and automatic crash reports — all behind a single master switch.
 
-**Q: Which Adreno GPUs are supported?**
-A: All Adreno GPUs from 5xx through 8xx are classified into 3 performance tiers. Non-Adreno GPUs (Mali, PowerVR, desktop) will disable VEGAS features and fall back to base DXVK behavior unless `dxvk.enableStarProfile = True` is set.
+**Q: How is VEGAS different from stock DXVK?**
+A: Stock DXVK is designed for desktop GPUs with an immediate-mode renderer. Adreno GPUs are Tile-Based Deferred Renderers (TBDR) — accumulating too many draws before flushing the tile buffer causes catastrophic performance collapse. VEGAS addresses this with a TBDR-inverted governor (lowers draw threshold when CPU-bound, opposite of desktop DXVK), adaptive draw flushing, GPU pacing (HAAE), a tier system that auto-tunes thresholds per GPU capability, and bind-skip optimization.
 
-**Q: What performance improvement should I expect?**
-A: This depends on the game and GPU tier. The primary benefit is elimination of shader compilation stutter (GPLAsync). Secondary benefits include smoother framepacing from the TBDR-aware governor, higher effective resolution from FSR upscaling, and optional frame generation. Exact numbers are game-specific and not yet benchmarked in aggregate.
+**Q: Which GPUs are supported?**
+A: VEGAS targets Qualcomm Adreno GPUs running Turnip Vulkan driver (Mesa 25.x+). Classification: Tier 1 (506-620 — entry), Tier 2 (630-690 — mid), Tier 3 (7xx/8xx — high-end). Non-Adreno GPUs (Mali, PowerVR) work in stock DXVK mode but VEGAS features are disabled unless `dxvk.enableStarProfile = True` is forced.
 
-**Q: How is this different from upstream DXVK or plain GPLAsync?**
-A: VEGAS combines GPLAsync async compilation with VEGAS-specific features: TBDR-inverted governor, tier-based auto-tuning, FSR compute upscaler, frame generation, per-game presets, crash reports, and session tracking. Upstream DXVK has none of these; plain GPLAsync has async compilation only.
+**Q: Where does VEGAS read its config from?**
+A: VEGAS reads `dxvk.conf` from: `DXVK_CONFIG_FILE` environment variable, `/storage/emulated/0/Winlator/`, `/storage/emulated/0/Download/`, or `/storage/emulated/0/`. A default `dxvk.conf` is bundled in the WCP but is **not required** — VEGAS works out of the box. Only create one if you want to override specific behavior.
 
-**Q: How is this different from Star Engine DXVK?**
-A: VEGAS is the active development fork of Star Engine DXVK. This backport branch (`build-fix-2.4.1`) focuses on stability on the DXVK 2.4.1 base. The feature branch (`2.7.4-beta`) contains additional GPU transcoding support on the v2.7.3 base — it's a separate track targeting different use cases.
+**Q: What does the master switch do?**
+A: `dxvk.enableStarProfile` (Auto / True / False): **Auto** (default) enables all VEGAS features on Adreno, disables on non-Adreno. **True** force-enables regardless of GPU. **False** hard-disables every VEGAS feature — the DLL behaves like stock DXVK. Use False as an emergency escape for problematic games.
 
-**Q: What license is this under?**
-A: zlib/libpng license (same as upstream DXVK). You may redistribute and modify freely. No warranty is provided.
+**Q: The game crashes or doesn't launch — what should I try?**
+A: Try in order: (1) `dxvk.enableStarProfile = False` — if the game launches, it's a VEGAS-specific issue. (2) `vegas.forceTier = 1` — conservative thresholds, frame gen disabled. (3) `dxvk.numCompilerThreads = 2` — reduce CPU contention. (4) Check logcat with `DXVK_LOG_LEVEL=debug` for error lines. If the game still crashes with the master switch off, the issue is DXVK/driver compatibility, not VEGAS.
 
-**Q: A game crashed — what do I do?**
-A: Check the game directory for `vegas-<game>.report.json` and `vegas-<game>.issue.md`. The `.issue.md` file is a pre-formatted GitHub issue ready to paste into https://github.com/isygold/vegas-releases/issues — it includes your device info, FPS histogram, and config snapshot. The crash is automatically detected if you relaunch the game.
-
-**Q: I want to tune settings per game. Do I need to edit config files?**
-A: No. VEGAS auto-detects Unity vs non-Unity games and applies appropriate draw thresholds. For manual overrides, you can place a `dxvk.conf` with `vegas.gameConfig = Unity` (or `General`) and any `dxvk.vegas.*` options. The bundled `vegas/dxvk.conf` has the full reference.
-
-**Q: Common install failures?**
-A: If the WCP doesn't install, verify the frontend supports WCP v2 format. For Winlator, use the `dxvk-*` package (DXVK type) rather than the `vegas-*` package (VEGAS type). If DLLs don't load, ensure your Turnip/Mesa driver supports Vulkan 1.3. Set `DXVK_LOG_LEVEL=warn` to reduce log spam, or `debug` for troubleshooting.
+**Q: How do I report a bug?**
+A: Every game session auto-generates `vegas-<game>.report.json` and `vegas-<game>.issue.md` in the game directory. The `.issue.md` is a pre-formatted GitHub issue with device info, FPS histogram, and config snapshot — ready to paste at https://github.com/isygold/vegas-releases/issues. For manual reports, include: Adreno model, driver version, game title, your `dxvk.conf`, full debug logcat output, and reproduction steps.
 
 ---
 
