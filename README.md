@@ -172,6 +172,9 @@ A: VEGAS targets Qualcomm Adreno GPUs running Turnip Vulkan driver (Mesa 25.x+).
 **Q: Where does VEGAS read its config from?**
 A: VEGAS reads `dxvk.conf` from: `DXVK_CONFIG_FILE` environment variable, `/storage/emulated/0/Winlator/`, `/storage/emulated/0/Download/`, or `/storage/emulated/0/`. A default `dxvk.conf` is bundled in the WCP but is **not required** — VEGAS works out of the box. Only create one if you want to override specific behavior.
 
+**Q: What's the difference between the DXVK-type and VEGAS-type WCP packages?**
+A: Each release provides two WCP packages with **identical DLLs** — only the metadata in `profile.json` differs. The `dxvk-2.4.1-vegas-*.wcp` package has type `"DXVK"` for stock Winlator and general Android DXVK use. The `vegas-2.4.1-*.wcp` package has type `"VEGAS"` for Star Emulator's custom WCP installer. Use the DXVK-type package for Winlator and the VEGAS-type package for Star Emulator — the DLLs are the same either way.
+
 **Q: What does the master switch do?**
 A: `dxvk.enableStarProfile` (Auto / True / False): **Auto** (default) enables all VEGAS features on Adreno, disables on non-Adreno. **True** force-enables regardless of GPU. **False** hard-disables every VEGAS feature — the DLL behaves like stock DXVK. Use False as an emergency escape for problematic games.
 
