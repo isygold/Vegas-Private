@@ -378,6 +378,12 @@ namespace dxvk {
     /// Auto-called from device presentImage.
     static void onPresent();
 
+    /// Sanitize an exe name to a safe filename fragment (no .exe, alnum only).
+    static std::string sanitizeGameName(const std::string& exeName);
+
+    /// Build marker/report/issue file paths from the executable name.
+    static void buildSessionPaths();
+
     /// Push frame-timing metrics for HUD consumption.
     static void pushMetrics(
             float                gpuLoad,

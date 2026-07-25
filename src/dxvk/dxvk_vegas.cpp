@@ -3303,7 +3303,7 @@ namespace dxvk {
   // ============================================================
 
   // Helper: sanitize exe name to a safe filename fragment
-  static std::string sanitizeGameName(const std::string& exeName) {
+  std::string Vegas::sanitizeGameName(const std::string& exeName) {
     std::string result = exeName;
     // Remove .exe extension
     if (result.size() > 4 && result.substr(result.size() - 4) == ".exe")
@@ -3317,7 +3317,7 @@ namespace dxvk {
   }
 
   // Helper: build paths from exe name
-  static void buildSessionPaths() {
+  void Vegas::buildSessionPaths() {
     std::string exeName = env::getExeName();
     s_gameName = sanitizeGameName(exeName);
 
@@ -3438,7 +3438,7 @@ namespace dxvk {
     json << "{\n";
     json << "  \"version\": 1,\n";
     json << "  \"game\": \"" << s_gameName << "\",\n";
-    json << "  \"dxvk\": \"" << DXVK_VERSION << "\",\n";
+    json << "  \"dxvk\": \"" << VEGAS_VERSION << "\",\n";
     json << "  \"device\": {\n";
     json << "    \"name\": \"" << (s_dxvkDevice ? s_dxvkDevice->adapter()->deviceProperties().deviceName : "unknown") << "\",\n";
     json << "    \"gpuTier\": " << s_tier << ",\n";
@@ -3476,7 +3476,7 @@ namespace dxvk {
     issue << "## Crash Report: " << s_gameName << "\n\n";
     issue << "### Device\n";
     issue << "- **GPU**: " << (s_dxvkDevice ? s_dxvkDevice->adapter()->deviceProperties().deviceName : "unknown") << "\n";
-    issue << "- **VEGAS**: " << DXVK_VERSION << "\n";
+    issue << "- **VEGAS**: " << VEGAS_VERSION << "\n";
     issue << "- **Tier**: " << s_tier << "\n\n";
     issue << "### Session\n";
     issue << "- **Duration**: " << durationSec << "s\n";
