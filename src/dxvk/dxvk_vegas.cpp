@@ -3063,7 +3063,7 @@ namespace dxvk {
           bool                 fgActive) {
     // Diagnostic: log every 100th call with counter state
     if (s_hudSkip % 100 == 0)
-      Logger::debug(str::format(
+      Logger::info(str::format(
         "Vegas: pushMetrics called (hudSkip=", s_hudSkip,
         " dumpCounter=", s_dumpCounter, ")"));
 
@@ -3176,7 +3176,7 @@ namespace dxvk {
   }
 
   void Vegas::dumpDrawCsv() {
-    Logger::debug("Vegas: dumpDrawCsv entered");
+    Logger::info("Vegas: dumpDrawCsv entered");
     // Profiling mode (VEGAS_PROFILE_DRAWS=1) appends to the file with
     // session-relative frame numbers instead of overwriting with ring-buffer indices.
     // Production mode (default) overwrites — zero file I/O unless called.
