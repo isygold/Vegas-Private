@@ -784,8 +784,10 @@ namespace dxvk {
 
 
   void D3D9SwapChainEx::PresentImage(UINT SyncInterval) {
-    // Vegas: push D3D9 present timing metrics
+    // Vegas: per-present frame tracking + timing metrics
     if (Vegas::isEnabled()) {
+      Vegas::onPresent();  // frame counter + FPS histogram for session reports
+
       auto now = std::chrono::steady_clock::now();
       float frameTime = std::chrono::duration_cast<
         std::chrono::duration<float, std::milli>>(
