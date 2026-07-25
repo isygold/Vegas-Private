@@ -358,6 +358,22 @@ namespace dxvk {
 
 
   HRESULT D3D11SwapChain::PresentImage(UINT SyncInterval) {
+    // Vegas: present timing metrics (runs in d3d11.dll where isEnabled()
+    // and all per-DLL statics are correctly initialized)
+    if (Vegas::isEnabled()) {
+      auto now = std::chrono::steady_clock::now();
+      float frameTime = std::chrono::duration_cast<
+        std::chrono::duration<float, std::milli>>(
+          now - m_lastPresentTime).count();
+      m_lastPresentTime = now;
+      float gpuLoad = (frameTime > 0.001f)
+        ? std::min(frameTime / 16.667f, 1.0f) : 0.0f;
+      Vegas::tuneThreshold(gpuLoad, frameTime);
+      Vegas::pushMetrics(gpuLoad, frameTime,
+        VegasPerformanceState::Normal,
+        Vegas::isFsrActive(), false);
+    }
+
     // Flush pending rendering commands before
     auto immediateContext = m_parent->GetContext();
     immediateContext->EndFrame();

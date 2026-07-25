@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+
 #include "d3d11_texture.h"
 
 #include "../dxvk/hud/dxvk_hud.h"
@@ -124,6 +126,9 @@ namespace dxvk {
     uint32_t                  m_frameLatencyCap = 0;
     HANDLE                    m_frameLatencyEvent = nullptr;
     Rc<sync::CallbackFence>   m_frameLatencySignal;
+
+    // Vegas present timing
+    std::chrono::steady_clock::time_point m_lastPresentTime;
 
     bool                      m_dirty = true;
 
