@@ -120,6 +120,11 @@ namespace dxvk {
       m_cmd->trackDescriptorPool(m_descriptorPool, m_descriptorManager);
       m_descriptorPool = m_descriptorManager->getDescriptorPool();
     }
+    // Vegas: reset per-frame draw counter so each frame starts fresh.
+    // Without this, the counter accumulates across frames, causing
+    // mid-frame flushes in every subsequent frame after the first
+    // threshold hit, which breaks rendering (pop-in, missing text, etc).
+    m_drawsSinceSubmit.store(0, std::memory_order_relaxed);
   }
 
 
@@ -129,6 +134,10 @@ namespace dxvk {
     
     this->beginRecording(
       m_device->createCommandList());
+
+    // Vegas: reset draw counter so shouldFlush doesn't keep firing
+    // on subsequent draws after a threshold-triggered flush.
+    m_drawsSinceSubmit.store(0, std::memory_order_relaxed);
   }
   
   

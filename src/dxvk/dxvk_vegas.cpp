@@ -2,6 +2,7 @@
 #include "dxvk_device.h"
 #include "dxvk_adapter.h"
 #include "../util/config/config.h"
+#include "../util/util_env.h"
 
 #include "star_fsr_spv.h"
 #include "star_fg_spv.h"
@@ -107,6 +108,49 @@ namespace dxvk {
   uint32_t Vegas::s_frameDrawCount     = 0;
   uint32_t Vegas::s_dumpCounter        = 0;
   bool     Vegas::s_profileActive      = false;
+
+  // ============================================================
+  // Per-game config presets
+  // ============================================================
+  // Each preset has per-tier draw thresholds and HAAE thresholds.
+  // The "General" preset is the Ph42oN battle-tested default for
+  // non-Unity games. Unity games typically batch more draws per
+  // frame so they get higher headroom to avoid mid-frame flushes.
+  struct GamePreset {
+    const char* pattern;        // exe name substring (case-insensitive)
+    uint32_t thresholds[3];     // per-tier draw thresholds
+    uint32_t haae[3];           // per-tier HAAE thresholds
+    const char* label;          // friendly name for logging
+  };
+
+  static constexpr GamePreset kGamePresets[] = {
+    // General default (non-Unity) — matches anything
+    { "*",         {100, 200, 350}, {30, 50, 100}, "General" },
+    // Unity Engine — higher batch counts, needs more headroom
+    { "Unity",     {200, 400, 700}, {50, 80, 150}, "Unity" },
+    { "unity",     {200, 400, 700}, {50, 80, 150}, "Unity" },
+  };
+
+  static constexpr size_t kNumGamePresets = sizeof(kGamePresets) / sizeof(kGamePresets[0]);
+
+  // Sentinel: "*" entry index (the general default)
+  static constexpr size_t kGeneralPresetIdx = 0;
+
+  // Returns the index into kGamePresets matching the running game exe name,
+  // or kGeneralPresetIdx if no match found.
+  static size_t VegasMatchGamePreset() {
+    std::string exeName = env::getExeName();
+    if (exeName.empty())
+      return kGeneralPresetIdx;
+
+    for (size_t i = 0; i < kNumGamePresets; i++) {
+      // Skip the general default sentinel
+      if (i == kGeneralPresetIdx) continue;
+      if (exeName.find(kGamePresets[i].pattern) != std::string::npos)
+        return i;
+    }
+    return kGeneralPresetIdx;
+  }
   uint64_t Vegas::s_profileFrame       = 0;
 
 
@@ -189,7 +233,7 @@ namespace dxvk {
           // TBDR-aware: Adreno (tile-based) benefits from EARLIER flushes
           // to avoid tile buffer overflow. Desktop thresholds (600-2000)
           // cause tile thrashing on mobile. Halved for TBDR safety.
-          static constexpr uint32_t defaultThresholds[] = {50, 150, 300};
+          static constexpr uint32_t defaultThresholds[] = {100, 200, 350};
           threshold = (tier >= 1 && tier <= 3) ? defaultThresholds[tier - 1] : 100;
       }
   }
@@ -212,17 +256,17 @@ namespace dxvk {
 
   // VEGAS: Governor-style tiered threshold (AdrenoGovernor logic)
   //
-  // Bleeding-edge tier-aware design:
-  //   - Tier 1 (entry):  conservative 1.5× cap — TBDR tile overflow protection
+  // Per-tier caps (base × multiplier):
+  //   - Tier 1 (entry):  conservative 1.5× cap — avoid mid-frame splits
   //   - Tier 2 (mid):    balanced 2.5× cap
   //   - Tier 3 (high):   aggressive 3.0× cap — high-end can batch deeper
   //   - Resets to base on moderate load to prevent sticky high thresholds
   //   - Low-load path requires sustained frame time > 8 ms (avoids transient spikes)
   void Vegas::tuneThreshold(uint32_t& threshold, float load, float frameTime, uint32_t tier) {
-      // TBDR-aware base thresholds — Adreno tile-based renderers need
-      // frequent flushes to avoid tile buffer overflow. Halved from
-      // desktop values.
-      static constexpr uint32_t baseThresholds[] = { 50, 150, 300 };
+      // TBDR-aware base thresholds — Ph42oN battle-tested values.
+      // Counter resets per-frame in endFrame(), so this is purely a
+      // per-submission cap, not a cumulative accumulator.
+      static constexpr uint32_t baseThresholds[] = { 100, 200, 350 };
       uint32_t base = (tier >= 1 && tier <= 3) ? baseThresholds[tier - 1] : 100;
 
       // Tier-based cap multiplier (TBDR: conservative caps to prevent
@@ -527,13 +571,13 @@ namespace dxvk {
     }
 
     // Bake draw thresholds based on GPU tier (TBDR-aware, D3D11 base).
-    // Adreno/Turnip is tile-based deferred renderer; thresholds must be
-    // low enough that the GPU's tile buffer (~256KB-1MB depending on tier)
-    // doesn't overflow within a single render pass.
-    // Desktop values (600-2000) cause tile thrashing on all mobile GPUs.
-    // Tier 2/3 bumped slightly from original for better throughput on
-    // mid/high-end Adreno while keeping Tier 1 conservative.
-    static constexpr uint32_t drawThresholdTable[] = { 50, 150, 300 };
+    // Values are the Ph42oN GPLAsync battle-tested defaults.  Unity
+    // engine games get higher headroom via the per-game preset system
+    // below.  Adreno/Turnip is tile-based deferred renderer; thresholds
+    // must avoid mid-frame splits (the counter resets per-frame now,
+    // so the threshold acts as a per-submission cap, not a cumulative
+    // trap).  Desktop values (600-2000) flush too late for TBDR.
+    static constexpr uint32_t drawThresholdTable[] = { 100, 200, 350 };
     // HAAE thresholds: Tier 1 (low-end) needs MORE frequent pacing (lower
     // threshold) to prevent tile buffer overflow. Tier 3 (high-end) can
     // batch more before HAAE submission.
@@ -542,6 +586,18 @@ namespace dxvk {
     uint32_t idx = (s_tier >= 1 && s_tier <= 3) ? s_tier - 1 : 0;
     s_drawThreshold = drawThresholdTable[idx];
     s_haaeThreshold = haaeThresholdTable[idx];
+
+    // Apply per-game preset override (detected from exe name)
+    size_t presetIdx = VegasMatchGamePreset();
+    if (presetIdx < kNumGamePresets && presetIdx != kGeneralPresetIdx) {
+      const auto& preset = kGamePresets[presetIdx];
+      s_drawThreshold = preset.thresholds[idx];
+      s_haaeThreshold = preset.haae[idx];
+      Logger::info(str::format(
+          "Vegas: Game preset=\"", preset.label,
+          "\" drawThr=", s_drawThreshold,
+          " haaeThr=", s_haaeThreshold));
+    }
 
     // Log tier, thresholds, and zero-init decision once (not per-shader)
     if (s_enabled) {
