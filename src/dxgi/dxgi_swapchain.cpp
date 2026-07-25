@@ -352,17 +352,19 @@ namespace dxvk {
       std::lock_guard<dxvk::mutex> lockBuf(m_lockBuffer);
 
       // === VEGAS ===
-      auto now = std::chrono::steady_clock::now();
-      float frameTime = std::chrono::duration_cast<
-        std::chrono::duration<float, std::milli>>(
-          now - m_lastPresentTime).count();
-      m_lastPresentTime = now;
-      float gpuLoad = (frameTime > 0.001f)
-        ? std::min(frameTime / 16.667f, 1.0f) : 0.0f;
-      Vegas::tuneThreshold(gpuLoad, frameTime);
-      Vegas::pushMetrics(gpuLoad, frameTime,
-        VegasPerformanceState::Normal,
-        Vegas::isFsrActive(), false);
+      if (Vegas::isEnabled()) {
+        auto now = std::chrono::steady_clock::now();
+        float frameTime = std::chrono::duration_cast<
+          std::chrono::duration<float, std::milli>>(
+            now - m_lastPresentTime).count();
+        m_lastPresentTime = now;
+        float gpuLoad = (frameTime > 0.001f)
+          ? std::min(frameTime / 16.667f, 1.0f) : 0.0f;
+        Vegas::tuneThreshold(gpuLoad, frameTime);
+        Vegas::pushMetrics(gpuLoad, frameTime,
+          VegasPerformanceState::Normal,
+          Vegas::isFsrActive(), false);
+      }
       // === END VEGAS ===
       hr = m_presenter->Present(SyncInterval, PresentFlags, nullptr);
     }
