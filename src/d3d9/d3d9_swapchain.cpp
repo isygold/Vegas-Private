@@ -785,17 +785,15 @@ namespace dxvk {
 
   void D3D9SwapChainEx::PresentImage(UINT SyncInterval) {
     // Vegas: push D3D9 present timing metrics
-    if (Vegas::isEnabled()) {
-      auto now = std::chrono::steady_clock::now();
-      float frameTime = std::chrono::duration_cast<
-        std::chrono::duration<float, std::milli>>(
-          now - m_lastPresentTime).count();
-      m_lastPresentTime = now;
-      float gpuLoad = (frameTime > 0.001f)
-        ? std::min(frameTime / 16.667f, 1.0f) : 0.0f;
-      Vegas::pushMetrics(gpuLoad, frameTime,
-        VegasPerformanceState::Normal, false, false);
-    }
+    auto now = std::chrono::steady_clock::now();
+    float frameTime = std::chrono::duration_cast<
+      std::chrono::duration<float, std::milli>>(
+        now - m_lastPresentTime).count();
+    m_lastPresentTime = now;
+    float gpuLoad = (frameTime > 0.001f)
+      ? std::min(frameTime / 16.667f, 1.0f) : 0.0f;
+    Vegas::pushMetrics(gpuLoad, frameTime,
+      VegasPerformanceState::Normal, false, false);
 
     m_parent->EndFrame();
     m_parent->Flush();
