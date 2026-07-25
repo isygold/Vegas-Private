@@ -19,6 +19,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cerrno>
+#include <chrono>
+#include <fstream>
+#include <sstream>
 #include <inttypes.h>
 
 #ifdef _WIN32
@@ -101,6 +104,19 @@ namespace dxvk {
   float    Vegas::s_lastFrameTime      = 0.0f;
   bool     Vegas::s_fsrActive          = false;
   bool     Vegas::s_fgActive           = false;
+
+  // Session report state
+  bool           Vegas::s_sessionActive     = false;
+  bool           Vegas::s_sessionCrashed    = false;
+  uint64_t       Vegas::s_sessionFrames     = 0;
+  uint32_t       Vegas::s_fpsHistogram[25]  = {};
+  double         Vegas::s_minFps            = 9999.0;
+  int64_t        Vegas::s_sessionStartNs    = 0;
+  int64_t        Vegas::s_lastPresentNs     = 0;
+  std::string    Vegas::s_markerPath;
+  std::string    Vegas::s_reportPath;
+  std::string    Vegas::s_issuePath;
+  std::string    Vegas::s_gameName;
 
   // Draw count histogram
   uint32_t Vegas::s_drawHistory[DRAW_HISTORY_SIZE] = {};
@@ -3273,6 +3289,233 @@ namespace dxvk {
     Logger::debug(str::format(
         "Vegas: draw histogram written to /sdcard/vegas_drawcount.csv (",
         DRAW_HISTORY_SIZE, " frames)"));
+  }
+
+  // ============================================================
+  // Session Report — auto crash detection + report generation
+  // ============================================================
+  // Generates three files in the game directory:
+  //   vegas-<game>.marker.txt   (written at begin, deleted on clean exit)
+  //   vegas-<game>.report.json  (device info + FPS histogram + crash flag)
+  //   vegas-<game>.issue.md     (pre-formatted GitHub issue body)
+  //
+  // Fully automatic — no config file or manual placement required.
+  // ============================================================
+
+  // Helper: sanitize exe name to a safe filename fragment
+  static std::string sanitizeGameName(const std::string& exeName) {
+    std::string result = exeName;
+    // Remove .exe extension
+    if (result.size() > 4 && result.substr(result.size() - 4) == ".exe")
+      result = result.substr(0, result.size() - 4);
+    // Replace non-alphanumeric chars with underscore
+    for (auto& c : result) {
+      if (!std::isalnum(static_cast<unsigned char>(c)))
+        c = '_';
+    }
+    return result;
+  }
+
+  // Helper: build paths from exe name
+  static void buildSessionPaths() {
+    std::string exeName = env::getExeName();
+    s_gameName = sanitizeGameName(exeName);
+
+    // Determine game directory from exe path
+#ifdef _WIN32
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string dir(exePath);
+    size_t sep = dir.find_last_of("\\/");
+    if (sep != std::string::npos)
+      dir = dir.substr(0, sep + 1);
+    else
+      dir = "";
+#else
+    std::string dir = "";
+#endif
+
+    s_markerPath  = dir + "vegas-" + s_gameName + ".marker.txt";
+    s_reportPath  = dir + "vegas-" + s_gameName + ".report.json";
+    s_issuePath   = dir + "vegas-" + s_gameName + ".issue.md";
+  }
+
+  void Vegas::beginSession() {
+    if (s_sessionActive)
+      return;
+
+    buildSessionPaths();
+    s_sessionFrames   = 0;
+    s_sessionCrashed  = false;
+    s_minFps          = 9999.0;
+    std::memset(s_fpsHistogram, 0, sizeof(s_fpsHistogram));
+
+    // Detect prior crash: if marker file exists from last session,
+    // the previous session did not end cleanly.
+    std::ifstream markerCheck(s_markerPath);
+    if (markerCheck.good()) {
+      s_sessionCrashed = true;
+      Logger::info(str::format(
+          "Vegas: detected crash marker (", s_markerPath,
+          ") — previous session did not exit cleanly"));
+    }
+    markerCheck.close();
+
+    // Write fresh marker
+    std::ofstream marker(s_markerPath);
+    if (marker.good()) {
+      marker << "vegas-session-" << std::chrono::steady_clock::now().time_since_epoch().count();
+      marker.close();
+    }
+
+    // Start session timer
+    auto now = std::chrono::steady_clock::now();
+    s_sessionStartNs = now.time_since_epoch().count();
+    s_lastPresentNs  = s_sessionStartNs;
+
+    s_sessionActive = true;
+    Logger::info(str::format(
+        "Vegas: session started (game=", s_gameName,
+        " marker=", s_markerPath,
+        " crashed=", s_sessionCrashed ? "true" : "false"));
+  }
+
+  void Vegas::onPresent() {
+    if (!s_sessionActive)
+      return;
+
+    auto now = std::chrono::steady_clock::now();
+    int64_t nowNs = now.time_since_epoch().count();
+
+    // Compute instant FPS from time since last present
+    int64_t deltaNs = nowNs - s_lastPresentNs;
+    s_lastPresentNs = nowNs;
+
+    if (deltaNs > 0) {
+      double instantFps = 1'000'000'000.0 / static_cast<double>(deltaNs);
+      if (instantFps < s_minFps)
+        s_minFps = instantFps;
+
+      // Bucket into 25-bin histogram (0-120+ FPS, 5 FPS per bin)
+      uint32_t bin = static_cast<uint32_t>(instantFps / 5.0f);
+      if (bin >= 25) bin = 24;
+      s_fpsHistogram[bin]++;
+    }
+
+    s_sessionFrames++;
+  }
+
+  void Vegas::endSession() {
+    if (!s_sessionActive)
+      return;
+
+    s_sessionActive = false;
+
+    // Compute duration and stats
+    auto now = std::chrono::steady_clock::now();
+    int64_t nowNs = now.time_since_epoch().count();
+    double durationSec = static_cast<double>(nowNs - s_sessionStartNs) / 1'000'000'000.0;
+    double avgFps = (durationSec > 0.001) ? static_cast<double>(s_sessionFrames) / durationSec : 0.0;
+
+    // Compute 1st-percentile FPS from histogram
+    uint64_t totalCount = 0;
+    for (auto c : s_fpsHistogram) totalCount += c;
+    uint64_t p1Threshold = (totalCount > 0) ? (totalCount / 100) : 0;
+    double p1Fps = 0.0;
+    if (p1Threshold > 0) {
+      uint64_t accum = 0;
+      for (uint32_t bin = 0; bin < 25; bin++) {
+        accum += s_fpsHistogram[bin];
+        if (accum >= p1Threshold) {
+          p1Fps = static_cast<double>(bin * 5 + 2); // mid of bin
+          break;
+        }
+      }
+    }
+
+    // Build JSON report
+    std::ostringstream json;
+    json << "{\n";
+    json << "  \"version\": 1,\n";
+    json << "  \"game\": \"" << s_gameName << "\",\n";
+    json << "  \"dxvk\": \"" << DXVK_VERSION << "\",\n";
+    json << "  \"device\": {\n";
+    json << "    \"name\": \"" << (s_dxvkDevice ? s_dxvkDevice->adapter()->deviceProperties().deviceName : "unknown") << "\",\n";
+    json << "    \"gpuTier\": " << s_tier << ",\n";
+    json << "    \"gpuArch\": \"TBDR\"\n";
+    json << "  },\n";
+    json << "  \"session\": {\n";
+    json << "    \"durationSec\": " << durationSec << ",\n";
+    json << "    \"totalFrames\": " << s_sessionFrames << ",\n";
+    json << "    \"avgFps\": " << avgFps << ",\n";
+    json << "    \"minFps\": " << s_minFps << ",\n";
+    json << "    \"p1Fps\": " << p1Fps << ",\n";
+    json << "    \"crashed\": " << (s_sessionCrashed ? "true" : "false") << "\n";
+    json << "  },\n";
+    json << "  \"config\": {\n";
+    json << "    \"vegasEnabled\": " << (s_enabled ? "true" : "false") << ",\n";
+    json << "    \"drawThreshold\": " << s_drawThreshold << ",\n";
+    json << "    \"bindSkip\": " << (s_bindSkipEnabled ? "true" : "false") << "\n";
+    json << "  },\n";
+    json << "  \"rating\": null\n";
+    json << "}\n";
+
+    // Write report.json
+    {
+      std::ofstream report(s_reportPath);
+      if (report.good()) {
+        report << json.str();
+        report.close();
+      } else {
+        Logger::warn(str::format("Vegas: failed to write report to ", s_reportPath));
+      }
+    }
+
+    // Build GitHub issue body
+    std::ostringstream issue;
+    issue << "## Crash Report: " << s_gameName << "\n\n";
+    issue << "### Device\n";
+    issue << "- **GPU**: " << (s_dxvkDevice ? s_dxvkDevice->adapter()->deviceProperties().deviceName : "unknown") << "\n";
+    issue << "- **VEGAS**: " << DXVK_VERSION << "\n";
+    issue << "- **Tier**: " << s_tier << "\n\n";
+    issue << "### Session\n";
+    issue << "- **Duration**: " << durationSec << "s\n";
+    issue << "- **Frames**: " << s_sessionFrames << "\n";
+    issue << "- **Avg FPS**: " << avgFps << "\n";
+    issue << "- **P1 FPS**: " << p1Fps << "\n";
+    issue << "- **Crashed**: " << (s_sessionCrashed ? "Yes" : "No") << "\n\n";
+    issue << "### Config\n";
+    issue << "- **VEGAS enabled**: " << (s_enabled ? "Yes" : "No") << "\n";
+    issue << "- **Draw threshold**: " << s_drawThreshold << "\n\n";
+    issue << "---\n\n";
+    issue << "*How was your experience?*  \n";
+    issue << "- [ ] Great — smooth, no issues\n";
+    issue << "- [ ] OK — minor stutter or glitches\n";
+    issue << "- [ ] Poor — frequent issues\n\n";
+    issue << "*Any additional notes:*\n\n";
+    issue << "```\n(paste log output here if available)\n```\n";
+
+    // Write issue.md
+    {
+      std::ofstream issueFile(s_issuePath);
+      if (issueFile.good()) {
+        issueFile << issue.str();
+        issueFile.close();
+      } else {
+        Logger::warn(str::format("Vegas: failed to write issue to ", s_issuePath));
+      }
+    }
+
+    // Clean up marker file
+    if (std::remove(s_markerPath.c_str()) != 0) {
+      Logger::warn(str::format("Vegas: failed to remove marker ", s_markerPath));
+    }
+
+    Logger::info(str::format(
+        "Vegas: session ended (frames=", s_sessionFrames,
+        " avgFps=", avgFps,
+        " crashed=", s_sessionCrashed ? "true" : "false",
+        " report=", s_reportPath));
   }
 
 } // namespace dxvk

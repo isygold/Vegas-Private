@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 #include "dxvk_adapter.h"
 
@@ -343,12 +344,39 @@ namespace dxvk {
 
     static bool                s_fgActive;
 
+    // ---- Session report state ----
+    static bool                s_sessionActive;     ///< true between beginSession/endSession
+    static bool                s_sessionCrashed;    ///< true if marker found at start (prior crash)
+    static uint64_t            s_sessionFrames;     ///< total frames this session
+    static uint32_t            s_fpsHistogram[25];  ///< 25-bin FPS histogram (0-120+, 5 FPS/bin)
+    static double              s_minFps;            ///< minimum instant FPS this session
+    static int64_t             s_sessionStartNs;    ///< steady_clock start in ns
+    static int64_t             s_lastPresentNs;     ///< last Present timestamp in ns
+    static std::string         s_markerPath;        ///< path to crash marker file
+    static std::string         s_reportPath;        ///< path to report.json
+    static std::string         s_issuePath;         ///< path to issue.md
+    static std::string         s_gameName;          ///< sanitized game exe name
+
     /// Ensure the intermediate FSR image (s_fsrInterImage) exists and is
     /// large enough for the given extent. Recreates if dimensions changed.
     /// \returns true on success (image is ready for EASU dispatch).
     static bool ensureFsrIntermediate(
             VkDevice             device,
             VkExtent3D           extent);
+
+    // ---- Session Report (auto crash reports, no manual file placement) ----
+
+    /// Begin a session: write crash marker, detect prior crash.
+    /// Auto-called from DxvkDevice constructor.
+    static void beginSession();
+
+    /// End a session: write report.json + issue.md, clean up marker.
+    /// Auto-called from DxvkDevice destructor.
+    static void endSession();
+
+    /// Called once per Present: counts frames and tracks FPS histogram.
+    /// Auto-called from device presentImage.
+    static void onPresent();
 
     /// Push frame-timing metrics for HUD consumption.
     static void pushMetrics(

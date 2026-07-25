@@ -22,6 +22,8 @@ namespace dxvk {
     m_queues            (queues),
     m_submissionQueue   (this, queueCallback) {
 
+    // Vegas: begin session tracking (crash marker + report)
+    Vegas::beginSession();
   }
   
   
@@ -32,6 +34,9 @@ namespace dxvk {
     // The best we can do is just wait for the Vulkan device to be idle.
     if (this_thread::isInModuleDetachment())
       return;
+
+    // Vegas: end session tracking (write report, clean up marker)
+    Vegas::endSession();
 
     // Wait for all pending Vulkan commands to be
     // executed before we destroy any resources.
@@ -257,6 +262,9 @@ namespace dxvk {
           VkPresentModeKHR          presentMode,
           uint64_t                  frameId,
           DxvkSubmitStatus*         status) {
+    // Vegas: per-present frame tracking for session report
+    Vegas::onPresent();
+
     status->result = VK_NOT_READY;
 
     DxvkPresentInfo presentInfo = { };
