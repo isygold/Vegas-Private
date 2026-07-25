@@ -567,6 +567,13 @@ namespace dxvk {
       device->m_vegasMetrics.initialized = true;
     }
 
+    Logger::info(str::format(
+        "Vegas: isEnabled=", s_enabled ? "true" : "false",
+        " tier=", s_tier,
+        " device=", s_dxvkDevice
+          ? s_dxvkDevice->adapter()->deviceProperties().deviceName
+          : "(null)"));
+
     s_initialized = true;
   }
 
@@ -3054,6 +3061,12 @@ namespace dxvk {
           VegasPerformanceState state,
           bool                 fsrActive,
           bool                 fgActive) {
+    // Diagnostic: log every 100th call with counter state
+    if (s_hudSkip % 100 == 0)
+      Logger::debug(str::format(
+        "Vegas: pushMetrics called (hudSkip=", s_hudSkip,
+        " dumpCounter=", s_dumpCounter, ")"));
+
     // Throttle: only update every 5th call
     s_hudSkip++;
     if (s_hudSkip % 5 != 0)
@@ -3163,6 +3176,7 @@ namespace dxvk {
   }
 
   void Vegas::dumpDrawCsv() {
+    Logger::debug("Vegas: dumpDrawCsv entered");
     // Profiling mode (VEGAS_PROFILE_DRAWS=1) appends to the file with
     // session-relative frame numbers instead of overwriting with ring-buffer indices.
     // Production mode (default) overwrites — zero file I/O unless called.
