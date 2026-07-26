@@ -26,7 +26,9 @@ BCn-to-ASTC transcoder or leegao's DxvkFence timeline semaphore.
    - 3.8  Frame Generation (3-Pass)
    - 3.9  VegaHud Performance Overlay
    - 3.10  GPU Persona & VRAM Masking
-   - 3.11  Performance Analysis & Logging
+   - 3.11  Session Reports (Auto Crash Detection)
+   - 3.12  Per-Game Config Presets
+   - 3.13  Performance Analysis & Logging
 4. [Config Options Reference](#4-config-options)
 5. [Adding a New Feature](#5-adding-a-new-feature)
 6. [Testing Methodology](#6-testing-methodology)
@@ -80,13 +82,14 @@ InitializeProfile(DxvkDevice*)
   -> store VkDevice/VkQueue for FSR/FG
   -> called once from dxvk_vegas.cpp configure()
 
-Per-Frame (PresentBase):
+Per-Frame (D3D11SwapChain::PresentImage / D3D9SwapChainEx::PresentImage):
+  Vegas::onPresent() — frame counter + FPS histogram for session reports
   measure frameTime
   -> compute GPU load from frameTime/target ratio
-  -> analyzePerformance() -> tuneThreshold() -> TBDR-inverted governor
-  -> shouldUpscale() -> FSR dispatch
-  -> needsFrameGen() -> framegenDispatch() if eligible
   -> pushMetrics() -> stores gpuLoad, frameTime, perfState in Vegas statics
+  -> analyzePerformance() -> tuneThreshold() -> TBDR-inverted governor
+  -> shouldUpscale() -> FSR dispatch (cross-DLL safe in d3d11.dll)
+  -> needsFrameGen() -> framegenDispatch() if eligible
 
 Per-Draw (draw/drawIndexed):
   shouldFlush(drawCount) -> spill render pass if over threshold
@@ -126,14 +129,26 @@ Per-Submit (submitCommandList):
 |------|----------------|-----------------------|
 | `src/dxvk/dxvk_context.cpp` | 83-103, 839-862, 949-973 | Draw flush, bindSkip, GPLAsync compat |
 | `src/dxvk/dxvk_context.h` | 830-834 | Vegas profile members |
-| `src/dxvk/dxvk_device.cpp` | 260-264 | VEGAS signature comment |
+| `src/dxvk/dxvk_device.cpp` | 26, 39, 260-266 | beginSession (ctor), endSession (dtor), onPresent (presentImage), VEGAS signature |
 | `src/dxvk/hud/dxvk_hud_item.cpp` | 86-98 | HUD shows "VEGAS" version string |
 
-### DXGI Integration Points
+### D3D11 Integration Points (main present path)
 
 | File | Lines (approx) | What Vegas Does There |
 |------|----------------|-----------------------|
-| `src/dxgi/dxgi_swapchain.cpp` | 348-503 | Frame timing, governor, FSR, framegen, pushMetrics() |
+| `src/d3d11/d3d11_swapchain.cpp` | ~5-25 | Frame timing, governor, FSR, framegen, pushMetrics(), onPresent() — moved here from dxgi.dll after cross-DLL static isolation fix |
+
+### D3D9 Integration Points (secondary present path)
+
+| File | Lines (approx) | What Vegas Does There |
+|------|----------------|-----------------------|
+| `src/d3d9/d3d9_swapchain.cpp` | ~786-798 | pushMetrics(), onPresent() — live code (d3d9.dll initializes its own statics) |
+
+### DXGI Integration Points (vestigial — dead code, no DxvkContext created)
+
+| File | Lines (approx) | What Vegas Does There |
+|------|----------------|-----------------------|
+| `src/dxgi/dxgi_swapchain.cpp` | 355-366 | isEnabled() guard always returns false (dxgi.dll has no DxvkContext → no initializeProfile → s_enabled stays false). Not removed for safety — guard prevents any effect. |
 
 ### SPIR-V Shaders
 
@@ -188,20 +203,25 @@ shadow-map) are compiled synchronously.
 | Function | Lines | Purpose |
 |----------|-------|---------|
 | `classifyAdrenoTier(const char* deviceName)` | 89-122 | Parses device name into tier 1/2/3 |
-| `Vegas::configure()` | 450-560 | Master init: classify tier, bake thresholds |
+| `Vegas::initializeProfile()` | ~515-630 | Master init: classify tier, bake thresholds, apply game presets |
 | `Vegas::getTier()` | ~560 | Returns `s_tier` |
 
 **Tier Mapping:**
 
 | Condition | Tier | Draw Threshold | HAAE Threshold | Cap Multiplier |
 |-----------|------|----------------|----------------|----------------|
-| gen <= 5, or 6xx < 620 | 1 (entry) | 50 | 30 | 1.5x |
-| 6xx 620-689, or 7xx < 730 | 2 (mid) | 150 | 50 | 1.8x |
-| 690+, 7xx >= 730, or 8xx+ | 3 (high) | 300 | 100 | 2.5x |
+| gen <= 5, or 6xx < 620 | 1 (entry) | 100 | 30 | 1.5x |
+| 6xx 620-689, or 7xx < 730 | 2 (mid) | 200 | 50 | 1.8x |
+| 690+, 7xx >= 730, or 8xx+ | 3 (high) | 350 | 100 | 2.5x |
 
 **Config override:** `vegas.forceTier = 0` (auto), `1`/`2`/`3` (manual)
 
-**D3D9 override:** Higher thresholds for D3D9 games: `{300, 500, 800}`.
+**Per-game presets override base thresholds:**
+- Unity engine games → `{200, 400, 700}` auto-detected from exe name
+- General (non-Unity) → `{100, 200, 350}` Ph42oN battle-tested defaults
+- Config override: `vegas.gameConfig = Unity` / `General` / `Auto`
+
+**Thresholds are Ph42oN GPLAsync battle-tested defaults** — restored after the `m_drawsSinceSubmit` root cause fix. With the counter now resetting per frame, these are true per-submission caps, not cumulative traps.
 
 ---
 
@@ -222,9 +242,9 @@ else                                        -> base (balanced, reset)
 ```
 
 **Cap Multipliers (C2 re-tune):**
-- Tier 1: 1.5x (50 -> 75 max)
-- Tier 2: 1.8x (150 -> 270 max)
-- Tier 3: 2.5x (300 -> 750 max)
+- Tier 1: 1.5x (100 -> 150 max)
+- Tier 2: 1.8x (200 -> 360 max)
+- Tier 3: 2.5x (350 -> 875 max)
 
 **Floor (CPU-bound flush):** `max(50, base / 2)`
 
@@ -290,7 +310,7 @@ the draw call path.
 | `Vegas::shouldUpscale()` | ~570 | Resolves Tristate + extent check |
 | `initFsrPipeline(VkDevice)` | ~1000-1200 | Creates FSR compute pipeline |
 
-**Called from:** `src/dxgi/dxgi_swapchain.cpp` (PresentBase)
+**Called from:** `src/d3d11/d3d11_swapchain.cpp` (PresentImage) — cross-DLL safe in d3d11.dll
 
 **Behavior:**
 - Upscales when swapchain extent > render extent
@@ -348,9 +368,10 @@ call via `thread_local s_hudSkip` counter. HUD updates at ~12fps instead of
 
 **Data flow:**
 ```
-dxgi_swapchain.cpp:PresentBase
+d3d11_swapchain.cpp:PresentImage  (D3D11 games)
+d3d9_swapchain.cpp:PresentImage   (D3D9 games)
   -> Vegas::pushMetrics(gpuLoad, frameTime, perfState, ...)
-    -> writes to Vegas static members (every 5th call)
+    -> writes to Vegas static members (every 5th call, frame-skip C3)
 
 hud/dxvk_hud_item.cpp
   -> reads Vegas static members for HUD display
@@ -380,7 +401,65 @@ hud/dxvk_hud_item.cpp
 
 ---
 
-### 3.11 Performance Analysis & Logging
+### 3.11 Session Reports (Auto Crash Detection)
+
+**Files:** `src/dxvk/dxvk_vegas.cpp`, `src/dxvk/dxvk_vegas.h`
+
+**Functions:**
+
+| Function | Purpose |
+|----------|---------|
+| `Vegas::beginSession()` | Write crash marker, detect prior crash, capture device info, start timer |
+| `Vegas::endSession()` | Compute FPS p1/avg from 25-bin histogram, write JSON + issue.md, clean marker |
+| `Vegas::onPresent()` | Frame counter, instant FPS → histogram update |
+
+**Integration:**
+- `DxvkDevice` ctor → `beginSession()` (runs in both d3d11.dll and d3d9.dll)
+- `DxvkDevice` dtor → `endSession()`
+- `DxvkDevice::presentImage()` → `onPresent()` (D3D11 path)
+- `D3D9SwapChainEx::PresentImage()` → `onPresent()` (D3D9 path — commit `61f8919`)
+
+**Three files auto-generated in game directory:**
+- `vegas-<game>.marker.txt` — written at start, deleted on clean exit
+- `vegas-<game>.report.json` — FPS histogram, device info, config snapshot, crash flag
+- `vegas-<game>.issue.md` — pre-formatted GitHub issue body
+
+**Crash detection:** Orphaned marker found at launch → `crashed=true` in report.
+Detects: game crash, power loss, force-kill, driver hang.
+
+### 3.12 Per-Game Config Presets
+
+**File:** `src/dxvk/dxvk_vegas.cpp`
+
+**Functions:**
+
+| Function | Purpose |
+|----------|---------|
+| `VegasMatchGamePreset()` | Compares `env::getExeName()` against preset patterns |
+
+**Structure:**
+
+```cpp
+struct GamePreset {
+  const char* label;       // Display name
+  const char* pattern;     // Exe name substring to match
+  uint32_t thresholds[3];  // Draw thresholds per tier
+  uint32_t haae[3];        // HAAE thresholds per tier
+  int32_t forceTier;       // Or 0 for auto
+};
+```
+
+**Preset table:**
+
+| Pattern | Label | Thresholds | HAAE |
+|---------|-------|-----------|------|
+| `""` (catch-all) | General | {100, 200, 350} | {30, 50, 100} |
+| `"Unity"` | Unity | {200, 400, 700} | {60, 100, 200} |
+
+Applied during `initializeProfile()` — overrides the tier-based defaults.
+Config override: `vegas.gameConfig = Unity` / `General` / `Auto`.
+
+### 3.13 Performance Analysis & Logging
 
 **File:** `src/dxvk/dxvk_vegas.cpp`
 
@@ -416,6 +495,7 @@ else   -> 0.25 (lots of headroom)
 | `dxvk.gplAsyncCache` | bool | false | `dxvk_options.h:31` | GPL state cache with fixes |
 | `dxvk.enableStarProfile` | Tristate | Auto | `dxvk_options.h:52` | Master switch for VEGAS features |
 | `vegas.forceTier` | int32 | 0 | `dxvk_options.h:55` | Override GPU tier detection |
+| `vegas.gameConfig` | string | Auto | `dxvk_options.h:58` | Per-game preset: Auto, Unity, General |
 | `dxvk.enableGraphicsPipelineLibrary` | Tristate | Auto | `dxvk_options.h:23` | Vulkan GPL support |
 | `dxvk.numCompilerThreads` | int32 | 0 | `dxvk_options.h:20` | Override compiler thread count |
 
@@ -425,6 +505,8 @@ else   -> 0.25 (lots of headroom)
 | `DXVK_ASYNC=0` | Disable async compilation (overrides `dxvk.enableAsync`) |
 | `DXVK_GPLASYNCCACHE=1` | Enable GPL state cache (overrides `dxvk.gplAsyncCache`) |
 | `DXVK_HUD=...` | Standard DXVK HUD configuration |
+| `VEGAS_GAME_CONFIG=Unity` | Force Unity preset (overrides `vegas.gameConfig`) |
+| `VEGAS_GAME_CONFIG=General` | Force General preset |
 
 ---
 
@@ -517,10 +599,12 @@ adb logcat -s "DXVK" | grep -E "Vegas:|GetImage|tuneThreshold|compiler"
 - `dxvk.enableStarProfile` — VEGAS master switch
 - `vegas.*` — VEGAS-specific options (tier override, etc.)
 
-### "Low thresholds are intentional"
-- Draw thresholds are {50, 150, 300} (not {100, 200, 350}) to fix 2D game
-  pop-in/missing sprites. This does NOT affect rendering correctness — every
-  draw call still renders, just with more frequent flushes.
+### "Thresholds are Ph42oN battle-tested defaults"
+- Draw thresholds are {100, 200, 350} — restored to Ph42oN GPLAsync originals after
+  the m_drawsSinceSubmit root cause fix. Previously lowered to {50,150,300} which
+  masked the true bug (counter never resetting). With the counter now resetting
+  per frame, {100,200,350} are true per-submission caps. Unity games get
+  {200,400,700} via game preset system.
 
 ---
 

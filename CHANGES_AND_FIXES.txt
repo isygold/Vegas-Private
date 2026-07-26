@@ -3,7 +3,7 @@
   Game Stability & Performance on Adreno GPUs (Turnip Driver)
 ═══════════════════════════════════════════════════════════════
 
-Last updated: 2026-06-05  |  Branch: vegas  |  Commit: 5b7bcd5
+Last updated: 2026-07-26  |  Branch: build-fix-2.4.1  |  Commit: 61f8919
 
 ───────────────────────────────────────────────────────────────
 TABLE OF CONTENTS
@@ -394,3 +394,181 @@ ROLLBACK GUIDE
     git revert 1346828   # Revert swapchain fix
 
 ═══════════════════════════════════════════════════════════════
+
+
+┌─────────────────────────────────────────────────────────────┐
+│  9. DRAW COUNTER RESET  —  Root cause: text pop-in /       │
+│     black cutscenes / missing geometry across all games     │
+└─────────────────────────────────────────────────────────────┘
+
+  Problem:
+    m_drawsSinceSubmit (dxvk_context.h:1421) initialized to 0 at
+    declaration, but NEVER reset after the first flush. After
+    threshold was hit once, every subsequent frame started with
+    a non-zero counter, meaning every single draw call triggered
+    a full flushCommandList → frames shattered into per-draw
+    submissions. Caused text pop-in, black cutscene transitions,
+    and object popping across all games.
+
+  Root cause (commit d609f7e — threshold change only masked it):
+    ─────────────────────────────────────────────────────
+    m_drawsSinceSubmit.store(0) was never called anywhere.
+    ─────────────────────────────────────────────────────
+    The counter declaration at dxvk_context.h:1421:
+      std::atomic<uint32_t> m_drawsSinceSubmit{0};
+    Only the initial value was zeroed. After first threshold hit:
+      1) Draw accumulates past threshold
+      2) flushCommandList() called — counter NOT reset
+      3) Next frame: counter starts at N (not 0)
+      4) Every subsequent draw triggers flush → frame shattering
+
+  Fix (commit c4cb43c):
+    ─────────────────────────────────────────────────────
+    Two store(0) calls added in dxvk_context.cpp:
+      • flushCommandList()  → m_drawsSinceSubmit.store(0) at end
+      • endFrame()          → m_drawsSinceSubmit.store(0) at end
+    ─────────────────────────────────────────────────────
+    Each frame now starts with a clean counter. The threshold
+    acts as a per-submission cap, not a cumulative trap.
+
+  Verification:
+    All games: text renders, cutscenes play, objects visible.
+    Framepacing smooth — no more mid-frame splits.
+
+  ─────────────────────────────────────────────────────────────
+  │  RELATES TO: Sections 5 (Governor), 7 (Tier Classification)│
+  │  The threshold values now actually matter — with the       │
+  │  counter resetting per frame, {100,200,350} is the true    │
+  │  per-submission cap. Previously values were meaningless    │
+  │  because the counter was always past threshold.            │
+  ─────────────────────────────────────────────────────────────
+
+
+┌─────────────────────────────────────────────────────────────┐
+│  10. THRESHOLDS RESTORED  —  Back to Ph42oN originals       │
+└─────────────────────────────────────────────────────────────┘
+
+  Problem:
+    Commit d609f7e lowered all three threshold arrays from
+    {100,200,350} to {50,150,300} to fix Hollow Knight pop-in.
+    This was treating the symptom (HK needed lower thresholds)
+    when the root cause was the non-resetting counter (Section
+    9). With the counter now properly resetting, the lowered
+    thresholds became dangerously small — HK didn't need them,
+    and other games would flush too aggressively.
+
+  Fix (commit c4cb43c):
+    ─────────────────────────────────────────────────────
+    All three arrays restored to Ph42oN battle-tested defaults:
+      defaultThresholds[]   = {100, 200, 350}
+      baseThresholds[]      = {100, 200, 350}
+      drawThresholdTable[]  = {100, 200, 350}
+    ─────────────────────────────────────────────────────
+
+  Impact:
+    • 2D games (HK): still fine (100 is still low enough)
+    • 3D games: no regression (350 max is Ph42oN-proven)
+    • Unity games: get {200,400,700} via game presets (Section 11)
+
+
+┌─────────────────────────────────────────────────────────────┐
+│  11. PER-GAME CONFIG PRESETS  —  Auto-detected from exe     │
+└─────────────────────────────────────────────────────────────┘
+
+  Problem:
+    Unity engine games issue more draw calls per frame than
+    non-Unity games (UI panels, 2D sprites, particle systems).
+    A single threshold table couldn't serve both well.
+
+  Fix (commit c4cb43c):
+    ─────────────────────────────────────────────────────
+    Added GamePreset struct + lookup table:
+      Unity  → thresholds {200, 400, 700}  HAAE {60, 100, 200}
+      General → thresholds {100, 200, 350} HAAE {30, 50, 100}
+    Auto-detected via env::getExeName() substring matching.
+    ─────────────────────────────────────────────────────
+
+  Config override:
+    vegas.gameConfig = Unity    # Force Unity preset
+    vegas.gameConfig = General  # Force General preset
+
+  Files:
+    • src/dxvk/dxvk_vegas.cpp  — VegasMatchGamePreset(), preset table
+    • src/dxvk/dxvk_vegas.h    — GamePreset struct
+    • dxvk.conf / vegas/dxvk.conf — documented
+
+
+┌─────────────────────────────────────────────────────────────┐
+│  12. SESSION REPORTS  —  Auto crash detection +            │
+│      JSON report + GitHub issue generation                   │
+└─────────────────────────────────────────────────────────────┘
+
+  Problem:
+    Users experiencing crashes had no way to submit device info
+    or FPS data. Every bug report required manual logcat
+    collection and device info transcription.
+
+  Fix (commit c4cb43c, ported from Sarek branch):
+    ─────────────────────────────────────────────────────
+    Three files auto-generated in game directory:
+      vegas-<game>.marker.txt   — written at start, deleted on
+                                  clean exit (crash detection)
+      vegas-<game>.report.json  — FPS histogram, device info,
+                                  config snapshot, crash flag
+      vegas-<game>.issue.md     — pre-formatted GitHub issue
+    ─────────────────────────────────────────────────────
+
+  Functions added:
+    • Vegas::beginSession()  — marker write, crash detection,
+                               device info capture, timer start
+    • Vegas::endSession()    — FPS p1/avg from histogram,
+                               JSON writer, issue writer,
+                               marker cleanup
+    • Vegas::onPresent()     — per-present frame counter,
+                               instant FPS → 25-bin histogram
+                               (0-120+ FPS, 5 FPS/bin)
+
+  Integration points:
+    • dxvk_device.cpp ctor        → Vegas::beginSession()
+    • dxvk_device.cpp dtor        → Vegas::endSession()
+    • dxvk_device::presentImage() → Vegas::onPresent()
+    • d3d9_swapchain::PresentImage → Vegas::onPresent() (D3D9 fix)
+
+  Crash detection:
+    Marker file written at beginSession() → deleted at endSession().
+    If orphaned marker found at next launch → crashed=true in report.
+    Detects: game crash, power loss, force-kill, driver hang.
+
+
+┌─────────────────────────────────────────────────────────────┐
+│  13. D3D9 SWAPCHAIN — Vegas::onPresent() was never called  │
+│       on D3D9 games                                          │
+└─────────────────────────────────────────────────────────────┘
+
+  Problem:
+    Vegas::onPresent() was hooked in DxvkDevice::presentImage()
+    (line 266 of dxvk_device.cpp). The D3D9 swapchain does its
+    own Vulkan presentation directly in
+    D3D9SwapChainEx::PresentImage() — it never calls
+    DxvkDevice::presentImage(). So session report frame
+    counting and FPS histogram never fired for D3D9 games.
+
+  Note (incorrect prior assumption corrected):
+    Earlier analysis claimed d3d9.dll's Vegas statics were
+    uninitialized (same issue as dxgi.dll). This was WRONG.
+    d3d9.dll creates a DxvkContext at d3d9_device.cpp:57,
+    which calls initializeProfile(). So isEnabled() returns
+    true, pushMetrics() was live code. The only dead path
+    was onPresent().
+
+  Fix (commit 61f8919):
+    ─────────────────────────────────────────────────────
+    Added Vegas::onPresent() call in D3D9SwapChainEx::
+    PresentImage() (d3d9_swapchain.cpp:789) alongside the
+    existing pushMetrics call.
+    ─────────────────────────────────────────────────────
+
+  Impact:
+    D3D9 games (Source engine, ID Tech, etc.) now get proper
+    session tracking — frame count, FPS histogram, and
+    duration in vegas-*.report.json.
