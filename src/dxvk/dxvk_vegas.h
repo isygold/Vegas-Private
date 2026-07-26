@@ -49,6 +49,23 @@ namespace dxvk {
   class DxvkFence;
   class DxvkDevice;
 
+  /**
+   * \brief Per-game config preset
+   *
+   * Auto-detected from the executable name by VegasMatchGamePreset().
+   * Overrides the tier-based defaults with game-specific thresholds.
+   */
+  struct GamePreset {
+    const char* label;          ///< Display name for logging
+    const char* pattern;        ///< Substring to match against exe name
+    uint32_t thresholds[3];     ///< Draw thresholds per tier
+    uint32_t haae[3];           ///< HAAE thresholds per tier
+    int32_t  forceTier;         ///< Force tier override, or 0 for auto
+  };
+
+  /// Match exe name against preset table. Returns index or kNumGamePresets.
+  size_t VegasMatchGamePreset();
+
   class Vegas {
 
   public:

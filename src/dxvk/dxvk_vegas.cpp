@@ -32,6 +32,33 @@
 namespace dxvk {
 
   // ============================================================
+  // Per-game config presets — auto-detected from executable name
+  // ============================================================
+
+  /// Index of the catch-all "General" preset
+  static constexpr size_t kGeneralPresetIdx = 0;
+
+  /// Built-in preset table. First entry is the catch-all General preset.
+  static constexpr GamePreset kGamePresets[] = {
+    { "General", "",          {100, 200, 350}, {30, 50, 100},  0 },
+    { "Unity",   "Unity",     {200, 400, 700}, {60, 100, 200}, 0 },
+  };
+
+  static constexpr size_t kNumGamePresets =
+      sizeof(kGamePresets) / sizeof(kGamePresets[0]);
+
+  size_t VegasMatchGamePreset() {
+    std::string exeName = env::getExeName();
+    for (size_t i = 0; i < kNumGamePresets; i++) {
+      if (kGamePresets[i].pattern[0] == '\0')
+        continue; // skip General (catch-all)
+      if (exeName.find(kGamePresets[i].pattern) != std::string::npos)
+        return i;
+    }
+    return kGeneralPresetIdx; // fall back to General
+  }
+
+  // ============================================================
   // Baked state — all values determined by initializeProfile()
   // ============================================================
   bool     Vegas::s_initialized    = false;
@@ -1038,6 +1065,18 @@ namespace dxvk {
     uint32_t idx = (s_tier >= 1 && s_tier <= 3) ? s_tier - 1 : 0;
     s_drawThreshold = drawThresholdTable[idx];
     s_haaeThreshold = haaeThresholdTable[idx];
+
+    // Apply per-game preset override (detected from exe name)
+    size_t presetIdx = VegasMatchGamePreset();
+    if (presetIdx < kNumGamePresets && presetIdx != kGeneralPresetIdx) {
+      const auto& preset = kGamePresets[presetIdx];
+      s_drawThreshold = preset.thresholds[idx];
+      s_haaeThreshold = preset.haae[idx];
+      Logger::info(str::format(
+          "Vegas: Game preset=\"", preset.label,
+          "\" drawThr=", s_drawThreshold,
+          " haaeThr=", s_haaeThreshold));
+    }
 
     // Log tier, thresholds, and zero-init decision once (not per-shader)
     if (s_enabled) {
