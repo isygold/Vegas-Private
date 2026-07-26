@@ -192,6 +192,7 @@ A: Every game session auto-generates `vegas-<game>.report.json` and `vegas-<game
 - **Base Project:** DXVK v2.4.1 by doitsujin
 - **GPLAsync Patch:** Ph42oN (dxvk-gplasync v2.4-1), ishitatsuyuki (upstream GPLAsync)
 - **FSR 1.0:** AMD GPUOpen (EASU compute shader)
+- **Testing & Feedback:** @H0tIce77 — consistent Adreno device testing and detailed logs since Star Engine DXVK 2.7.2.1
 - **License:** zlib/libpng
 
 ---

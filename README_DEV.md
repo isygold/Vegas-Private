@@ -644,8 +644,9 @@ The GPLAsync patch for DXVK 2.4 was created by **Ph42oN**
 - **Lead Developer:** isygold
 - **Base Project:** DXVK v2.4.1 by doitsujin
 - **FSR 1.0:** AMD GPUOpen (EASU compute shader)
+- **Testing & Feedback:** @H0tIce77 — consistent Adreno device testing and detailed logs since Star Engine DXVK 2.7.2.1
 - **License:** zlib/libpng
 
 ---
 
-*Last updated: 2026-07-22 | Branch: build-fix-2.4.1*
+*Last updated: 2026-07-26 | Branch: build-fix-2.4.1*
