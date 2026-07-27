@@ -555,12 +555,6 @@ namespace dxvk {
       VkImageUsageFlags     usage,
       VkExtent3D            extent,
       const Rc<DxvkAdapter>& adapter) {
-    // Tier gate: only transcode on mid/high-end Adreno (Tier 2+).
-    // Tier 1 (Adreno 5xx, 6xx < 620) has limited compute budget and
-    // Wrapper driver ASTC support is unreliable — skip entirely.
-    if (!Vegas::isEnabled() || Vegas::getTier() < 2)
-      return VK_FORMAT_UNDEFINED;
-
     if (usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
                  VK_IMAGE_USAGE_STORAGE_BIT))
