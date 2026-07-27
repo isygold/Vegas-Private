@@ -367,6 +367,7 @@ namespace dxvk {
     static uint64_t            s_tcEncodeDescLayout;    ///< VkDescriptorSetLayout
     static uint64_t            s_tcDescPool;            ///< VkDescriptorPool
     static bool                s_tcInitialized;
+    static bool                s_tcAvailable;       ///< set when GPU transcoder pipeline init succeeded
     // Transcoder LUT SSBOs (persistent, filled once at init)
     static uint64_t            s_tcLut2Buffer;          ///< VkBuffer (lut2_packed)
     static uint64_t            s_tcLut2Memory;          ///< VkDeviceMemory

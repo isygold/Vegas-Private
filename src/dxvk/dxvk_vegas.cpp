@@ -114,6 +114,7 @@ namespace dxvk {
   uint64_t Vegas::s_tcEncodeDescLayout     = 0;
   uint64_t Vegas::s_tcDescPool             = 0;
   bool     Vegas::s_tcInitialized          = false;
+  bool     Vegas::s_tcAvailable            = false;
   uint64_t Vegas::s_tcLut2Buffer           = 0;
   uint64_t Vegas::s_tcLut2Memory           = 0;
   uint64_t Vegas::s_tcLutS2Buffer          = 0;
@@ -556,14 +557,17 @@ namespace dxvk {
       VkExtent3D            extent,
       const Rc<DxvkAdapter>& adapter) {
     // Gate: only swap formats when Vegas is fully active AND the
-    // device handles are available.  Without this guard, setting
-    // dxvk.enableStarProfile = False would still swap BCn→ASTC in
-    // createImage() while the transcoder (which needs s_device) is
-    // disabled, producing ASTC images with raw BCn data — guaranteed
-    // GPU hang on any device that samples the corrupted texture.
+    // device handles AND the GPU transcoder are all available.  Without
+    // this guard, setting dxvk.enableStarProfile = False would still
+    // swap BCn→ASTC in createImage() while the transcoder is disabled,
+    // producing ASTC images with raw BCn data — guaranteed GPU hang.
+    // Similarly, on Windows/Wine where loadVulkanFuncs can't work, the
+    // transcoder is unavailable and format swap must be skipped.
     if (!isEnabled())
       return VK_FORMAT_UNDEFINED;
     if (s_device == nullptr)
+      return VK_FORMAT_UNDEFINED;
+    if (!s_tcAvailable)
       return VK_FORMAT_UNDEFINED;
 
     if (usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
@@ -1106,6 +1110,16 @@ namespace dxvk {
 
     s_device          = reinterpret_cast<void*>(device->handle());
     s_physicalDevice  = reinterpret_cast<uint64_t>(device->adapter()->handle());
+
+    // Eager GPU transcoder init: check availability before any texture is created.
+    // On Windows/Wine, loadVulkanFuncs returns false (no dlopen), so s_tcAvailable
+    // stays false and shouldTranscodeFormat will skip the format swap — correct,
+    // because the GPU transcoder can't run there.
+    if (s_enabled && s_device != nullptr) {
+      VkDevice vkDev = reinterpret_cast<VkDevice>(s_device);
+      if (loadVulkanFuncs(vkDev) && initTranscoderPipeline(vkDev))
+        s_tcAvailable = true;
+    }
 
     // Store tier in shared DxvkDevice metrics for cross-DLL access
     if (device != nullptr) {
@@ -1869,6 +1883,7 @@ namespace dxvk {
     Vegas::s_tcLutS2Buffer          = reinterpret_cast<uint64_t>(lutS2Buffer);
     Vegas::s_tcLutS2Memory          = reinterpret_cast<uint64_t>(lutS2Memory);
     Vegas::s_tcInitialized          = true;
+    Vegas::s_tcAvailable            = true;
 
     Logger::debug("Vegas TC: GPU transcoder pipelines initialized");
     return true;
@@ -2028,6 +2043,7 @@ namespace dxvk {
     // ================================================================
     // Lazy init
     // ================================================================
+    Logger::debug("Vegas TC: lazy init starting");
     if (!loadVulkanFuncs(device)) {
       Logger::debug("Vegas TC: Vulkan functions not available");
       return false;
@@ -2036,6 +2052,7 @@ namespace dxvk {
       Logger::debug("Vegas TC: pipeline init failed");
       return false;
     }
+    Logger::debug("Vegas TC: lazy init OK");
     if (!ensureTcScratch(device, width, height)) {
       Logger::debug("Vegas TC: scratch buffer creation failed");
       return false;
