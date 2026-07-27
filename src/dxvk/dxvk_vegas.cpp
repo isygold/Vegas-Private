@@ -555,6 +555,17 @@ namespace dxvk {
       VkImageUsageFlags     usage,
       VkExtent3D            extent,
       const Rc<DxvkAdapter>& adapter) {
+    // Gate: only swap formats when Vegas is fully active AND the
+    // device handles are available.  Without this guard, setting
+    // dxvk.enableStarProfile = False would still swap BCn→ASTC in
+    // createImage() while the transcoder (which needs s_device) is
+    // disabled, producing ASTC images with raw BCn data — guaranteed
+    // GPU hang on any device that samples the corrupted texture.
+    if (!isEnabled())
+      return VK_FORMAT_UNDEFINED;
+    if (s_device == nullptr)
+      return VK_FORMAT_UNDEFINED;
+
     if (usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
                  VK_IMAGE_USAGE_STORAGE_BIT))
