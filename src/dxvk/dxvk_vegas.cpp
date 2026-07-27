@@ -169,6 +169,11 @@ namespace dxvk {
   }
   uint64_t Vegas::s_profileFrame       = 0;
 
+  // Adaptive proportional governor state
+  uint32_t Vegas::s_targetFlushesPerFrame = 4;
+  uint32_t Vegas::s_frameDrawHistory[5]   = {0, 0, 0, 0, 0};
+  uint32_t Vegas::s_frameDrawHead         = 0;
+  bool     Vegas::s_adaptiveInitialized   = false;
 
   // ============================================================
   // Adreno GPU tier classifier — replaces opaque upstream
@@ -319,34 +324,127 @@ namespace dxvk {
       }
   }
 
-  // Self-contained overload — delegates to the 4-arg form with internal state.
-  // Applies EMA smoothing and cooldown to prevent oscillation.
-  void Vegas::tuneThreshold(float load, float frameTime) {
-      // 1. EMA smoothing — dampen frame-time jitter
-      thread_local float s_smoothFt = 16.6f;
-      s_smoothFt = s_smoothFt * 0.9f + frameTime * 0.1f;
+  // Adaptive proportional governor.
+  //
+  // Core principle: threshold = drawsThisFrame / targetFlushesPerFrame
+  //
+  // This is PROPORTIONAL — it instantly adapts to any game's draw profile:
+  //   15 draws/frame × 4 flushes → threshold = 3
+  //   80 draws/frame × 4 flushes → threshold = 20
+  //   6800 draws/frame × 4 flushes → threshold = 1700
+  //
+  // targetFlushesPerFrame (range 2-12) is tuned by GPU load feedback:
+  //   - GPU > 80% and frame time stable → decrement target (fewer flushes, more batching)
+  //   - GPU < 40% and draws are high → HOLD target (CPU/Wrapper bound — more flushes won't help)
+  //   - Frame time spike (delta > 1.5× target) → increment target temporarily (more flushes,
+  //     less tile overflow risk)
+  //
+  // Scene-change guard: if drawsThisFrame deviates > 3× from the running 5-frame
+  // average, skip tuning that frame to prevent transient spikes from destabilizing
+  // targetFlushesPerFrame.
+  void Vegas::adaptiveTune(float load, float frameTime) {
+    // ---- EMA smoothing for frame time ----
+    thread_local float s_smoothFt = 16.6f;
+    s_smoothFt = s_smoothFt * 0.9f + frameTime * 0.1f;
 
-      // 2. Adaptive frame-count cooldown — re-evaluate at most once every
-      //    ceil(frameTime_ms / 3.33) frames (~5 frames at 60 FPS, ~10
-      //    frames at 30 FPS).  Using frameTime × 2 would be ~33 frames at
-      //    60 FPS — far too slow to prevent hitching on mobile.
-      //    Clamped to [5, 30] to avoid oscillation or starvation.
-      thread_local uint32_t s_framesSinceAdj = 0;
-      s_framesSinceAdj++;
-      uint32_t cooldown = std::clamp(
-          static_cast<uint32_t>(frameTime * 0.3f), 5u, 30u);
-      if (s_framesSinceAdj < cooldown)
-          return;
-      s_framesSinceAdj = 0;
+    // ---- Read per-frame draw accumulator (DO NOT reset — pushMetrics owns that) ----
+    uint32_t drawsThisFrame = s_frameDrawCount;
 
-      // 3. Apply and log if threshold actually changed
-      uint32_t oldThresh = s_drawThreshold;
-      tuneThreshold(s_drawThreshold, load, s_smoothFt, s_tier);
-      if (s_drawThreshold != oldThresh) {
-          Logger::debug(str::format(
-              "Vegas: tuneThreshold ", oldThresh, " -> ", s_drawThreshold,
-              " load=", load, " smoothFt=", s_smoothFt, "ms tier=", s_tier));
+    // ---- Initialize on first frame ----
+    if (!s_adaptiveInitialized) {
+      if (drawsThisFrame > 0) {
+        s_targetFlushesPerFrame = 4;
+        s_drawThreshold = std::max(1u, drawsThisFrame / s_targetFlushesPerFrame);
+      } else {
+        s_drawThreshold = 50;  // safe fallback
       }
+      // Initialize history with our first value
+      for (uint32_t i = 0; i < 5; i++)
+        s_frameDrawHistory[i] = drawsThisFrame;
+      s_frameDrawHead = 0;
+      s_adaptiveInitialized = true;
+
+      Logger::debug(str::format(
+        "Vegas: adaptiveTune init draws=", drawsThisFrame,
+        " threshold=", s_drawThreshold,
+        " targetFlushes=", s_targetFlushesPerFrame));
+      return;
+    }
+
+    // ---- Scene-change guard ----
+    // Compute running average of last 5 frames
+    uint32_t avg = 0;
+    for (uint32_t i = 0; i < 5; i++)
+      avg += s_frameDrawHistory[i];
+    avg /= 5;
+
+    bool sceneChange = (avg > 10 && drawsThisFrame > avg * 3) ||
+                       (avg > 10 && drawsThisFrame < avg / 3);
+
+    // Update rolling history
+    s_frameDrawHistory[s_frameDrawHead] = drawsThisFrame;
+    s_frameDrawHead = (s_frameDrawHead + 1) % 5;
+
+    // Skip tuning on scene changes — let the threshold jump proportionally
+    // but don't let the spike affect targetFlushesPerFrame
+    if (sceneChange) {
+      if (drawsThisFrame > 0 && s_targetFlushesPerFrame > 0)
+        s_drawThreshold = std::max(1u, drawsThisFrame / s_targetFlushesPerFrame);
+      Logger::debug(str::format(
+        "Vegas: adaptiveTune sceneChange draws=", drawsThisFrame,
+        " avg=", avg, " threshold=", s_drawThreshold,
+        " targetFlushes=", s_targetFlushesPerFrame));
+      return;
+    }
+
+    // ---- Proportional threshold computation ----
+    if (drawsThisFrame > 0 && s_targetFlushesPerFrame > 0) {
+      s_drawThreshold = std::max(1u, drawsThisFrame / s_targetFlushesPerFrame);
+    } else if (drawsThisFrame == 0) {
+      // No draws this frame — could be a loading screen or pause menu.
+      // Don't change the threshold, just keep the last value.
+      return;
+    }
+
+    // ---- GPU load feedback: tune targetFlushesPerFrame ----
+    // Every 15 frames (~250ms at 60fps) to prevent oscillation
+    thread_local uint32_t s_framesSinceAdj = 0;
+    s_framesSinceAdj++;
+    if (s_framesSinceAdj < 15)
+      return;
+    s_framesSinceAdj = 0;
+
+    uint32_t oldTarget = s_targetFlushesPerFrame;
+
+    // Target frame time: 16.667ms for 60fps
+    float targetFt = 16.667f;
+
+    if (load > 0.80f && s_smoothFt < targetFt * 1.2f) {
+      // GPU busy and frame time good → we can batch more
+      if (s_targetFlushesPerFrame > 2)
+        s_targetFlushesPerFrame--;
+    } else if (load < 0.40f && drawsThisFrame > 100) {
+      // GPU idle but draws are high → CPU/Wrapper bound
+      // HOLD target — more flushes won't help, they'd add more CPU overhead
+    } else if (s_smoothFt > targetFt * 1.5f) {
+      // Frame time too high → try more flushes to reduce tile overflow risk
+      if (s_targetFlushesPerFrame < 12)
+        s_targetFlushesPerFrame++;
+    } else if (load < 0.50f && drawsThisFrame < 50 && s_targetFlushesPerFrame > 3) {
+      // GPU mostly idle, draws are low → decrease target to reduce flush overhead
+      if (s_targetFlushesPerFrame > 2)
+        s_targetFlushesPerFrame--;
+    }
+
+    // Clamp target to safe range
+    s_targetFlushesPerFrame = std::max(2u, std::min(12u, s_targetFlushesPerFrame));
+
+    if (s_targetFlushesPerFrame != oldTarget) {
+      Logger::debug(str::format(
+        "Vegas: adaptiveTune targetFlushes ", oldTarget, " -> ", s_targetFlushesPerFrame,
+        " load=", load, " ft=", s_smoothFt, "ms draws=", drawsThisFrame,
+        " threshold=", s_drawThreshold));
+    }
   }
 
   // VEGAS: Tier-aware zero-init for shader workgroup memory.
@@ -642,6 +740,7 @@ namespace dxvk {
     Logger::info(str::format(
         "Vegas: isEnabled=", s_enabled ? "true" : "false",
         " tier=", s_tier,
+        " adaptive=1",
         " device=", s_dxvkDevice
           ? s_dxvkDevice->adapter()->deviceProperties().deviceName
           : "(null)"));
