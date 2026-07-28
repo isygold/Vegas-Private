@@ -994,6 +994,10 @@ namespace dxvk {
   }
 
 
+  // Forward declarations for eagerly checking GPU transcoder availability.
+  static bool loadVulkanFuncs(VkDevice device);
+  static bool initTranscoderPipeline(VkDevice device);
+
   // ============================================================
   // Self-Aware Profile — auto-detect GPU, bake all thresholds
   // ============================================================
