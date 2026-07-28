@@ -368,7 +368,7 @@ namespace dxvk {
       m_lastPresentTime = now;
       float gpuLoad = (frameTime > 0.001f)
         ? std::min(frameTime / 16.667f, 1.0f) : 0.0f;
-      Vegas::adaptiveTune(gpuLoad, frameTime);
+      Vegas::tuneThreshold(gpuLoad, frameTime);
       Vegas::pushMetrics(gpuLoad, frameTime,
         VegasPerformanceState::Normal,
         Vegas::isFsrActive(), false);
