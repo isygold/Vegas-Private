@@ -406,16 +406,6 @@ namespace dxvk {
       return;
     }
 
-    // Apply tier-based cap: the proportional formula can produce thresholds
-    // far above what the GPU's tile buffer can handle on low-end tiers.
-    // Tier 1 (Adreno 6xx entry)  →  100 draws max per flush
-    // Tier 2 (Adreno 6xx mid)    →  200 draws max per flush
-    // Tier 3 (Adreno 7xx+/high)  →  no cap (static 350 is a soft ceiling)
-    if (s_tier <= 3) {
-      static constexpr uint32_t kTierMaxThreshold[] = { 0, 100, 200, 350 };
-      s_drawThreshold = std::min(s_drawThreshold, kTierMaxThreshold[s_tier]);
-    }
-
     // ---- GPU load feedback: tune targetFlushesPerFrame ----
     // Every 15 frames (~250ms at 60fps) to prevent oscillation
     thread_local uint32_t s_framesSinceAdj = 0;
