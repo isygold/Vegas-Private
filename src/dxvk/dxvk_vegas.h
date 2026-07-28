@@ -3,10 +3,44 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <array>
+#include <chrono>
 
 #include "dxvk_adapter.h"
 
 namespace dxvk {
+
+  /**
+   * \brief VEGAS Autonomous Governor state
+   *
+   * Self-contained state for the closed-loop adaptive governor.
+   * Updated by UpdateFrameTiming / CalculateThreshold / EndOfFrameCleanup
+   * called from the swapchain Present path.
+   */
+  struct VegasGovernorState {
+    // Frame accumulators
+    uint32_t frameDrawCount = 0;
+    uint32_t previousFrameDrawCount = 0;
+    uint32_t drawThreshold = 100;
+    uint32_t targetFlushesPerFrame = 4;
+
+    // Timing state
+    float smoothFrameTimeMs = 0.0f;
+    float ftRatio = 0.0f;
+
+    // Self-calibrating cap state
+    uint32_t rollingMaxDraws = 0;
+    uint32_t rollingMinDraws = UINT32_MAX;
+    float    rollingVarianceRatio = 0.0f;
+    uint32_t dynamicMaxBatchCap = 2048;
+    uint32_t safeCapTimeoutFrames = 0;
+    uint32_t floorMinimumCap = 64;
+
+    // Rolling window data
+    std::array<uint32_t, 120> drawHistoryWindow{};
+    uint8_t windowIndex = 0;
+    uint8_t windowScanCounter = 0;
+  };
   class Config; // fwd decl for Config-based overloads
   enum class Tristate : int32_t; // fwd decl for shouldUpscale()
 
@@ -111,18 +145,21 @@ namespace dxvk {
             DxvkDevice*          device,
             bool                 isD3D9);
 
-    static void tuneThreshold(
-            uint32_t&            threshold,
-            float                load,
-            float                frameTime,
-            uint32_t             tier);
-
-    /// Adaptive proportional governor — reads s_frameDrawCount and sets
-    /// s_drawThreshold = drawsThisFrame / targetFlushesPerFrame.
-    /// targetFlushesPerFrame (2-12) is auto-tuned by GPU load feedback.
-    static void adaptiveTune(
-            float                load,
+    /// Update frame timing with dynamic EMA, shader stutter guard,
+    /// and closed-loop targetFlushesPerFrame tuning.
+    /// Returns ftRatio (smoothFrameTimeMs / targetFrameTimeMs) for EndOfFrameCleanup.
+    static float updateFrameTiming(
+            float                gpuLoad,
             float                frameTime);
+
+    /// Calculate draw threshold for the next frame using predicted draw count,
+    /// self-calibrating dynamicMaxBatchCap, and variance guard.
+    static void calculateThreshold();
+
+    /// End-of-frame cleanup: rolling window update, self-calibrating cap,
+    /// predictor update, frame counter reset. Reads ftRatio + gpuLoad from
+    /// stored governor/HUD state.
+    static void endOfFrameCleanup();
 
     static bool shouldZeroInit(
             uint32_t             tier);
@@ -327,11 +364,8 @@ namespace dxvk {
     static bool                s_profileActive;
     static uint64_t            s_profileFrame;
 
-    // ---- Adaptive proportional governor ----
-    static uint32_t            s_targetFlushesPerFrame;
-    static uint32_t            s_frameDrawHistory[5];
-    static uint32_t            s_frameDrawHead;
-    static bool                s_adaptiveInitialized;
+    // ---- Autonomous governor state (VegasGovernorState) ----
+    static VegasGovernorState  s_gov;
     static void recordDrawCall();
     static void dumpDrawCsv();
 

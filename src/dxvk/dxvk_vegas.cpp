@@ -169,11 +169,8 @@ namespace dxvk {
   }
   uint64_t Vegas::s_profileFrame       = 0;
 
-  // Adaptive proportional governor state
-  uint32_t Vegas::s_targetFlushesPerFrame = 2;
-  uint32_t Vegas::s_frameDrawHistory[5]   = {0, 0, 0, 0, 0};
-  uint32_t Vegas::s_frameDrawHead         = 0;
-  bool     Vegas::s_adaptiveInitialized   = false;
+  // Autonomous governor state
+  VegasGovernorState Vegas::s_gov;
 
   // ============================================================
   // Adreno GPU tier classifier — replaces opaque upstream
@@ -352,140 +349,184 @@ namespace dxvk {
   //
   // Hardware architectural guard: per-tier min/max clamp prevents tile buffer
   // overflow (max) and excessive flushes on CPU-bound systems (min).
-  void Vegas::adaptiveTune(float load, float frameTime) {
-    // ---- Empirical constants derived from Adreno 610 + Wine x64 logs ----
-    static constexpr float    CPU_BOUND_DRAWS_PER_MS  = 20.0f;
-    static constexpr uint32_t MIN_TARGET_FLUSHES      = 2;
-    static constexpr uint32_t MAX_TARGET_FLUSHES      = 8;
-    static constexpr uint32_t PANIC_DRAWS_FLOOR       = 50;
-    // Per-tier minimum thresholds. Tier 1 at 100 guarantees that HK's
-    // menu (60-70 draws) never triggers a mid-frame flush.
-    // Tier 1 (Adreno 6xx entry):  100
-    // Tier 2 (Adreno 6xx mid):    150
-    // Tier 3 (Adreno 7xx+/high):  200
-    static constexpr uint32_t kTierMinThreshold[4]    = { 0, 100, 150, 200 };
-    // Per-tier hardware tile buffer caps (unchanged from battle-tested limits)
-    static constexpr uint32_t kTierHardwareCap[4]     = { 0, 150, 300, 450 };
+  // ================================================================
+  // VEGAS Autonomous Governor — v4.1
+  // ================================================================
+  //
+  // Three-function pipeline called from swapchain Present():
+  //   1. updateFrameTiming — EMA smoothing, shader stutter guard, targetFlushes tuning
+  //   2. calculateThreshold — variance guard + proportional calc + self-calibrating cap
+  //   3. endOfFrameCleanup — rolling window, self-calibrating cap logic, predictor update
+  //
+  // Shock absorber in recordDrawCall(): snap threshold to cap after mid-frame flush.
+  // ================================================================
 
-    // ---- EMA smoothing for frame time ----
-    thread_local float s_smoothFt = 16.6f;
-    s_smoothFt = s_smoothFt * 0.9f + frameTime * 0.1f;
+  // ---- Constants ----
+  static constexpr uint32_t MIN_TARGET_FLUSHES = 1u;
+  static constexpr uint32_t MAX_TARGET_FLUSHES = 8u;
+  static constexpr float    BASE_EMA_ALPHA     = 0.15f;
+  static constexpr float    LAG_RATIO_THRESHOLD    = 1.4f;
+  static constexpr float    CPU_BOUND_LOAD_MAX     = 0.5f;
+  static constexpr float    IDLE_RATIO_THRESHOLD   = 0.8f;
+  static constexpr float    IDLE_LOAD_MAX          = 0.4f;
+  static constexpr uint32_t TUNE_COOLDOWN_FRAMES   = 3u;
 
-    // ---- Read per-frame draw accumulator (DO NOT reset — pushMetrics owns that) ----
-    uint32_t drawsThisFrame = s_frameDrawCount;
+  float Vegas::updateFrameTiming(float gpuLoad, float frameTime) {
+    VegasGovernorState& gov = s_gov;
 
-    // ---- Initialize on first frame ----
-    if (!s_adaptiveInitialized) {
-      if (drawsThisFrame > 0) {
-        s_targetFlushesPerFrame = MIN_TARGET_FLUSHES;
-        s_drawThreshold = std::max(1u, drawsThisFrame / s_targetFlushesPerFrame);
-      } else {
-        s_drawThreshold = 50;  // safe fallback
-      }
-      // Initialize history with our first value
-      for (uint32_t i = 0; i < 5; i++)
-        s_frameDrawHistory[i] = drawsThisFrame;
-      s_frameDrawHead = 0;
-      s_adaptiveInitialized = true;
-
-      Logger::debug(str::format(
-        "Vegas: adaptiveTune init draws=", drawsThisFrame,
-        " threshold=", s_drawThreshold,
-        " targetFlushes=", s_targetFlushesPerFrame));
-      return;
-    }
-
-    // ---- Scene-change guard ----
-    // Compute running average of last 5 frames
-    uint32_t avg = 0;
-    for (uint32_t i = 0; i < 5; i++)
-      avg += s_frameDrawHistory[i];
-    avg /= 5;
-
-    bool sceneChange = (avg > 10 && drawsThisFrame > avg * 3) ||
-                       (avg > 10 && drawsThisFrame < avg / 3);
-
-    // Update rolling history
-    s_frameDrawHistory[s_frameDrawHead] = drawsThisFrame;
-    s_frameDrawHead = (s_frameDrawHead + 1) % 5;
-
-    // Skip tuning on scene changes — let the threshold jump proportionally
-    // but don't let the spike affect targetFlushesPerFrame
-    if (sceneChange) {
-      if (drawsThisFrame > 0 && s_targetFlushesPerFrame > 0)
-        s_drawThreshold = std::max(1u, drawsThisFrame / s_targetFlushesPerFrame);
-      Logger::debug(str::format(
-        "Vegas: adaptiveTune sceneChange draws=", drawsThisFrame,
-        " avg=", avg, " threshold=", s_drawThreshold,
-        " targetFlushes=", s_targetFlushesPerFrame));
-      return;
-    }
-
-    // ---- drawsPerMs throughput sensor + targetFlushes tuning ----
-    // Compute real-time rendering efficiency. When drawsPerMs is low,
-    // the CPU cannot feed draw calls fast enough — this is the primary
-    // signal for detecting a Wine/translation-layer bottleneck.
-    float drawsPerMs = (s_smoothFt > 0.0f)
-      ? static_cast<float>(drawsThisFrame) / s_smoothFt
-      : 999.0f;
-
-    bool severeCpuBound = (load < 0.40f
-                        && drawsPerMs < CPU_BOUND_DRAWS_PER_MS
-                        && drawsThisFrame > PANIC_DRAWS_FLOOR);
-
-    // If drawsThisFrame is 0 (loading/pause), keep the last threshold.
-    if (drawsThisFrame == 0) {
-      return;
-    }
-
-    uint32_t oldTarget = s_targetFlushesPerFrame;
-
-    // Target frame time: 16.667ms for 60fps
-    float targetFt = 16.667f;
-
-    if (severeCpuBound) {
-      // CPU/Wine bottleneck detected — force minimum flushes to
-      // reduce translation-layer overhead. This bypasses the cooldown
-      // timer for an immediate response.
-      s_targetFlushesPerFrame = MIN_TARGET_FLUSHES;
-    } else if (load > 0.80f && s_smoothFt < targetFt * 1.2f) {
-      // GPU busy and frame time good → batch more (fewer flushes)
-      if (s_targetFlushesPerFrame > MIN_TARGET_FLUSHES)
-        s_targetFlushesPerFrame--;
-    } else if (s_smoothFt > targetFt * 1.5f) {
-      // Frame time spiking → flush more often to reduce tile overflow risk
-      if (s_targetFlushesPerFrame < MAX_TARGET_FLUSHES)
-        s_targetFlushesPerFrame++;
-    } else if (load < 0.50f
-            && drawsThisFrame < PANIC_DRAWS_FLOOR
-            && s_targetFlushesPerFrame > MIN_TARGET_FLUSHES) {
-      // GPU idle, light workload → reduce flush overhead
-      s_targetFlushesPerFrame--;
-    }
-
-    // Clamp target to safe range for ARM SoCs
-    s_targetFlushesPerFrame = std::max(MIN_TARGET_FLUSHES,
-                               std::min(MAX_TARGET_FLUSHES, s_targetFlushesPerFrame));
-
-    // ---- Single-pass threshold computation with per-tier clamping ----
-    // 1. Proportional: threshold = draws / targetFlushes
-    // 2. Per-tier minimum: guarantees menu/light scenes never mid-frame flush
-    // 3. Per-tier hardware cap: prevents tile buffer overflow on high draws
-    if (s_tier >= 1 && s_tier <= 3) {
-      uint32_t calculated = std::max(1u, drawsThisFrame / s_targetFlushesPerFrame);
-      s_drawThreshold = std::max(kTierMinThreshold[s_tier], calculated);
-      s_drawThreshold = std::min(s_drawThreshold, kTierHardwareCap[s_tier]);
+    // ---- EMA smoothing with dynamic alpha ----
+    if (gov.smoothFrameTimeMs == 0.0f) {
+      gov.smoothFrameTimeMs = frameTime;
     } else {
-      s_drawThreshold = std::max(1u, drawsThisFrame / s_targetFlushesPerFrame);
+      float delta = std::abs(frameTime - gov.smoothFrameTimeMs);
+      float alpha = BASE_EMA_ALPHA;
+      if (delta > 10.0f) alpha = 0.8f;
+      else if (delta > 3.0f) alpha = 0.5f;
+      gov.smoothFrameTimeMs = frameTime * alpha + gov.smoothFrameTimeMs * (1.0f - alpha);
     }
 
-    if (s_targetFlushesPerFrame != oldTarget) {
-      Logger::debug(str::format(
-        "Vegas: adaptiveTune drawsPerMs=", drawsPerMs,
-        " targetFlushes ", oldTarget, " -> ", s_targetFlushesPerFrame,
-        " load=", load, " ft=", s_smoothFt, "ms draws=", drawsThisFrame,
-        " threshold=", s_drawThreshold));
+    // ---- Dynamic frame target anchor ----
+    float targetFrameTimeMs = 16.667f;  // default 60 FPS
+    if (gov.smoothFrameTimeMs > 28.0f)
+      targetFrameTimeMs = 33.333f;      // fall back to 30 FPS anchor
+
+    float ftRatio = gov.smoothFrameTimeMs / targetFrameTimeMs;
+
+    // Store in struct for endOfFrameCleanup to read
+    gov.ftRatio = ftRatio;
+
+    // ---- Closed-loop targetFlushes tuning ----
+    // Uses ftRatio instead of drawsPerMs to align with endOfFrameCleanup — both
+    // read the same ftRatio signal. The 3-frame cooldown prevents oscillation
+    // while reacting faster than the old 15-frame cooldown.
+    static thread_local uint32_t s_framesSinceAdj = 0;
+    s_framesSinceAdj++;
+
+    if (s_framesSinceAdj >= TUNE_COOLDOWN_FRAMES) {
+      s_framesSinceAdj = 0;
+
+      if (ftRatio > LAG_RATIO_THRESHOLD) {
+        // Frame is lagging behind target
+        if (gpuLoad < CPU_BOUND_LOAD_MAX) {
+          // CPU/Wine-bound: reduce flushes aggressively to save CPU cycles
+          gov.targetFlushesPerFrame = (gov.targetFlushesPerFrame > 2u)
+            ? (gov.targetFlushesPerFrame - 2u)
+            : MIN_TARGET_FLUSHES;
+        } else {
+          // GPU-bound: flush more to distribute workload
+          if (gov.targetFlushesPerFrame < MAX_TARGET_FLUSHES)
+            gov.targetFlushesPerFrame++;
+        }
+      } else if (ftRatio < IDLE_RATIO_THRESHOLD && gpuLoad < IDLE_LOAD_MAX) {
+        // Frame is ahead of target and GPU idle → reduce overhead
+        if (gov.targetFlushesPerFrame > MIN_TARGET_FLUSHES)
+          gov.targetFlushesPerFrame--;
+      }
+      // else: stable — no change
     }
+
+    // Clamp target to safe range
+    gov.targetFlushesPerFrame = std::max(MIN_TARGET_FLUSHES,
+                                std::min(MAX_TARGET_FLUSHES, gov.targetFlushesPerFrame));
+
+    Logger::debug(str::format(
+      "Vegas: updateFrameTiming ftRatio=", ftRatio,
+      " gpuLoad=", gpuLoad,
+      " targetFlushes=", gov.targetFlushesPerFrame));
+
+    return ftRatio;
+  }
+
+  void Vegas::calculateThreshold() {
+    VegasGovernorState& gov = s_gov;
+
+    // ---- Variance guard ----
+    if (gov.rollingVarianceRatio > 5.0f) {
+      gov.drawThreshold = gov.dynamicMaxBatchCap;
+      return;
+    }
+
+    // ---- Proportional predictor ----
+    uint32_t predicted = gov.previousFrameDrawCount;
+    if (predicted == 0u) predicted = 1u;
+
+    uint32_t calcThreshold = std::max(1u, predicted / gov.targetFlushesPerFrame);
+
+    // ---- Dual-mode: atomic for small scenes, capped for heavy 3D ----
+    if (predicted < gov.dynamicMaxBatchCap) {
+      gov.drawThreshold = predicted;    // Atomic: flush exactly at end of frame
+    } else {
+      gov.drawThreshold = std::min(calcThreshold, gov.dynamicMaxBatchCap);
+    }
+
+    Logger::debug(str::format(
+      "Vegas: calculateThreshold pred=", predicted,
+      " targetFlushes=", gov.targetFlushesPerFrame,
+      " calc=", calcThreshold,
+      " cap=", gov.dynamicMaxBatchCap,
+      " threshold=", gov.drawThreshold));
+  }
+
+  void Vegas::endOfFrameCleanup() {
+    VegasGovernorState& gov = s_gov;
+    float ftRatio = gov.ftRatio;
+    float gpuLoad = s_lastGpuLoad;  // set by pushMetrics earlier in this frame
+
+    // ---- 1. Update rolling window ----
+    gov.drawHistoryWindow[gov.windowIndex % 120] = gov.frameDrawCount;
+    gov.windowIndex++;
+    gov.windowScanCounter++;
+
+    // ---- 2. Recompute max/min/variance every 10 frames ----
+    if (gov.windowScanCounter >= 10) {
+      gov.windowScanCounter = 0;
+      uint32_t curMax = 0;
+      uint32_t curMin = UINT32_MAX;
+
+      for (auto draws : gov.drawHistoryWindow) {
+        if (draws > 0) {
+          curMax = std::max(curMax, draws);
+          curMin = std::min(curMin, draws);
+        }
+      }
+
+      gov.rollingMaxDraws = curMax;
+      gov.rollingMinDraws = curMin;
+
+      if (curMin == 0 || curMin == UINT32_MAX) {
+        gov.rollingVarianceRatio = 0.0f;
+      } else {
+        gov.rollingVarianceRatio = static_cast<float>(curMax - curMin)
+                                 / static_cast<float>(curMin);
+      }
+    }
+
+    // ---- 3. Self-calibrating dynamicMaxBatchCap ----
+    if (gov.safeCapTimeoutFrames > 0) {
+      gov.safeCapTimeoutFrames--;
+    } else {
+      uint32_t idealCap = static_cast<uint32_t>(gov.rollingMaxDraws * 1.5f);
+
+      if (ftRatio > 1.4f && gpuLoad > 0.5f) {
+        // GPU drowning — shrink cap aggressively, enter cooldown
+        gov.dynamicMaxBatchCap = static_cast<uint32_t>(gov.dynamicMaxBatchCap * 0.75f);
+        gov.dynamicMaxBatchCap = std::max(gov.floorMinimumCap, gov.dynamicMaxBatchCap);
+        gov.safeCapTimeoutFrames = 30u;
+      } else if (idealCap > gov.dynamicMaxBatchCap) {
+        // Smooth growth, capped rate
+        gov.dynamicMaxBatchCap = std::min(gov.dynamicMaxBatchCap + 512u, idealCap);
+      } else if (idealCap < gov.dynamicMaxBatchCap) {
+        // Decay to match lighter scenes
+        gov.dynamicMaxBatchCap = std::max(gov.floorMinimumCap, idealCap);
+      }
+    }
+
+    // ---- 4. Sync s_drawThreshold for external consumers (shouldFlush, getDrawThreshold) ----
+    s_drawThreshold = gov.drawThreshold;
+
+    // ---- 5. Predictor update + reset ----
+    gov.previousFrameDrawCount = gov.frameDrawCount;
+    gov.frameDrawCount = 0u;
   }
 
   // VEGAS: Tier-aware zero-init for shader workgroup memory.
@@ -3293,11 +3334,11 @@ namespace dxvk {
     s_ftHistory[s_ftHead] = frameTime;
     s_ftHead = (s_ftHead + 1) % FT_HISTORY_SIZE;
 
-    // Record per-frame draw count to circular history, reset counter
-    if (s_frameDrawCount > 0) {
-      s_drawHistory[s_drawHead] = s_frameDrawCount;
+    // Record per-frame draw count to circular history (reads from gov state,
+    // reset is handled by endOfFrameCleanup at end of Present).
+    if (s_gov.frameDrawCount > 0) {
+      s_drawHistory[s_drawHead] = s_gov.frameDrawCount;
       s_drawHead = (s_drawHead + 1) % DRAW_HISTORY_SIZE;
-      s_frameDrawCount = 0;
     }
 
     // Dump CSV every DRAW_HISTORY_SIZE frames (roughly ~1s at 60fps)
@@ -3384,7 +3425,18 @@ namespace dxvk {
   // ============================================================
 
   void Vegas::recordDrawCall() {
-    s_frameDrawCount++;
+    VegasGovernorState& gov = s_gov;
+
+    // Increment per-frame draw counter
+    gov.frameDrawCount++;
+
+    // Scene-transition shock absorber: if a mid-frame flush fires because
+    // the predictor underestimated the scene, snap threshold to max cap so
+    // the rest of the frame batches correctly.
+    if (gov.frameDrawCount >= gov.drawThreshold) {
+      if (gov.drawThreshold < gov.dynamicMaxBatchCap)
+        gov.drawThreshold = gov.dynamicMaxBatchCap;
+    }
   }
 
   void Vegas::dumpDrawCsv() {

@@ -360,13 +360,18 @@ namespace dxvk {
         m_lastPresentTime = now;
         float gpuLoad = (frameTime > 0.001f)
           ? std::min(frameTime / 16.667f, 1.0f) : 0.0f;
-        Vegas::adaptiveTune(gpuLoad, frameTime);
+        Vegas::updateFrameTiming(gpuLoad, frameTime);
+        Vegas::calculateThreshold();
         Vegas::pushMetrics(gpuLoad, frameTime,
           VegasPerformanceState::Normal,
           Vegas::isFsrActive(), false);
       }
       // === END VEGAS ===
       hr = m_presenter->Present(SyncInterval, PresentFlags, nullptr);
+
+      // Vegas: end-of-frame governor cleanup
+      if (Vegas::isEnabled())
+        Vegas::endOfFrameCleanup();
     }
 
     if (PresentFlags & DXGI_PRESENT_TEST)
