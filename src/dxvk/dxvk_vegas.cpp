@@ -170,7 +170,7 @@ namespace dxvk {
   uint64_t Vegas::s_profileFrame       = 0;
 
   // Adaptive proportional governor state
-  uint32_t Vegas::s_targetFlushesPerFrame = 4;
+  uint32_t Vegas::s_targetFlushesPerFrame = 2;
   uint32_t Vegas::s_frameDrawHistory[5]   = {0, 0, 0, 0, 0};
   uint32_t Vegas::s_frameDrawHead         = 0;
   bool     Vegas::s_adaptiveInitialized   = false;
@@ -324,7 +324,7 @@ namespace dxvk {
       }
   }
 
-  // Adaptive proportional governor.
+  // Adaptive proportional governor with drawsPerMs CPU throughput sensor.
   //
   // Core principle: threshold = drawsThisFrame / targetFlushesPerFrame
   //
@@ -333,16 +333,35 @@ namespace dxvk {
   //   80 draws/frame × 4 flushes → threshold = 20
   //   6800 draws/frame × 4 flushes → threshold = 1700
   //
-  // targetFlushesPerFrame (range 2-12) is tuned by GPU load feedback:
-  //   - GPU > 80% and frame time stable → decrement target (fewer flushes, more batching)
-  //   - GPU < 40% and draws are high → HOLD target (CPU/Wrapper bound — more flushes won't help)
-  //   - Frame time spike (delta > 1.5× target) → increment target temporarily (more flushes,
-  //     less tile overflow risk)
+  // drawsPerMs sensor (replaces the old GPU-only load feedback):
+  //   drawsPerMs = drawsThisFrame / smoothedFrameTime
+  //
+  //   - A healthy native driver pushes 40+ draws/ms
+  //   - Wine/Box86 on Adreno 610 can drop below 1 draw/ms (CPU-bound)
+  //
+  //   When drawsPerMs < 20 and GPU load < 40%, the governor detects a
+  //   CPU/Wine bottleneck and force-reduces targetFlushes to minimum (2),
+  //   which mathematically raises the threshold and reduces flush overhead.
+  //
+  //   When GPU load > 80% and frame time is healthy, the governor decrements
+  //   targetFlushes (batches more) — the original GPU-bound path is preserved.
   //
   // Scene-change guard: if drawsThisFrame deviates > 3× from the running 5-frame
   // average, skip tuning that frame to prevent transient spikes from destabilizing
   // targetFlushesPerFrame.
+  //
+  // Hardware architectural guard: per-tier min/max clamp prevents tile buffer
+  // overflow (max) and excessive flushes on CPU-bound systems (min).
   void Vegas::adaptiveTune(float load, float frameTime) {
+    // ---- Empirical constants derived from Adreno 610 + Wine x64 logs ----
+    static constexpr float    CPU_BOUND_DRAWS_PER_MS  = 20.0f;
+    static constexpr uint32_t MIN_TARGET_FLUSHES      = 2;
+    static constexpr uint32_t MAX_TARGET_FLUSHES      = 8;
+    static constexpr uint32_t PANIC_DRAWS_FLOOR       = 50;
+    static constexpr uint32_t GLOBAL_MIN_THRESHOLD    = 50;
+    static constexpr uint32_t kTierThresholdClamp[4]  = { 0, 50, 100, 150 };
+    static constexpr uint32_t kTierHardwareCap[4]     = { 0, 150, 300, 450 };
+
     // ---- EMA smoothing for frame time ----
     thread_local float s_smoothFt = 16.6f;
     s_smoothFt = s_smoothFt * 0.9f + frameTime * 0.1f;
@@ -353,7 +372,7 @@ namespace dxvk {
     // ---- Initialize on first frame ----
     if (!s_adaptiveInitialized) {
       if (drawsThisFrame > 0) {
-        s_targetFlushesPerFrame = 4;
+        s_targetFlushesPerFrame = MIN_TARGET_FLUSHES;
         s_drawThreshold = std::max(1u, drawsThisFrame / s_targetFlushesPerFrame);
       } else {
         s_drawThreshold = 50;  // safe fallback
@@ -406,52 +425,77 @@ namespace dxvk {
       return;
     }
 
-    // Apply tier-based cap: the proportional formula can produce thresholds
-    // far above what the GPU's tile buffer can handle on low-end tiers.
-    // Tier 1 (Adreno 6xx entry)  →  100 draws max per flush
-    // Tier 2 (Adreno 6xx mid)    →  200 draws max per flush
-    // Tier 3 (Adreno 7xx+/high)  →  no cap (static 350 is a soft ceiling)
-    if (s_tier <= 3) {
-      static constexpr uint32_t kTierMaxThreshold[] = { 0, 100, 200, 350 };
-      s_drawThreshold = std::min(s_drawThreshold, kTierMaxThreshold[s_tier]);
+    // ---- Hardware architectural clamp (min + max) ----
+    // Prevents tile buffer overflow on the high side and excessive
+    // flush overhead on the low side, using battle-tested Adreno limits.
+    if (s_tier >= 1 && s_tier <= 3) {
+      s_drawThreshold = std::max(
+        kTierThresholdClamp[s_tier],
+        std::min(s_drawThreshold, kTierHardwareCap[s_tier]));
     }
 
-    // ---- GPU load feedback: tune targetFlushesPerFrame ----
-    // Every 15 frames (~250ms at 60fps) to prevent oscillation
-    thread_local uint32_t s_framesSinceAdj = 0;
-    s_framesSinceAdj++;
-    if (s_framesSinceAdj < 15)
-      return;
-    s_framesSinceAdj = 0;
+    // ---- drawsPerMs throughput sensor + targetFlushes tuning ----
+    // Compute real-time rendering efficiency. When drawsPerMs is low,
+    // the CPU cannot feed draw calls fast enough — this is the primary
+    // signal for detecting a Wine/translation-layer bottleneck.
+    float drawsPerMs = (s_smoothFt > 0.0f)
+      ? static_cast<float>(drawsThisFrame) / s_smoothFt
+      : 999.0f;
+
+    bool severeCpuBound = (load < 0.40f
+                        && drawsPerMs < CPU_BOUND_DRAWS_PER_MS
+                        && drawsThisFrame > PANIC_DRAWS_FLOOR);
 
     uint32_t oldTarget = s_targetFlushesPerFrame;
 
     // Target frame time: 16.667ms for 60fps
     float targetFt = 16.667f;
 
-    if (load > 0.80f && s_smoothFt < targetFt * 1.2f) {
-      // GPU busy and frame time good → we can batch more
-      if (s_targetFlushesPerFrame > 2)
+    if (severeCpuBound) {
+      // CPU/Wine bottleneck detected — force minimum flushes to
+      // reduce translation-layer overhead. This bypasses the cooldown
+      // timer for an immediate response.
+      s_targetFlushesPerFrame = MIN_TARGET_FLUSHES;
+    } else if (load > 0.80f && s_smoothFt < targetFt * 1.2f) {
+      // GPU busy and frame time good → batch more (fewer flushes)
+      if (s_targetFlushesPerFrame > MIN_TARGET_FLUSHES)
         s_targetFlushesPerFrame--;
-    } else if (load < 0.40f && drawsThisFrame > 100) {
-      // GPU idle but draws are high → CPU/Wrapper bound
-      // HOLD target — more flushes won't help, they'd add more CPU overhead
     } else if (s_smoothFt > targetFt * 1.5f) {
-      // Frame time too high → try more flushes to reduce tile overflow risk
-      if (s_targetFlushesPerFrame < 12)
+      // Frame time spiking → flush more often to reduce tile overflow risk
+      if (s_targetFlushesPerFrame < MAX_TARGET_FLUSHES)
         s_targetFlushesPerFrame++;
-    } else if (load < 0.50f && drawsThisFrame < 50 && s_targetFlushesPerFrame > 3) {
-      // GPU mostly idle, draws are low → decrease target to reduce flush overhead
-      if (s_targetFlushesPerFrame > 2)
-        s_targetFlushesPerFrame--;
+    } else if (load < 0.50f
+            && drawsThisFrame < PANIC_DRAWS_FLOOR
+            && s_targetFlushesPerFrame > MIN_TARGET_FLUSHES) {
+      // GPU idle, light workload → reduce flush overhead
+      s_targetFlushesPerFrame--;
     }
 
-    // Clamp target to safe range
-    s_targetFlushesPerFrame = std::max(2u, std::min(12u, s_targetFlushesPerFrame));
+    // Clamp target to safe range for ARM SoCs
+    s_targetFlushesPerFrame = std::max(MIN_TARGET_FLUSHES,
+                               std::min(MAX_TARGET_FLUSHES, s_targetFlushesPerFrame));
+
+    // ---- Re-compute threshold after targetFlushes adjustment ----
+    if (s_targetFlushesPerFrame > 0 && drawsThisFrame > 0) {
+      s_drawThreshold = drawsThisFrame / s_targetFlushesPerFrame;
+    }
+
+    // ---- Apply global minimum threshold floor ----
+    // Catches edge cases where drawsThisFrame is below PANIC_DRAWS_FLOOR
+    // but the proportional formula still produces an unsafe low threshold.
+    s_drawThreshold = std::max(GLOBAL_MIN_THRESHOLD, s_drawThreshold);
+
+    // ---- Re-apply hardware clamp after re-computation ----
+    if (s_tier >= 1 && s_tier <= 3) {
+      s_drawThreshold = std::max(
+        kTierThresholdClamp[s_tier],
+        std::min(s_drawThreshold, kTierHardwareCap[s_tier]));
+    }
 
     if (s_targetFlushesPerFrame != oldTarget) {
       Logger::debug(str::format(
-        "Vegas: adaptiveTune targetFlushes ", oldTarget, " -> ", s_targetFlushesPerFrame,
+        "Vegas: adaptiveTune drawsPerMs=", drawsPerMs,
+        " targetFlushes ", oldTarget, " -> ", s_targetFlushesPerFrame,
         " load=", load, " ft=", s_smoothFt, "ms draws=", drawsThisFrame,
         " threshold=", s_drawThreshold));
     }
