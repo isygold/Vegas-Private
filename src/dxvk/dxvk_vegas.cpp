@@ -273,9 +273,6 @@ namespace dxvk {
   }
 
   // ================================================================
-  // Hardware architectural guard: per-tier min/max clamp prevents tile buffer
-  // overflow (max) and excessive flushes on CPU-bound systems (min).
-  // ================================================================
   // VEGAS Autonomous Governor — v4.1
   // ================================================================
   //
