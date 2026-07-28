@@ -117,10 +117,9 @@ namespace dxvk {
             float                frameTime,
             uint32_t             tier);
 
-    /// Adaptive proportional governor — reads s_frameDrawCount and sets
-    /// s_drawThreshold = drawsThisFrame / targetFlushesPerFrame.
-    /// targetFlushesPerFrame (2-12) is auto-tuned by GPU load feedback.
-    static void adaptiveTune(
+    /// Self-contained overload — reads internal s_tier and modifies
+    /// s_drawThreshold directly. Caller only supplies load + frameTime.
+    static void tuneThreshold(
             float                load,
             float                frameTime);
 
@@ -326,12 +325,6 @@ namespace dxvk {
     static uint32_t            s_dumpCounter;
     static bool                s_profileActive;
     static uint64_t            s_profileFrame;
-
-    // ---- Adaptive proportional governor ----
-    static uint32_t            s_targetFlushesPerFrame;
-    static uint32_t            s_frameDrawHistory[5];
-    static uint32_t            s_frameDrawHead;
-    static bool                s_adaptiveInitialized;
     static void recordDrawCall();
     static void dumpDrawCsv();
 
