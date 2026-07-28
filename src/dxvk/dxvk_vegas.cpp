@@ -358,8 +358,13 @@ namespace dxvk {
     static constexpr uint32_t MIN_TARGET_FLUSHES      = 2;
     static constexpr uint32_t MAX_TARGET_FLUSHES      = 8;
     static constexpr uint32_t PANIC_DRAWS_FLOOR       = 50;
-    static constexpr uint32_t GLOBAL_MIN_THRESHOLD    = 50;
-    static constexpr uint32_t kTierThresholdClamp[4]  = { 0, 50, 100, 150 };
+    // Per-tier minimum thresholds. Tier 1 at 100 guarantees that HK's
+    // menu (60-70 draws) never triggers a mid-frame flush.
+    // Tier 1 (Adreno 6xx entry):  100
+    // Tier 2 (Adreno 6xx mid):    150
+    // Tier 3 (Adreno 7xx+/high):  200
+    static constexpr uint32_t kTierMinThreshold[4]    = { 0, 100, 150, 200 };
+    // Per-tier hardware tile buffer caps (unchanged from battle-tested limits)
     static constexpr uint32_t kTierHardwareCap[4]     = { 0, 150, 300, 450 };
 
     // ---- EMA smoothing for frame time ----
@@ -416,24 +421,6 @@ namespace dxvk {
       return;
     }
 
-    // ---- Proportional threshold computation ----
-    if (drawsThisFrame > 0 && s_targetFlushesPerFrame > 0) {
-      s_drawThreshold = std::max(1u, drawsThisFrame / s_targetFlushesPerFrame);
-    } else if (drawsThisFrame == 0) {
-      // No draws this frame — could be a loading screen or pause menu.
-      // Don't change the threshold, just keep the last value.
-      return;
-    }
-
-    // ---- Hardware architectural clamp (min + max) ----
-    // Prevents tile buffer overflow on the high side and excessive
-    // flush overhead on the low side, using battle-tested Adreno limits.
-    if (s_tier >= 1 && s_tier <= 3) {
-      s_drawThreshold = std::max(
-        kTierThresholdClamp[s_tier],
-        std::min(s_drawThreshold, kTierHardwareCap[s_tier]));
-    }
-
     // ---- drawsPerMs throughput sensor + targetFlushes tuning ----
     // Compute real-time rendering efficiency. When drawsPerMs is low,
     // the CPU cannot feed draw calls fast enough — this is the primary
@@ -445,6 +432,11 @@ namespace dxvk {
     bool severeCpuBound = (load < 0.40f
                         && drawsPerMs < CPU_BOUND_DRAWS_PER_MS
                         && drawsThisFrame > PANIC_DRAWS_FLOOR);
+
+    // If drawsThisFrame is 0 (loading/pause), keep the last threshold.
+    if (drawsThisFrame == 0) {
+      return;
+    }
 
     uint32_t oldTarget = s_targetFlushesPerFrame;
 
@@ -475,21 +467,16 @@ namespace dxvk {
     s_targetFlushesPerFrame = std::max(MIN_TARGET_FLUSHES,
                                std::min(MAX_TARGET_FLUSHES, s_targetFlushesPerFrame));
 
-    // ---- Re-compute threshold after targetFlushes adjustment ----
-    if (s_targetFlushesPerFrame > 0 && drawsThisFrame > 0) {
-      s_drawThreshold = drawsThisFrame / s_targetFlushesPerFrame;
-    }
-
-    // ---- Apply global minimum threshold floor ----
-    // Catches edge cases where drawsThisFrame is below PANIC_DRAWS_FLOOR
-    // but the proportional formula still produces an unsafe low threshold.
-    s_drawThreshold = std::max(GLOBAL_MIN_THRESHOLD, s_drawThreshold);
-
-    // ---- Re-apply hardware clamp after re-computation ----
+    // ---- Single-pass threshold computation with per-tier clamping ----
+    // 1. Proportional: threshold = draws / targetFlushes
+    // 2. Per-tier minimum: guarantees menu/light scenes never mid-frame flush
+    // 3. Per-tier hardware cap: prevents tile buffer overflow on high draws
     if (s_tier >= 1 && s_tier <= 3) {
-      s_drawThreshold = std::max(
-        kTierThresholdClamp[s_tier],
-        std::min(s_drawThreshold, kTierHardwareCap[s_tier]));
+      uint32_t calculated = std::max(1u, drawsThisFrame / s_targetFlushesPerFrame);
+      s_drawThreshold = std::max(kTierMinThreshold[s_tier], calculated);
+      s_drawThreshold = std::min(s_drawThreshold, kTierHardwareCap[s_tier]);
+    } else {
+      s_drawThreshold = std::max(1u, drawsThisFrame / s_targetFlushesPerFrame);
     }
 
     if (s_targetFlushesPerFrame != oldTarget) {
