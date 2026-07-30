@@ -424,6 +424,10 @@ namespace dxvk {
     uint32_t calcThreshold = std::max(1u, predicted / std::max(1u, gov.targetFlushesPerFrame));
 
     // ---- Dual-mode: atomic for small scenes, capped for heavy 3D ----
+    // atomicSplitActive is set unconditionally so that the proportional branch
+    // (predicted >= cap) doesn't leave it stale from a prior frame.
+    gov.atomicSplitActive = (gov.targetFlushesPerFrame > 1u);
+
     if (predicted < gov.dynamicMaxBatchCap) {
       // ---- Atomic-split ----
       // Split when the governor requests >1 flush per frame. The governor
@@ -432,8 +436,6 @@ namespace dxvk {
       // Hysteresis removed: the 100ms EMA accumulation + alpha=0.3 smoothing
       // already prevents rapid toggling, and the hysteresis band was too
       // conservative for TR13 (43% split=0 during gameplay).
-      gov.atomicSplitActive = (gov.targetFlushesPerFrame > 1u);
-
       if (gov.atomicSplitActive) {
         // Split: batch = max(64, pred / flushes), never exceed predicted.
         // Safe for low-draw frames: min(pred, split) = pred when pred < 64.
@@ -511,10 +513,7 @@ namespace dxvk {
       gov.dynamicMaxBatchCap = idealCap;
     }
 
-    // ---- 4. Sync s_drawThreshold for external consumers (shouldFlush, getDrawThreshold) ----
-    s_drawThreshold = gov.drawThreshold;
-
-    // ---- 5. Telemetry probes ----
+    // ---- 4. Telemetry probes ----
     // predError every 60 frames: measures frame-to-frame prediction accuracy
     // If error is consistently >50%, the predictor is unreliable and atomic-split
     // should be re-evaluated.
@@ -534,7 +533,7 @@ namespace dxvk {
         " targetFlushes=", gov.targetFlushesPerFrame));
     }
 
-    // ---- 6. Reset per-frame counters ----
+    // ---- 5. Reset per-frame counters ----
     gov.previousFrameDrawCount = gov.frameDrawCount;
     gov.frameDrawCount = 0u;
     gov.actualFlushesThisFrame = 0u;
@@ -3479,10 +3478,9 @@ namespace dxvk {
 
     // Scene-transition shock absorber: if a mid-frame flush fires because
     // the predictor underestimated the scene, snap threshold to cap.
-    // Disabled when atomic-split is active — it defeats the split by
-    // setting threshold=cap, then endOfFrameCleanup syncs the inflated
-    // threshold to s_drawThreshold, preventing mid-frame flushes on the
-    // next frame.
+    // Disabled when atomic-split is active — the split already manages
+    // the batch size and the shock absorber's cap inflation is redundant
+    // with the immediate sync in calculateThreshold().
     if (gov.frameDrawCount >= gov.drawThreshold) {
       if (gov.drawThreshold < gov.dynamicMaxBatchCap && !gov.atomicSplitActive)
         gov.drawThreshold = gov.dynamicMaxBatchCap;

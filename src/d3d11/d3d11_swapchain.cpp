@@ -361,6 +361,11 @@ namespace dxvk {
     // Vegas: present timing metrics (runs in d3d11.dll where isEnabled()
     // and all per-DLL statics are correctly initialized)
     if (Vegas::isEnabled()) {
+      // First frame: m_lastPresentTime is default-initialized (epoch),
+      // which would give a multisecond delta and corrupt the EMA.
+      if (m_lastPresentTime == std::chrono::steady_clock::time_point{})
+        m_lastPresentTime = std::chrono::steady_clock::now();
+
       auto now = std::chrono::steady_clock::now();
       float frameTime = std::chrono::duration_cast<
         std::chrono::duration<float, std::milli>>(
