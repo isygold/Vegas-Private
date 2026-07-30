@@ -42,6 +42,13 @@ namespace dxvk {
     // Real GPU load from device GpuIdleTicks (0.0–1.0, EMA-smoothed)
     float realGpuLoadEMA = 0.0f;
 
+    // Atomic-split hysteresis state
+    bool     atomicSplitActive = false;
+
+    // Telemetry
+    uint32_t actualFlushesThisFrame = 0;
+    uint64_t frameCounter = 0;
+
     // Rolling window data
     std::array<uint32_t, 120> drawHistoryWindow{};
     uint8_t windowIndex = 0;

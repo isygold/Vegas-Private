@@ -305,7 +305,7 @@ namespace dxvk {
   static constexpr float    DRAW_LOAD_EMA_ALPHA     = 0.3f;
   static constexpr float    GPU_LOAD_EMA_ALPHA      = 0.3f;
   static constexpr float    GPU_LOAD_CPU_BOUND      = 0.3f;  // realGpuLoad < 30% → CPU-bound
-  static constexpr float    GPU_LOAD_GPU_BOUND      = 0.6f;  // realGpuLoad > 60% → GPU-bound
+  static constexpr float    GPU_LOAD_GPU_BOUND      = 0.55f;  // realGpuLoad > 55% → GPU-bound
   // Accumulate over 100ms before updating the GPU-load EMA to avoid counter granularity issues.
   static constexpr float    GPU_LOAD_ACCUM_MS       = 100.0f;
   // Legacy gpuLoad thresholds kept for reference but no longer used.
@@ -419,11 +419,30 @@ namespace dxvk {
     uint32_t predicted = gov.previousFrameDrawCount;
     if (predicted == 0u) predicted = 1u;
 
-    uint32_t calcThreshold = std::max(1u, predicted / gov.targetFlushesPerFrame);
+    uint32_t calcThreshold = std::max(1u, predicted / std::max(1u, gov.targetFlushesPerFrame));
 
     // ---- Dual-mode: atomic for small scenes, capped for heavy 3D ----
     if (predicted < gov.dynamicMaxBatchCap) {
-      gov.drawThreshold = predicted;    // Atomic: flush exactly at end of frame
+      // ---- Atomic-split with hysteresis ----
+      // Asymmetric band: engage at 0.55 (GPU definitely busy), release at 0.40.
+      // Prevents flicker when realGpuLoadEMA hovers near the boundary.
+      if (gov.realGpuLoadEMA > 0.55f) {
+        gov.atomicSplitActive = true;
+      } else if (gov.realGpuLoadEMA < 0.40f) {
+        gov.atomicSplitActive = false;
+      }
+      // else: keep previous state (no change)
+
+      if (gov.atomicSplitActive && gov.targetFlushesPerFrame > 1u) {
+        // Split: batch = max(64, pred / flushes), never exceed predicted.
+        // Safe for low-draw frames: min(pred, split) = pred when pred < 64.
+        // Safe for high-draw frames: split scales with pred/flushes, not hard-clamped.
+        uint32_t split = std::max(gov.floorMinimumCap,
+                        std::max(1u, predicted / gov.targetFlushesPerFrame));
+        gov.drawThreshold = std::min(predicted, split);
+      } else {
+        gov.drawThreshold = predicted;    // Atomic: flush exactly at end of frame
+      }
     } else {
       gov.drawThreshold = std::min(calcThreshold, gov.dynamicMaxBatchCap);
     }
@@ -433,7 +452,8 @@ namespace dxvk {
       " targetFlushes=", gov.targetFlushesPerFrame,
       " calc=", calcThreshold,
       " cap=", gov.dynamicMaxBatchCap,
-      " threshold=", gov.drawThreshold));
+      " threshold=", gov.drawThreshold,
+      " atomicSplit=", gov.atomicSplitActive));
   }
 
   void Vegas::endOfFrameCleanup() {
@@ -489,9 +509,30 @@ namespace dxvk {
     // ---- 4. Sync s_drawThreshold for external consumers (shouldFlush, getDrawThreshold) ----
     s_drawThreshold = gov.drawThreshold;
 
-    // ---- 5. Predictor update + reset ----
+    // ---- 5. Telemetry probes ----
+    // predError every 60 frames: measures frame-to-frame prediction accuracy
+    // If error is consistently >50%, the predictor is unreliable and atomic-split
+    // should be re-evaluated.
+    gov.frameCounter++;
+    if (gov.frameCounter % 60 == 0) {
+      uint32_t pred = gov.previousFrameDrawCount;
+      uint32_t actual = gov.frameDrawCount;
+      uint32_t predAcc = (pred > 0)
+        ? (actual > pred ? actual - pred : pred - actual) * 100 / pred
+        : 0;
+      Logger::debug(str::format(
+        "Vegas: predError pred=", pred,
+        " actual=", actual,
+        " error=", predAcc, "%",
+        " split=", gov.atomicSplitActive,
+        " actualFlushes=", gov.actualFlushesThisFrame,
+        " targetFlushes=", gov.targetFlushesPerFrame));
+    }
+
+    // ---- 6. Reset per-frame counters ----
     gov.previousFrameDrawCount = gov.frameDrawCount;
     gov.frameDrawCount = 0u;
+    gov.actualFlushesThisFrame = 0u;
   }
 
 
@@ -844,7 +885,11 @@ namespace dxvk {
   // ============================================================
 
   bool Vegas::shouldFlush(uint32_t drawCount) {
-    return s_useFastPath && s_enabled && drawCount >= s_drawThreshold;
+    if (s_useFastPath && s_enabled && drawCount >= s_drawThreshold) {
+      s_gov.actualFlushesThisFrame++;
+      return true;
+    }
+    return false;
   }
 
   bool Vegas::shouldSkipBind() {
