@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cerrno>
 #include <chrono>
+#include <ctime>
 #include <fstream>
 #include <sstream>
 #include <inttypes.h>
@@ -3483,27 +3484,48 @@ namespace dxvk {
 
   void Vegas::dumpDrawCsv() {
     Logger::info("Vegas: dumpDrawCsv entered");
+    // Filename includes game name (e.g. vegas_TombRaider_drawcount.csv)
+    std::string gameTag = s_gameName.empty() ? "unknown" : s_gameName;
+    std::string csvPath = "/sdcard/vegas_" + gameTag + "_drawcount.csv";
+
     // Profiling mode (VEGAS_PROFILE_DRAWS=1) appends to the file with
     // session-relative frame numbers instead of overwriting with ring-buffer indices.
     // Production mode (default) overwrites — zero file I/O unless called.
     const char* mode = s_profileActive ? "a" : "w";
-    FILE* fp = fopen("/sdcard/vegas_drawcount.csv", mode);
+    FILE* fp = fopen(csvPath.c_str(), mode);
     if (!fp) {
       Logger::err(str::format(
-        "Vegas: failed to open /sdcard/vegas_drawcount.csv for writing: ",
+        "Vegas: failed to open ", csvPath, " for writing: ",
         strerror(errno)));
       return;
     }
 
+    // Device info for metadata header
+    std::string deviceName = "unknown";
+    if (s_dxvkDevice != nullptr && s_dxvkDevice->adapter() != nullptr) {
+      deviceName = s_dxvkDevice->adapter()->deviceProperties().deviceName;
+    }
+
+    // Timestamp
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_t = std::chrono::system_clock::to_time_t(now);
+    char timeBuf[32];
+    std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", std::localtime(&now_t));
+
     uint32_t h = s_drawHead;
 
     if (s_profileActive) {
-      // Append: write header only if file is brand new (empty),
+      // Append: write metadata header only if file is brand new (empty),
       // so data from multiple sessions accumulates without duplicate headers.
       fseek(fp, 0, SEEK_END);
       bool fileEmpty = (ftell(fp) == 0);
-      if (fileEmpty)
+      if (fileEmpty) {
+        fprintf(fp, "# Device: %s\n",          deviceName.c_str());
+        fprintf(fp, "# Game: %s\n",            gameTag.c_str());
+        fprintf(fp, "# Created: %s\n",         timeBuf);
+        fprintf(fp, "# Columns: session_frame,drawCount\n");
         fprintf(fp, "session_frame,drawCount\n");
+      }
       for (uint32_t i = 0; i < DRAW_HISTORY_SIZE; i++) {
         uint32_t idx = (h + i) % DRAW_HISTORY_SIZE;
         fprintf(fp, "%" PRIu64 ",%u\n",
@@ -3511,7 +3533,11 @@ namespace dxvk {
       }
       s_profileFrame += DRAW_HISTORY_SIZE;
     } else {
-      // Production: overwrite with ring-buffer index (0..DRAW_HISTORY_SIZE-1)
+      // Production: overwrite with metadata + ring-buffer index (0..DRAW_HISTORY_SIZE-1)
+      fprintf(fp, "# Device: %s\n",          deviceName.c_str());
+      fprintf(fp, "# Game: %s\n",            gameTag.c_str());
+      fprintf(fp, "# Created: %s\n",         timeBuf);
+      fprintf(fp, "# Columns: frame,drawCount\n");
       fprintf(fp, "frame,drawCount\n");
       for (uint32_t i = 0; i < DRAW_HISTORY_SIZE; i++) {
         uint32_t idx = (h + i) % DRAW_HISTORY_SIZE;
@@ -3521,7 +3547,7 @@ namespace dxvk {
 
     fclose(fp);
     Logger::debug(str::format(
-        "Vegas: draw histogram written to /sdcard/vegas_drawcount.csv (",
+        "Vegas: draw histogram written to ", csvPath, " (",
         DRAW_HISTORY_SIZE, " frames)"));
   }
 
