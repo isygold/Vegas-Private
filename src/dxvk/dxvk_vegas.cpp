@@ -3474,10 +3474,13 @@ namespace dxvk {
     gov.frameDrawCount++;
 
     // Scene-transition shock absorber: if a mid-frame flush fires because
-    // the predictor underestimated the scene, snap threshold to max cap so
-    // the rest of the frame batches correctly.
+    // the predictor underestimated the scene, snap threshold to cap.
+    // Disabled when atomic-split is active — it defeats the split by
+    // setting threshold=cap, then endOfFrameCleanup syncs the inflated
+    // threshold to s_drawThreshold, preventing mid-frame flushes on the
+    // next frame.
     if (gov.frameDrawCount >= gov.drawThreshold) {
-      if (gov.drawThreshold < gov.dynamicMaxBatchCap)
+      if (gov.drawThreshold < gov.dynamicMaxBatchCap && !gov.atomicSplitActive)
         gov.drawThreshold = gov.dynamicMaxBatchCap;
     }
   }
