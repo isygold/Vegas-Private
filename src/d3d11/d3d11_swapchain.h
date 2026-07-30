@@ -130,6 +130,9 @@ namespace dxvk {
     // Vegas present timing
     std::chrono::steady_clock::time_point m_lastPresentTime;
 
+    // Vegas real GPU load tracking (GpuIdleTicks delta)
+    uint64_t m_prevGpuIdleTicks = 0;
+
     bool                      m_dirty = true;
 
     VkColorSpaceKHR           m_colorspace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;

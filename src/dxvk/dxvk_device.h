@@ -82,6 +82,7 @@ namespace dxvk {
     bool     initialized = false;
     uint32_t tier        = 0;
     float    gpuLoad     = 0.0f;
+    float    realGpuLoad = 0.0f;  ///< from GpuIdleTicks (accurate under Wine)
     float    frameTime   = 0.0f;
     uint32_t perfState   = 0;
     bool     fsrActive   = false;

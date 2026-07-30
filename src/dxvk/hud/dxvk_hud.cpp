@@ -54,6 +54,7 @@ namespace dxvk::hud {
     addItem<HudCsThreadItem>("cs", -1, device);
     addItem<HudGpuLoadItem>("gpuload", -1, device);
     addItem<HudCompilerActivityItem>("compiler", -1, device);
+    addItem<HudVegasItem>("vegas", -1);
   }
   
   

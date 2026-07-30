@@ -7,6 +7,8 @@
 
 #include "../../util/util_time.h"
 
+#include "../dxvk_vegas.h"
+
 #include "dxvk_hud_renderer.h"
 
 namespace dxvk::hud {
@@ -493,6 +495,31 @@ namespace dxvk::hud {
     dxvk::high_resolution_clock::time_point m_timeDone = dxvk::high_resolution_clock::now();
 
     uint32_t computePercentage() const;
+
+  };
+
+  /**
+   * \brief VEGAS governor state HUD item
+   *
+   * Shows draw-load density, cap, threshold, and target flushes
+   * from the autonomous governor. Updated once per frame.
+   */
+  class HudVegasItem : public HudItem {
+  public:
+
+    HudVegasItem();
+
+    ~HudVegasItem();
+
+    void update(dxvk::high_resolution_clock::time_point time);
+
+    HudPos render(
+            HudRenderer&      renderer,
+            HudPos            position);
+
+  private:
+
+    std::string m_vegasString;
 
   };
 

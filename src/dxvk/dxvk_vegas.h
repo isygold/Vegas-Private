@@ -35,6 +35,13 @@ namespace dxvk {
     uint32_t dynamicMaxBatchCap = 2048;
     uint32_t floorMinimumCap = 64;
 
+    // Draw-load density metric (draws/ms, EMA-smoothed)
+    // Replaces the broken gpuLoad sensor under Wine.
+    float drawLoadEMA = 0.0f;
+
+    // Real GPU load from device GpuIdleTicks (0.0–1.0, EMA-smoothed)
+    float realGpuLoadEMA = 0.0f;
+
     // Rolling window data
     std::array<uint32_t, 120> drawHistoryWindow{};
     uint8_t windowIndex = 0;
@@ -159,6 +166,15 @@ namespace dxvk {
     /// predictor update, frame counter reset. Reads ftRatio + gpuLoad from
     /// stored governor/HUD state.
     static void endOfFrameCleanup();
+
+    /// Feed real GPU load from device GpuIdleTicks counter.
+    /// Called every Present from d3d11_swapchain. Stores EMA in
+    /// s_gov.realGpuLoadEMA for use by calculateThreshold().
+    /// \param [in] realGpuLoad busytime/totaltime ratio (0.0–1.0)
+    /// \param [in] frameTimeMs frame interval in ms for weighted accumulation
+    static void updateRealGpuLoad(
+            float                realGpuLoad,
+            float                frameTimeMs);
 
     static bool shouldZeroInit(
             uint32_t             tier);

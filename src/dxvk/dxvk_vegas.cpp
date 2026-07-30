@@ -286,12 +286,32 @@ namespace dxvk {
 
   // ---- Constants ----
   static constexpr uint32_t MIN_TARGET_FLUSHES = 1u;
-  static constexpr uint32_t MAX_TARGET_FLUSHES = 8u;
+  // Increased from 8 to 32 for TBDR-friendly batching.
+  // At targetFlushes=32 and pred=1000 → threshold=31 draws/flush.
+  // At targetFlushes=8  and pred=1000 → threshold=125 draws/flush.
+  // 31 is far more TBDR-tiler-friendly than 125.
+  static constexpr uint32_t MAX_TARGET_FLUSHES = 32u;
   static constexpr float    BASE_EMA_ALPHA     = 0.15f;
   static constexpr float    LAG_RATIO_THRESHOLD    = 1.4f;
-  static constexpr float    CPU_BOUND_LOAD_MAX     = 0.5f;
+  // Draw-load density thresholds (draws/ms, replaces broken gpuLoad sensor).
+  // Computed as: drawLoad = previousFrameDrawCount / frameTimeMs
+  //   HK at 30 FPS: 150 draws / 33ms ≈ 4.5 draws/ms → CPU bound
+  //   TR13 at 30 FPS: 500 draws / 33ms ≈ 15.2 draws/ms → GPU bound
+  // Below DRAW_LOAD_CPU_THRESHOLD  → CPU/Wine bound → reduce flushes
+  // Above DRAW_LOAD_GPU_THRESHOLD  → GPU/geometry bound → increase flushes
+  // Between them: neutral zone (no change) to prevent oscillation
+  static constexpr float    DRAW_LOAD_CPU_THRESHOLD = 8.0f;
+  static constexpr float    DRAW_LOAD_GPU_THRESHOLD = 15.0f;
+  static constexpr float    DRAW_LOAD_EMA_ALPHA     = 0.3f;
+  static constexpr float    GPU_LOAD_EMA_ALPHA      = 0.3f;
+  static constexpr float    GPU_LOAD_CPU_BOUND      = 0.3f;  // realGpuLoad < 30% → CPU-bound
+  static constexpr float    GPU_LOAD_GPU_BOUND      = 0.6f;  // realGpuLoad > 60% → GPU-bound
+  // Accumulate over 100ms before updating the GPU-load EMA to avoid counter granularity issues.
+  static constexpr float    GPU_LOAD_ACCUM_MS       = 100.0f;
+  // Legacy gpuLoad thresholds kept for reference but no longer used.
+  // Old problem: gpuLoad = min(frameTime/16.667, 1.0) always returns 1.0
+  // under Wine because all frames take >16.7ms.
   static constexpr float    IDLE_RATIO_THRESHOLD   = 0.8f;
-  static constexpr float    IDLE_LOAD_MAX          = 0.4f;
   static constexpr uint32_t TUNE_COOLDOWN_FRAMES   = 3u;
 
   float Vegas::updateFrameTiming(float gpuLoad, float frameTime) {
@@ -318,10 +338,30 @@ namespace dxvk {
     // Store in struct for endOfFrameCleanup to read
     gov.ftRatio = ftRatio;
 
+    // ---- Draw-load density metric (draws/ms) ----
+    // Replaces the broken gpuLoad sensor. Under Wine, gpuLoad = min(frameTime/16.667, 1.0)
+    // always returns 1.0 because all frames take >16.7ms. Instead we use
+    // previousFrameDrawCount / frameTime to estimate whether the GPU is geometry-bound
+    // (high draws/ms → increase flushes for TBDR) or CPU/Wine-bound (low draws/ms → reduce
+    // flushes to save CPU overhead).
+    float drawLoad = 0.0f;
+    if (frameTime > 0.5f) {
+      drawLoad = static_cast<float>(gov.previousFrameDrawCount) / frameTime;
+    }
+
+    // EMA-smooth the draw-load for stability
+    if (gov.drawLoadEMA == 0.0f) {
+      gov.drawLoadEMA = drawLoad;
+    } else {
+      gov.drawLoadEMA = drawLoad * DRAW_LOAD_EMA_ALPHA
+                      + gov.drawLoadEMA * (1.0f - DRAW_LOAD_EMA_ALPHA);
+    }
+
     // ---- Closed-loop targetFlushes tuning ----
-    // Uses ftRatio instead of drawsPerMs to align with endOfFrameCleanup — both
-    // read the same ftRatio signal. The 3-frame cooldown prevents oscillation
-    // while reacting faster than the old 15-frame cooldown.
+    // Uses realGpuLoadEMA from device GpuIdleTicks counters (primary).
+    // This is accurate — the DXVK HUD's "GPU: XX%" uses the same counter.
+    // drawLoadEMA is retained for diagnostic HUD display only.
+    // The 3-frame cooldown prevents oscillation.
     static thread_local uint32_t s_framesSinceAdj = 0;
     s_framesSinceAdj++;
 
@@ -329,19 +369,24 @@ namespace dxvk {
       s_framesSinceAdj = 0;
 
       if (ftRatio > LAG_RATIO_THRESHOLD) {
-        // Frame is lagging behind target
-        if (gpuLoad < CPU_BOUND_LOAD_MAX) {
-          // CPU/Wine-bound: reduce flushes aggressively to save CPU cycles
+        // Frame is lagging behind target. Determine cause from real GPU load.
+        if (gov.realGpuLoadEMA > 0.0f && gov.realGpuLoadEMA < GPU_LOAD_CPU_BOUND) {
+          // Low GPU load (< 30%) → CPU/Wine-bound.
+          // Reduce flushes aggressively to save CPU cycles.
           gov.targetFlushesPerFrame = (gov.targetFlushesPerFrame > 2u)
             ? (gov.targetFlushesPerFrame - 2u)
             : MIN_TARGET_FLUSHES;
-        } else {
-          // GPU-bound: flush more to distribute workload
+        } else if (gov.realGpuLoadEMA > GPU_LOAD_GPU_BOUND) {
+          // High GPU load (> 60%) → GPU bound (geometry, shaders, TBDR).
+          // Increase flushes for finer batching.
           if (gov.targetFlushesPerFrame < MAX_TARGET_FLUSHES)
             gov.targetFlushesPerFrame++;
         }
-      } else if (ftRatio < IDLE_RATIO_THRESHOLD && gpuLoad < IDLE_LOAD_MAX) {
-        // Frame is ahead of target and GPU idle → reduce overhead
+        // Neutral zone (GPU_LOAD_CPU_BOUND .. GPU_LOAD_GPU_BOUND)
+        // or realGpuLoadEMA == 0 (not yet initialized):
+        // leave flushes unchanged to avoid oscillation.
+      } else if (ftRatio < IDLE_RATIO_THRESHOLD) {
+        // Frame is ahead of target → reduce overhead
         if (gov.targetFlushesPerFrame > MIN_TARGET_FLUSHES)
           gov.targetFlushesPerFrame--;
       }
@@ -354,7 +399,8 @@ namespace dxvk {
 
     Logger::debug(str::format(
       "Vegas: updateFrameTiming ftRatio=", ftRatio,
-      " gpuLoad=", gpuLoad,
+      " realGpuLoad=", gov.realGpuLoadEMA,
+      " drawLoadEMA=", gov.drawLoadEMA,
       " targetFlushes=", gov.targetFlushesPerFrame));
 
     return ftRatio;
@@ -393,7 +439,6 @@ namespace dxvk {
   void Vegas::endOfFrameCleanup() {
     VegasGovernorState& gov = s_gov;
     float ftRatio = gov.ftRatio;
-    float gpuLoad = s_lastGpuLoad;  // set by pushMetrics earlier in this frame
 
     // ---- 1. Update rolling window ----
     gov.drawHistoryWindow[gov.windowIndex % 120] = gov.frameDrawCount;
@@ -448,6 +493,37 @@ namespace dxvk {
     gov.previousFrameDrawCount = gov.frameDrawCount;
     gov.frameDrawCount = 0u;
   }
+
+
+  void Vegas::updateRealGpuLoad(float realGpuLoad, float frameTimeMs) {
+    // Accumulate over GPU_LOAD_ACCUM_MS to avoid counter granularity issues.
+    // The GpuIdleTicks counter is updated on the submission queue thread
+    // only when the queue goes idle. Single-frame deltas can be zero even
+    // when the GPU is partly busy, so we weight by actual frame time.
+    static uint64_t s_accIdleUs  = 0;   // accumulated idle microseconds
+    static float    s_accTimeMs  = 0.0f; // accumulated wall time
+
+    // realGpuLoad = busy/time. Compute idle fraction for accumulation.
+    float idleRatio = 1.0f - std::clamp(realGpuLoad, 0.0f, 1.0f);
+    s_accIdleUs += uint64_t(idleRatio * (frameTimeMs * 1000.0f));
+    s_accTimeMs += frameTimeMs;
+
+    if (s_accTimeMs >= GPU_LOAD_ACCUM_MS) {
+      float avgGpuLoad = 1.0f - (float(s_accIdleUs) / (s_accTimeMs * 1000.0f));
+      avgGpuLoad = std::clamp(avgGpuLoad, 0.0f, 1.0f);
+
+      auto& gov = s_gov;
+      if (gov.realGpuLoadEMA == 0.0f)
+        gov.realGpuLoadEMA = avgGpuLoad;
+      else
+        gov.realGpuLoadEMA = avgGpuLoad * GPU_LOAD_EMA_ALPHA
+                           + gov.realGpuLoadEMA * (1.0f - GPU_LOAD_EMA_ALPHA);
+
+      s_accIdleUs = 0;
+      s_accTimeMs = 0.0f;
+    }
+  }
+
 
   // VEGAS: Tier-aware zero-init for shader workgroup memory.
   // Tier 1/2 (entry/mid) retain zero-init for Turnip stability;
@@ -3275,6 +3351,7 @@ namespace dxvk {
     auto dev = s_dxvkDevice;
     if (dev != nullptr && dev->m_vegasMetrics.initialized) {
       dev->m_vegasMetrics.gpuLoad    = gpuLoad;
+      dev->m_vegasMetrics.realGpuLoad = s_gov.realGpuLoadEMA;
       dev->m_vegasMetrics.frameTime  = frameTime;
       dev->m_vegasMetrics.perfState  = static_cast<uint32_t>(state);
       dev->m_vegasMetrics.fsrActive  = fsrActive;

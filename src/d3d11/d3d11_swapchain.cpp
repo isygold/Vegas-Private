@@ -366,9 +366,29 @@ namespace dxvk {
         std::chrono::duration<float, std::milli>>(
           now - m_lastPresentTime).count();
       m_lastPresentTime = now;
+
+      // gpuLoad from frameTime is broken under Wine (always 1.0)
+      // but kept for the legacy path; the draw-load metric replaces it.
       float gpuLoad = (frameTime > 0.001f)
         ? std::min(frameTime / 16.667f, 1.0f) : 0.0f;
+
+      // Real GPU load from GpuIdleTicks (accurate under Wine — same
+      // counter the DXVK HUD reads for its "GPU: XX%" line).
+      uint64_t currIdle = m_device->getStatCounters()
+        .getCtr(DxvkStatCounter::GpuIdleTicks);
+      float realGpuLoad = 1.0f;  // default: fully busy if no prior sample
+      if (m_prevGpuIdleTicks != 0) {
+        uint64_t idleDelta = (currIdle > m_prevGpuIdleTicks)
+          ? (currIdle - m_prevGpuIdleTicks) : 0;
+        float totalUs = frameTime * 1000.0f;
+        realGpuLoad = (totalUs > idleDelta)
+          ? (totalUs - idleDelta) / totalUs
+          : 0.0f;
+      }
+      m_prevGpuIdleTicks = currIdle;
+
       Vegas::updateFrameTiming(gpuLoad, frameTime);
+      Vegas::updateRealGpuLoad(realGpuLoad, frameTime);
       Vegas::calculateThreshold();
       Vegas::pushMetrics(gpuLoad, frameTime,
         VegasPerformanceState::Normal,

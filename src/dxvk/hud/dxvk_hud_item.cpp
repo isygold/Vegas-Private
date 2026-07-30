@@ -816,4 +816,41 @@ namespace dxvk::hud {
          / (uint32_t(m_tasksTotal - m_offset));
   }
 
+
+  HudVegasItem::HudVegasItem() {
+
+  }
+
+
+  HudVegasItem::~HudVegasItem() {
+
+  }
+
+
+  void HudVegasItem::update(dxvk::high_resolution_clock::time_point time) {
+    const auto& gov = Vegas::s_gov;
+
+    m_vegasString = str::format(
+      "Vegas: GPU=", uint32_t(gov.realGpuLoadEMA * 100.0f), "%",
+      " cap=", gov.dynamicMaxBatchCap,
+      " thr=", gov.drawThreshold,
+      " flush=", gov.targetFlushesPerFrame,
+      " draw=", uint32_t(gov.drawLoadEMA));
+  }
+
+
+  HudPos HudVegasItem::render(
+          HudRenderer&      renderer,
+          HudPos            position) {
+    position.y += 16.0f;
+
+    renderer.drawText(16.0f,
+      { position.x, position.y },
+      { 0.25f, 0.50f, 1.0f, 1.0f },
+      m_vegasString);
+
+    position.y += 8.0f;
+    return position;
+  }
+
 }
