@@ -33,7 +33,6 @@ namespace dxvk {
     uint32_t rollingMinDraws = UINT32_MAX;
     float    rollingVarianceRatio = 0.0f;
     uint32_t dynamicMaxBatchCap = 2048;
-    uint32_t safeCapTimeoutFrames = 0;
     uint32_t floorMinimumCap = 64;
 
     // Rolling window data

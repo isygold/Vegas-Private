@@ -425,23 +425,20 @@ namespace dxvk {
     }
 
     // ---- 3. Self-calibrating dynamicMaxBatchCap ----
-    if (gov.safeCapTimeoutFrames > 0) {
-      gov.safeCapTimeoutFrames--;
-    } else {
-      uint32_t idealCap = static_cast<uint32_t>(gov.rollingMaxDraws * 1.5f);
+    // Tracks ONLY the game's draw profile, not performance.
+    // The performance signal (ftRatio/gpuLoad) is handled by
+    // targetFlushes in updateFrameTiming() — not duplicated here.
+    // Removed the old shrink-on-ftRatio logic which permanently
+    // locked the cap at floorMinimumCap under Wine (always-slow frames).
+    uint32_t idealCap = std::max(gov.floorMinimumCap,
+        static_cast<uint32_t>(gov.rollingMaxDraws * 1.5f));
 
-      if (ftRatio > 1.4f && gpuLoad > 0.5f) {
-        // GPU drowning — shrink cap aggressively, enter cooldown
-        gov.dynamicMaxBatchCap = static_cast<uint32_t>(gov.dynamicMaxBatchCap * 0.75f);
-        gov.dynamicMaxBatchCap = std::max(gov.floorMinimumCap, gov.dynamicMaxBatchCap);
-        gov.safeCapTimeoutFrames = 30u;
-      } else if (idealCap > gov.dynamicMaxBatchCap) {
-        // Smooth growth, capped rate
-        gov.dynamicMaxBatchCap = std::min(gov.dynamicMaxBatchCap + 512u, idealCap);
-      } else if (idealCap < gov.dynamicMaxBatchCap) {
-        // Decay to match lighter scenes
-        gov.dynamicMaxBatchCap = std::max(gov.floorMinimumCap, idealCap);
-      }
+    if (idealCap > gov.dynamicMaxBatchCap) {
+      // Grow toward idealCap at capped rate (+512/frame)
+      gov.dynamicMaxBatchCap = std::min(gov.dynamicMaxBatchCap + 512u, idealCap);
+    } else if (idealCap < gov.dynamicMaxBatchCap) {
+      // Decay to match lighter scenes
+      gov.dynamicMaxBatchCap = idealCap;
     }
 
     // ---- 4. Sync s_drawThreshold for external consumers (shouldFlush, getDrawThreshold) ----
