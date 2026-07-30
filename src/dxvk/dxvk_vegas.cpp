@@ -413,6 +413,7 @@ namespace dxvk {
     // ---- Variance guard ----
     if (gov.rollingVarianceRatio > 5.0f) {
       gov.drawThreshold = gov.dynamicMaxBatchCap;
+      s_drawThreshold = gov.drawThreshold;  // Sync immediately (same as below)
       return;
     }
 
@@ -424,17 +425,16 @@ namespace dxvk {
 
     // ---- Dual-mode: atomic for small scenes, capped for heavy 3D ----
     if (predicted < gov.dynamicMaxBatchCap) {
-      // ---- Atomic-split with hysteresis ----
-      // Asymmetric band: engage at 0.55 (GPU definitely busy), release at 0.40.
-      // Prevents flicker when realGpuLoadEMA hovers near the boundary.
-      if (gov.realGpuLoadEMA > 0.55f) {
-        gov.atomicSplitActive = true;
-      } else if (gov.realGpuLoadEMA < 0.40f) {
-        gov.atomicSplitActive = false;
-      }
-      // else: keep previous state (no change)
+      // ---- Atomic-split ----
+      // Split when the governor requests >1 flush per frame. The governor
+      // already uses realGpuLoadEMA to raise/lower targetFlushes, so no
+      // separate hysteresis band is needed — just trust the flush count.
+      // Hysteresis removed: the 100ms EMA accumulation + alpha=0.3 smoothing
+      // already prevents rapid toggling, and the hysteresis band was too
+      // conservative for TR13 (43% split=0 during gameplay).
+      gov.atomicSplitActive = (gov.targetFlushesPerFrame > 1u);
 
-      if (gov.atomicSplitActive && gov.targetFlushesPerFrame > 1u) {
+      if (gov.atomicSplitActive) {
         // Split: batch = max(64, pred / flushes), never exceed predicted.
         // Safe for low-draw frames: min(pred, split) = pred when pred < 64.
         // Safe for high-draw frames: split scales with pred/flushes, not hard-clamped.
@@ -447,6 +447,10 @@ namespace dxvk {
     } else {
       gov.drawThreshold = std::min(calcThreshold, gov.dynamicMaxBatchCap);
     }
+
+    // Sync s_drawThreshold immediately so shouldFlush() reads the correct
+    // threshold this frame instead of waiting for endOfFrameCleanup (1-frame lag).
+    s_drawThreshold = gov.drawThreshold;
 
     Logger::debug(str::format(
       "Vegas: calculateThreshold pred=", predicted,
