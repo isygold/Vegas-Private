@@ -85,6 +85,23 @@ namespace dxvk {
   bool     Vegas::s_fgInitialized     = false;
 
 
+  // Pending-drain list for the framegen fence-timeout path.  When a
+  // vkWaitForFences times out, the submitted command buffer may still be
+  // executing; destroying the fence/pool/cmdBuf/views immediately is
+  // undefined behaviour and can wedge the queue (observed as a hard
+  // freeze on Adreno 610 after repeated VK_TIMEOUT).  Instead the
+  // resources are parked here and destroyed on a later dispatch, once
+  // their fence has signalled.
+  struct FgPendingResources {
+    VkFence        fence     = VK_NULL_HANDLE;
+    VkCommandPool  pool      = VK_NULL_HANDLE;
+    VkCommandBuffer cmdBuf   = VK_NULL_HANDLE;
+    VkImageView    views[5]  = {};
+    uint32_t       viewCount = 0;
+  };
+  static FgPendingResources s_fgPending[4];
+  static uint32_t           s_fgPendingCount = 0;
+
   // Framegen intermediate images
   bool     Vegas::s_fgPrevValid       = false;
   uint64_t Vegas::s_fgPrevImage       = 0;
@@ -278,7 +295,7 @@ namespace dxvk {
   }
 
   // ================================================================
-  // VEGAS Autonomous Governor — v4.1
+  // VEGAS Autonomous Governor — v4.2.1d (final)
   // ================================================================
   //
   // Three-function pipeline called from swapchain Present():
@@ -782,11 +799,18 @@ namespace dxvk {
     }
 
     auto& props = device->adapter()->deviceProperties();
-#ifndef _WIN32
+    // Adreno detection must work on every target, including Windows/Wine
+    // PE builds (_WIN32) where adapter->isAdreno() may be unreliable.
+    // Device names are e.g. "Adreno (TM) 610", "Turnip Adreno 730",
+    // "Qualcomm Adreno 830" — match case-insensitively as the primary
+    // signal so tier classification (classifyAdrenoTier below) runs on
+    // Wine/Winlator/Win8 builds identically to Linux.
     bool isAdreno = device->adapter()->isAdreno();
-#else
-    bool isAdreno = false;
-#endif
+    if (!isAdreno) {
+      std::string dname(props.deviceName);
+      for (auto& c : dname) c = std::tolower(static_cast<unsigned char>(c));
+      isAdreno = (dname.find("adreno") != std::string::npos);
+    }
 
     // Local tier before config override
     uint32_t detectedTier = 0;
@@ -797,14 +821,8 @@ namespace dxvk {
       s_bindSkipEnabled = true;
       detectedTier     = classifyAdrenoTier(props.deviceName);
     } else {
-      // Auto: detect Adreno
-      if (!isAdreno) {
-        // Fallback: check device name
-        std::string dname(props.deviceName);
-        for (auto& c : dname) c = std::tolower(static_cast<unsigned char>(c));
-        isAdreno = (dname.find("adreno") != std::string::npos);
-      }
-
+      // Auto: detect Adreno (isAdreno already includes the device-name
+      // match, so this branch now only gates tier assignment)
       if (isAdreno) {
         s_enabled        = true;
         s_bindSkipEnabled = true;
@@ -2603,6 +2621,65 @@ namespace dxvk {
    *  On the first call (no previous frame), saves curImage internally and
    *  returns false.  Subsequent calls produce the interpolated frame.
    */
+
+  // Destroy one drained entry's resources and compact the list (swap-remove).
+  static void fgDestroyPendingEntry(VkDevice device, uint32_t idx) {
+    FgPendingResources& p = s_fgPending[idx];
+    for (uint32_t v = 0; v < p.viewCount; v++)
+      s_vk.vkDestroyImageView(device, p.views[v], nullptr);
+    s_vk.vkDestroyFence(device, p.fence, nullptr);
+    s_vk.vkFreeCommandBuffers(device, p.pool, 1, &p.cmdBuf);
+    s_vk.vkDestroyCommandPool(device, p.pool, nullptr);
+    s_fgPending[idx] = s_fgPending[--s_fgPendingCount];
+  }
+
+  // Drain entries whose fence has signalled.  Called at the top of
+  // framegenDispatch, before any pool reset or allocation, so resources
+  // from a previous timeout are freed before new submissions race them.
+  static void fgDrainPending(VkDevice device) {
+    uint32_t i = 0;
+    while (i < s_fgPendingCount) {
+      VkResult vr = s_vk.vkWaitForFences(device, 1,
+          &s_fgPending[i].fence, VK_TRUE, 0);
+      if (vr == VK_SUCCESS)
+        fgDestroyPendingEntry(device, i);   // re-check slot i
+      else
+        i++;                                // still in flight, keep parked
+    }
+  }
+
+  // Park in-flight resources for deferred destruction after a fence
+  // timeout.  If the list is full, block on the oldest entry until it
+  // signals (bounded only by device health; VK_ERROR_DEVICE_LOST returns
+  // instead of hanging).  On persistent device-lost we leak rather than
+  // risk destroying still-executing objects.
+  static void fgQueuePending(VkDevice device, VkFence fence,
+      VkCommandPool pool, VkCommandBuffer cmdBuf,
+      const VkImageView* views, uint32_t viewCount) {
+    if (s_fgPendingCount >= 4) {
+      VkResult vr = s_vk.vkWaitForFences(device, 1,
+          &s_fgPending[0].fence, VK_TRUE, UINT64_MAX);
+      if (vr == VK_SUCCESS) {
+        fgDestroyPendingEntry(device, 0);
+      } else {
+        Logger::warn(str::format(
+            "Vegas FG: pending list full, oldest wait failed (", vr,
+            ") — deferring cleanup"));
+        return;
+      }
+    }
+    if (s_fgPendingCount < 4) {
+      FgPendingResources& p = s_fgPending[s_fgPendingCount++];
+      p = FgPendingResources();
+      p.fence     = fence;
+      p.pool      = pool;
+      p.cmdBuf    = cmdBuf;
+      p.viewCount = viewCount;
+      for (uint32_t v = 0; v < viewCount; v++)
+        p.views[v] = views[v];
+    }
+  }
+
   bool Vegas::framegenDispatch(
           VkImage              curImage,
           VkImage              prevImage,
@@ -2631,6 +2708,10 @@ namespace dxvk {
       Logger::debug("Vegas FG: skipped — Vulkan functions not available");
       return false;
     }
+
+    // Free resources from a previous fence-timeout before this frame
+    // allocates/resets anything (prevents reuse races with in-flight work).
+    fgDrainPending(device);
 
     if (!initFgPipeline(device)) {
       Logger::debug("Vegas FG: skipped — pipeline init failed");
@@ -2766,11 +2847,11 @@ namespace dxvk {
       vr = s_vk.vkWaitForFences(device, 1, &fence, VK_TRUE, 50'000'000);
       if (vr != VK_SUCCESS) {
         // Bounded wait: fail-closed on a dead/hung queue instead of
-        // stalling the present thread forever on the capture path.
+        // stalling the present thread forever on the capture path.  The
+        // CB may still be executing — park the resources and let a later
+        // dispatch destroy them once the fence signals.
         Logger::warn(str::format("Vegas FG: first-frame capture wait failed (", vr, ")"));
-        s_vk.vkDestroyFence(device, fence, nullptr);
-        s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
-        s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+        fgQueuePending(device, fence, cmdPool, cmdBuf, nullptr, 0);
         return false;
       }
 
@@ -3370,8 +3451,15 @@ namespace dxvk {
 
     vr = s_vk.vkWaitForFences(device, 1, &fence, VK_TRUE, 50'000'000);
     if (vr != VK_SUCCESS) {
+      // CB may still be executing — do NOT destroy here.  Park everything
+      // in the pending list; a later dispatch drains it once the fence
+      // signals.  This is the fix for the repeated-timeout hard freeze.
       Logger::warn(str::format("Vegas FG: vkWaitForFences timeout (", vr, ")"));
-      fgCleanup(8); return false;
+      VkImageView timedViews[5] = {
+        srcViewCur, srcViewPrev, motionView, motionFilteredView, outputView
+      };
+      fgQueuePending(device, fence, cmdPool, cmdBuf, timedViews, 5);
+      return false;
     }
 
     // Cleanup views
