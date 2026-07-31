@@ -2572,16 +2572,17 @@ namespace dxvk {
       return false;
     }
 
-    // s_fgMotionImage: raw motion vectors (R16G16_SFLOAT — matches the
-    // shaders' declared Rg16f storage format)
-    if (!createImage(mw, mh, VK_FORMAT_R16G16_SFLOAT,
+    // s_fgMotionImage: raw motion vectors + block SAD confidence
+    // (R16G16B16A16_SFLOAT — matches shaders' Rgba16f storage format;
+    // xy = motion vector, z = normalized block SAD ∈ [0,1])
+    if (!createImage(mw, mh, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         Vegas::s_fgMotionImage, Vegas::s_fgMotionMemory)) {
       return false;
     }
 
-    // s_fgMotionFiltered: median-filtered motion (R16G16_SFLOAT)
-    if (!createImage(mw, mh, VK_FORMAT_R16G16_SFLOAT,
+    // s_fgMotionFiltered: median-filtered motion + min-SAD (R16G16B16A16_SFLOAT)
+    if (!createImage(mw, mh, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         Vegas::s_fgMotionFiltered, Vegas::s_fgMotionFMemory)) {
       return false;
@@ -2983,18 +2984,18 @@ namespace dxvk {
       fgCleanup(4); return false;
     }
 
-    // Motion raw view (R16G16_SFLOAT — matches shader Rg16f)
+    // Motion raw view (R16G16B16A16_SFLOAT — matches shader Rgba16f)
     viewCI.image  = motionRaw;
-    viewCI.format = VK_FORMAT_R16G16_SFLOAT;
+    viewCI.format = VK_FORMAT_R16G16B16A16_SFLOAT;
     vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &motionView);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreateImageView(motion) failed (", vr, ")"));
       fgCleanup(5); return false;
     }
 
-    // Motion filtered view (R16G16_SFLOAT)
+    // Motion filtered view (R16G16B16A16_SFLOAT)
     viewCI.image  = motionFiltered;
-    viewCI.format = VK_FORMAT_R16G16_SFLOAT;
+    viewCI.format = VK_FORMAT_R16G16B16A16_SFLOAT;
     vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &motionFilteredView);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreateImageView(motionFiltered) failed (", vr, ")"));
@@ -3305,6 +3306,11 @@ namespace dxvk {
       //          a low floor, preserving real interpolation.
       //   slope: 0.1 (ramp rate over motion magnitude).
       //   cap:   min(floor + 0.1, 0.95) — ramp is clamped to cap in-shader.
+      //   pc[1].w: SAD confidence threshold (normalized block SAD ∈ [0,1];
+      //   scene-cut distrust = clamp(sad / threshold, 0, 1); final blend =
+      //   max(blendFromMag, cap * distrust).  A block whose best luma
+      //   match is worse than the threshold is treated as a scene change
+      //   and the warp presents mostly the current frame.
       //   Watchdog: 5 net slow waits (> 25ms) force floor 0.95; clean
       //             waits decay the counter by one (oscillation-tolerant).
       //   Input: gov.smoothFrameTimeMs — governor EMA, updated EVERY
@@ -3323,11 +3329,12 @@ namespace dxvk {
       }
       float blendSlope = 0.1f;
       float blendCap   = std::min(blendFloor + 0.1f, 0.95f);
+      float sadThreshold = 0.15f;  // 15% mean luma error → full distrust
 
       float pcData[8] = {
         float(extent.width), float(extent.height),
         float(motionGX), 0.0f,
-        blendFloor, blendSlope, blendCap, 0.0f };
+        blendFloor, blendSlope, blendCap, sadThreshold };
       s_vk.vkCmdPushConstants(cmdBuf, pipelineLayout,
           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcData), pcData);
     }

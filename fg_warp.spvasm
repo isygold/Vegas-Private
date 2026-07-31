@@ -1,7 +1,7 @@
 ; SPIR-V
 ; Version: 1.0
 ; Generator: Khronos Glslang Reference Front End; 11
-; Bound: 310
+; Bound: 470
 ; Schema: 0
                OpCapability Shader
                OpCapability StorageImageExtendedFormats
@@ -89,7 +89,10 @@
     %v4float = OpTypeVector %float 4
          %15 = OpTypeFunction %v4float %_ptr_UniformConstant_7 %_ptr_Function_v2float %_ptr_Function_v2int
          %21 = OpTypeFunction %v2float %_ptr_Function_v2int %_ptr_Function_v2int
+        %420 = OpTypeFunction %float %_ptr_Function_v2int %_ptr_Function_v2int
   %float_0_5 = OpConstant %float 0.5
+   %float_0 = OpConstant %float 0
+   %float_1 = OpConstant %float 1
       %int_0 = OpConstant %int 0
          %44 = OpConstantComposite %v2int %int_0 %int_0
       %int_1 = OpConstant %int 1
@@ -102,7 +105,7 @@
 %_ptr_Function_float = OpTypePointer Function %float
      %uint_1 = OpConstant %uint 1
      %int_16 = OpConstant %int 16
-        %125 = OpTypeImage %float 2D 0 0 0 2 Rg16f
+        %125 = OpTypeImage %float 2D 0 0 0 2 Rgba16f
 %_ptr_UniformConstant_125 = OpTypePointer UniformConstant %125
 %uFilteredMotion = OpVariable %_ptr_UniformConstant_125 UniformConstant
         %uPC = OpTypeStruct %v4float %v4float
@@ -118,6 +121,7 @@
        %bool = OpTypeBool
 %_ptr_Function_int = OpTypePointer Function %int
      %uint_2 = OpConstant %uint 2
+     %uint_3 = OpConstant %uint 3
 %_ptr_PushConstant_float = OpTypePointer PushConstant %float
    %float_16 = OpConstant %float 16
   %uPrevious = OpVariable %_ptr_UniformConstant_7 UniformConstant
@@ -280,6 +284,15 @@
         %260 = OpLabel
                OpBranch %248
         %248 = OpLabel
+        %307 = OpLoad %float %blendFactor
+        %308 = OpFunctionCall %float %getMotionConfidence_vi2_vi2_ %param %param_0
+        %309 = OpAccessChain %_ptr_PushConstant_float %pc %int_1 %uint_3
+        %310 = OpLoad %float %309
+        %311 = OpFDiv %float %308 %310
+        %312 = OpExtInst %float %1 FClamp %311 %float_0 %float_1
+        %313 = OpFMul %float %305 %312
+        %314 = OpExtInst %float %1 FMax %307 %313
+                OpStore %blendFactor %314
         %263 = OpLoad %v4float %prevColor
         %264 = OpLoad %v4float %currColor
         %265 = OpLoad %float %blendFactor
@@ -405,5 +418,21 @@
         %129 = OpLoad %v2int %blockId
         %130 = OpImageRead %v4float %128 %129
         %131 = OpVectorShuffle %v2float %130 %130 0 1
-               OpReturnValue %131
-               OpFunctionEnd
+                OpReturnValue %131
+                OpFunctionEnd
+%getMotionConfidence_vi2_vi2_ = OpFunction %float None %420
+    %pixelPosC = OpFunctionParameter %_ptr_Function_v2int
+  %motionSizeC = OpFunctionParameter %_ptr_Function_v2int
+        %421 = OpLabel
+        %422 = OpLoad %v2int %pixelPosC
+        %423 = OpCompositeConstruct %v2int %int_16 %int_16
+        %424 = OpSDiv %v2int %422 %423
+        %425 = OpLoad %v2int %motionSizeC
+        %426 = OpCompositeConstruct %v2int %int_1 %int_1
+        %427 = OpISub %v2int %425 %426
+        %428 = OpExtInst %v2int %1 SClamp %424 %44 %427
+        %429 = OpLoad %125 %uFilteredMotion
+        %430 = OpImageRead %v4float %429 %428
+        %431 = OpCompositeExtract %float %430 2
+                OpReturnValue %431
+                OpFunctionEnd
