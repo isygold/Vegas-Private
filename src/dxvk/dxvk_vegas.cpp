@@ -445,10 +445,12 @@ namespace dxvk {
       // already prevents rapid toggling, and the hysteresis band was too
       // conservative for TR13 (43% split=0 during gameplay).
       if (gov.atomicSplitActive) {
-        // Split: batch = max(64, pred / flushes), never exceed predicted.
-        // Low-draw frames: floorMinimumCap (64) prevents shouldFlush from
-        // firing on every draw when pred is small (e.g. first frame pred=1).
-        // High-draw frames: split scales with pred/flushes as intended.
+        // Split: batch = max(floor, pred / flushes), never exceed predicted.
+        // floorMinimumCap = tile-overflow safety line (~600 on Adreno 610):
+        // prevents shouldFlush from firing on every draw when pred is small
+        // (e.g. first frame pred=1), and caps flush count well below the
+        // ~8/frame Turnip state-corruption limit. Frames <= floor never
+        // split (0 flushes); heavier frames split into floor-sized passes.
         uint32_t split = std::max(gov.floorMinimumCap,
                         std::max(1u, predicted / gov.targetFlushesPerFrame));
         gov.drawThreshold = std::max(gov.floorMinimumCap, std::min(predicted, split));

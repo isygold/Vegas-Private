@@ -33,7 +33,14 @@ namespace dxvk {
     uint32_t rollingMinDraws = UINT32_MAX;
     float    rollingVarianceRatio = 0.0f;
     uint32_t dynamicMaxBatchCap = 2048;
-    uint32_t floorMinimumCap = 64;
+    // floorMinimumCap = tile-overflow safety line (draws per render pass).
+    // TR13-validated on Adreno 610: 0 flushes/frame was clean except for
+    // geometry disappearing on 1000+ draw single passes (tile buffer
+    // overflow); 8-14 flushes/frame broke Turnip text/state. 600 sits
+    // between: frames <=600 draws never split (0 flushes), heavier frames
+    // split into <=600-draw passes (1-2 flushes max) — under the ~8
+    // flush/frame Turnip limit, under the ~1000 draw/pass overflow line.
+    uint32_t floorMinimumCap = 600;
 
     // Draw-load density metric (draws/ms, EMA-smoothed)
     // Replaces the broken gpuLoad sensor under Wine.
