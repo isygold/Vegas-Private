@@ -6622,6 +6622,15 @@ namespace dxvk {
 
     m_state.gp.pipeline = nullptr;
     m_state.cp.pipeline = nullptr;
+
+    // VEGAS: a fresh command buffer has no bound pipeline — reset the
+    // bind-skip cache or the first pipeline bind after any flush gets
+    // skipped, recording draws with no pipeline (geometry vanishes).
+    // Root cause of the persistent rock/object disappearing across all
+    // builds: mid-frame flushes (query polls, maps, vegas splits) call
+    // beginRecording -> beginCurrentCommands, and the stale cache
+    // suppressed the mandatory rebind (GpDirtyPipeline above).
+    m_vegasProfile.lastBoundVkPipeline = VK_NULL_HANDLE;
   }
 
 
