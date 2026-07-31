@@ -87,7 +87,7 @@ Per-Frame (D3D11SwapChain::PresentImage / D3D9SwapChainEx::PresentImage):
   measure frameTime
   -> compute GPU load from frameTime/target ratio
   -> pushMetrics() -> stores gpuLoad, frameTime, perfState in Vegas statics
-  -> analyzePerformance() -> tuneThreshold() -> TBDR-inverted governor
+  -> updateFrameTiming() -> calculateThreshold() -> endOfFrameCleanup() (gov v4.1)
   -> shouldUpscale() -> FSR dispatch (cross-DLL safe in d3d11.dll)
   -> needsFrameGen() -> framegenDispatch() if eligible
 
@@ -202,57 +202,81 @@ shadow-map) are compiled synchronously.
 
 | Function | Lines | Purpose |
 |----------|-------|---------|
-| `classifyAdrenoTier(const char* deviceName)` | 89-122 | Parses device name into tier 1/2/3 |
-| `Vegas::initializeProfile()` | ~515-630 | Master init: classify tier, bake thresholds, apply game presets |
-| `Vegas::getTier()` | ~560 | Returns `s_tier` |
+| `classifyAdrenoTier(const char* deviceName)` | 186-222 | Parses device name into tier 1/2/3 |
+| `Vegas::initializeProfile()` | ~767-830 | Master init: classify tier, bake thresholds, apply game presets |
+| `Vegas::getTier()` | 893 | Returns `s_tier` |
 
 **Tier Mapping:**
 
-| Condition | Tier | Draw Threshold | HAAE Threshold | Cap Multiplier |
-|-----------|------|----------------|----------------|----------------|
-| gen <= 5, or 6xx < 620 | 1 (entry) | 100 | 30 | 1.5x |
-| 6xx 620-689, or 7xx < 730 | 2 (mid) | 200 | 50 | 1.8x |
-| 690+, 7xx >= 730, or 8xx+ | 3 (high) | 350 | 100 | 2.5x |
+| Condition | Tier | Bake Threshold | HAAE Threshold |
+|-----------|------|----------------|----------------|
+| gen <= 5, or 6xx < 620 | 1 (entry) | 100 | 30 |
+| 6xx 620-689, or 7xx < 730 | 2 (mid) | 200 | 50 |
+| 690+, 7xx >= 730, or 8xx+ | 3 (high) | 350 | 100 |
+
+The cap multiplier column was removed in governor v4.1 — the runtime cap is
+now the self-calibrating `dynamicMaxBatchCap` (rolling-max * 1.5, +512/frame
+growth), not a fixed per-tier multiplier.
 
 **Config override:** `vegas.forceTier = 0` (auto), `1`/`2`/`3` (manual)
 
-**Per-game presets override base thresholds:**
+**Per-game presets override base thresholds (auto-detected from exe name, no config option):**
 - Unity engine games → `{200, 400, 700}` auto-detected from exe name
 - General (non-Unity) → `{100, 200, 350}` Ph42oN battle-tested defaults
-- Config override: `vegas.gameConfig = Unity` / `General` / `Auto`
 
-**Thresholds are Ph42oN GPLAsync battle-tested defaults** — restored after the `m_drawsSinceSubmit` root cause fix. With the counter now resetting per frame, these are true per-submission caps, not cumulative traps.
+Bake thresholds seed the governor — the runtime threshold is recomputed per
+frame by `calculateThreshold()` and never drops below `floorMinimumCap` (600).
 
 ---
 
-### 3.3 Adaptive Governor (TBDR-Inverted)
+### 3.3 Adaptive Governor (v4.1 — TBDR-Aware Submission Pacing)
 
 **File:** `src/dxvk/dxvk_vegas.cpp`
 
+Three-function pipeline, called from swapchain `Present()`:
+
 | Function | Lines | Purpose |
 |----------|-------|---------|
-| `tuneThreshold(uint32_t&, float, float, uint32_t)` | 210-249 | TBDR-inverted governor |
-| `tuneThreshold(float, float)` | 253-275 | Self-contained: EMA + adaptive cooldown |
+| `updateFrameTiming(float, float)` | 318-408 | EMA smoothing (dynamic alpha), draw-load density, closed-loop targetFlushes tuning |
+| `calculateThreshold()` | 410-476 | Proportional predictor + dual-mode atomic-split vs capped |
+| `endOfFrameCleanup()` | 478-560 | Rolling window, self-calibrating cap, predictor update |
+| `recordDrawCall()` | 3506+ | Shock absorber: snap threshold to cap after mid-frame flush |
 
-**Governor Logic (TBDR-inverted):**
+**Draw-load density metric (draws/ms):** replaces the gpuLoad sensor, which is
+broken under Wine (always 1.0 because frames exceed 16.7ms). `drawLoad =
+previousFrameDrawCount / frameTime`, EMA-smoothed with alpha 0.3.
+
+**Closed-loop targetFlushes tuning (1–32):**
 ```
-if (load > 0.85f AND frameTime > 20.0f)   -> cap (GPU-bound, RAISE threshold)
-if (load < 0.45f AND frameTime > 10.0f)    -> floor (CPU-bound, LOWER threshold)
-else                                        -> base (balanced, reset)
+if (ftRatio > 1.4f AND realGpuLoadEMA < 0.30f)  -> CPU-bound:  reduce flushes by 2 (save CPU cycles)
+if (ftRatio > 1.4f AND realGpuLoadEMA > 0.55f)  -> GPU-bound:  increase flushes by 1 (finer TBDR batching)
+if (ftRatio < 0.8f)                              -> ahead of target: reduce flushes by 1
+else                                              -> neutral: no change (anti-oscillation)
 ```
+- `realGpuLoadEMA` comes from device `GpuIdleTicks` counters — the same source
+  as the DXVK HUD's "GPU: XX%"
+- Cooldown: 3 frames between adjustments (`TUNE_COOLDOWN_FRAMES`)
+- Frame target anchor: 60 FPS, falls back to 30 FPS when smoothed ft > 28ms
 
-**Cap Multipliers (C2 re-tune):**
-- Tier 1: 1.5x (100 -> 150 max)
-- Tier 2: 1.8x (200 -> 360 max)
-- Tier 3: 2.5x (350 -> 875 max)
+**Proportional predictor + dual-mode:**
+- `predicted` = previous frame draw count
+- Atomic-split: `split = max(floorMinimumCap, predicted / targetFlushes)`
+- Heavy 3D (predicted >= dynamicMaxBatchCap): capped at
+  `min(calcThreshold, dynamicMaxBatchCap)`
+- `dynamicMaxBatchCap` self-calibrates: grows toward `rollingMaxDraws * 1.5`
+  at +512/frame, decays instantly on lighter scenes
 
-**Floor (CPU-bound flush):** `max(50, base / 2)`
+**Variance guard (disabled):** the 120-frame rolling window ratio guard was
+removed — a single 1-draw frame (pause/loading) poisoned the window for 120+
+frames and pinned the threshold at cap, disabling atomic-split entirely.
 
-**EMA Smoothing:** `s_smoothFt = s_smoothFt * 0.9 + frameTime * 0.1`
+**EMA Smoothing:** dynamic alpha — 0.15 base, 0.5 on spikes >3ms, 0.8 on
+spikes >10ms.
 
-**Adaptive Cooldown:** `ceil(ft * 0.3)`, clamped [5, 30] frames
-- At 60fps (16.7ms): ~5 frame cooldown
-- At 30fps (33.3ms): ~10 frame cooldown
+**floorMinimumCap = 600** — tile-overflow safety line, TR13-validated on
+Adreno 610. Frames <=600 draws never split (0 flushes); heavier frames split
+into <=600-draw passes, keeping flush count under the ~8/frame Turnip
+state-corruption limit.
 
 **v4.2 Governor Hardening (release line):**
 - All six draw paths (incl. `drawIndirect`, `drawIndexedIndirectCount`) increment
@@ -265,7 +289,7 @@ else                                        -> base (balanced, reset)
 - `floorMinimumCap = 600` — tile-overflow safety line; the governor never lets a
   render pass accumulate beyond 600 draws before splitting (v4.2.2)
 - `maxPassDraws` telemetry — peak draw count at flush-check time, reported as
-  `maxPass=NNN` in the predError HUD line (pass-size proxy)
+  `maxPass=NNN` in the predError debug log line (pass-size proxy)
 
 ---
 
@@ -474,11 +498,14 @@ struct GamePreset {
 
 | Pattern | Label | Thresholds | HAAE |
 |---------|-------|-----------|------|
-| `""` (catch-all) | General | {100, 200, 350} | {30, 50, 100} |
-| `"Unity"` | Unity | {200, 400, 700} | {60, 100, 200} |
+| `"*"` (catch-all) | General | {100, 200, 350} | {30, 50, 100} |
+| `"Unity"` / `"unity"` | Unity | {200, 400, 700} | {50, 80, 150} |
 
-Applied during `initializeProfile()` — overrides the tier-based defaults.
-Config override: `vegas.gameConfig = Unity` / `General` / `Auto`.
+Applied during `initializeProfile()` — seeds the governor's bake thresholds.
+Presets are auto-detected from the exe name only; there is NO `vegas.gameConfig`
+config option to force them (the old `vegas.gameConfig` docs were stale —
+verified against `dxvk_options.cpp`, which registers only `dxvk.enableStarProfile`
+and `vegas.forceTier`).
 
 ### 3.13 Performance Analysis & Logging
 
@@ -516,7 +543,6 @@ else   -> 0.25 (lots of headroom)
 | `dxvk.gplAsyncCache` | bool | false | `dxvk_options.h:31` | GPL state cache with fixes |
 | `dxvk.enableStarProfile` | Tristate | Auto | `dxvk_options.h:52` | Master switch for VEGAS features |
 | `vegas.forceTier` | int32 | 0 | `dxvk_options.h:55` | Override GPU tier detection |
-| `vegas.gameConfig` | string | Auto | `dxvk_options.h:58` | Per-game preset: Auto, Unity, General |
 | `dxvk.enableGraphicsPipelineLibrary` | Tristate | Auto | `dxvk_options.h:23` | Vulkan GPL support |
 | `dxvk.numCompilerThreads` | int32 | 0 | `dxvk_options.h:20` | Override compiler thread count |
 
@@ -526,8 +552,6 @@ else   -> 0.25 (lots of headroom)
 | `DXVK_ASYNC=0` | Disable async compilation (overrides `dxvk.enableAsync`) |
 | `DXVK_GPLASYNCCACHE=1` | Enable GPL state cache (overrides `dxvk.gplAsyncCache`) |
 | `DXVK_HUD=...` | Standard DXVK HUD configuration |
-| `VEGAS_GAME_CONFIG=Unity` | Force Unity preset (overrides `vegas.gameConfig`) |
-| `VEGAS_GAME_CONFIG=General` | Force General preset |
 
 ---
 
@@ -583,7 +607,7 @@ else   -> 0.25 (lots of headroom)
 
 ### What to Monitor
 ```bash
-adb logcat -s "DXVK" | grep -E "Vegas:|GetImage|tuneThreshold|compiler"
+adb logcat -s "DXVK" | grep -E "Vegas:|GetImage|calculateThreshold|updateFrameTiming|compiler"
 ```
 
 ### Regression Checklist
@@ -612,7 +636,7 @@ adb logcat -s "DXVK" | grep -E "Vegas:|GetImage|tuneThreshold|compiler"
 ### "Static state is thread-unsafe"
 - All baked state (`s_*` variables) is written once from `configure()` and
   read-only afterwards — no synchronization needed
-- `thread_local` variables in `tuneThreshold()` and `analyzePerformance()`
+- `thread_local` variables in `updateFrameTiming()` and `analyzePerformance()`
   prevent cross-context interference
 
 ### "Config option namespaces"

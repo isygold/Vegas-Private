@@ -25,18 +25,19 @@ Eliminates shader compilation stutter by compiling pipelines asynchronously in b
 ### Tier-Based Auto-Tuning
 Adreno GPUs are classified into 3 tiers from the KGSL device model:
 
-| Tier | Adreno GPUs | Draw Threshold | HAAE Threshold | Cap Multiplier |
-|------|-------------|----------------|----------------|----------------|
-| 1 | 506-620 (low-end) | 100 | 30 | 1.5x |
-| 2 | 630-690 (mid) | 200 | 50 | 1.8x |
-| 3 | 7xx/8xx (high-end) | 350 | 100 | 2.5x |
+| Tier | Adreno GPUs | Bake Threshold | HAAE Threshold |
+|------|-------------|----------------|----------------|
+| 1 | 5xx, 6xx < 620 (entry) | 100 | 30 |
+| 2 | 6xx 620-689, 7xx < 730 (mid) | 200 | 50 |
+| 3 | 690+, 7xx >= 730, 8xx+ (high-end) | 350 | 100 |
 
-Thresholds are Ph42oN GPLAsync battle-tested defaults. Unity engine games automatically receive higher headroom (`{200,400,700}`) via the game preset system.
+Bake thresholds seed the governor — the **runtime** threshold is computed by the
+governor every frame (see below). Unity engine games automatically receive
+`{200, 400, 700}` via the per-game preset system.
 
 ### FSR 1.0 Compute Upscaler
 Full FSR 1.0 EASU compute pipeline with async dispatch via timeline semaphore:
-- Upscales when render resolution is below swapchain resolution
-- Configurable per-game behavior
+- Upscales when render resolution is meaningfully below swapchain resolution (auto mode, ratio < 0.85)
 - Eliminates 0.5-1.0ms CPU stall on every upscaled frame
 
 ### 3-Pass Motion-Compensated Frame Generation
@@ -47,21 +48,20 @@ Available on Tier 2 (<= 29ms frametime) and Tier 3 (<= 33ms frametime):
 
 Compute-only pipeline. Disabled on Tier 1 (insufficient compute budget).
 
-### Adaptive Governor — TBDR-Inverted
-EMA-smoothed frame-time telemetry with adaptive cooldown:
-- **GPU-bound** (load>0.85, ft>20ms) — raise threshold (batch more, amortize overhead)
-- **CPU-bound** (load<0.45, ft>10ms) — lower threshold (flush earlier, TBDR tile pacing)
-- **Balanced** — reset to base
-- **Adaptive cooldown:** `ceil(ft x 0.3)`, clamped [5,30] frames
+### Adaptive Governor — TBDR-Aware Submission Pacing
+Three-function pipeline running each frame (`updateFrameTiming` → `calculateThreshold` → `endOfFrameCleanup`):
+- **Draw-load density metric** (draws/ms, EMA-smoothed) — the reliable geometry signal under Wine where the classic GPU-load sensor is broken
+- **Closed-loop `targetFlushes` tuning** (1–32/frame): real GPU load from device `GpuIdleTicks` drives flush count — lagging + low GPU load → CPU-bound → reduce flushes; lagging + high GPU load → GPU-bound → raise flushes for finer TBDR batching
+- **Proportional predictor** — threshold = previous frame draws / targetFlushes, with a self-calibrating `dynamicMaxBatchCap` (rolling-max based)
+- **Atomic-split dual-mode** — small scenes split at `floorMinimumCap` (600, TR13-validated tile-overflow safety line); heavy 3D frames capped by the batch cap
+- **Variance guard** on the 120-frame rolling window — disabled after it poisoned the threshold (single pause frame broke tuning for 120+ frames)
 
-**Why inverted?** Desktop DXVK raises thresholds for both CPU-bound and GPU-bound scenarios. On TBDR Adreno, raising the threshold when CPU-bound makes the problem worse — more draws accumulate in the tile buffer. The inverted path correctly reduces the threshold to force earlier flushes.
+**Why TBDR-aware?** Desktop DXVK batches aggressively on CPU-bound frames. On tile-based Adreno, unbounded batching overflows the tile buffer; the governor instead splits submissions to match the tile budget, and only batches when the draw profile says it is safe.
 
 ### Per-Game Config Presets
 Auto-detected from the game executable name — no config file needed:
-- **Unity engine:** threshold `{200, 400, 700}` — accommodates higher draw batch volume
-- **General:** threshold `{100, 200, 350}` — Ph42oN defaults for everything else
-
-Override with `vegas.gameConfig = Unity` / `vegas.gameConfig = General` in `dxvk.conf`.
+- **Unity engine:** bake thresholds `{200, 400, 700}`, HAAE `{50, 80, 150}` — accommodates higher draw batch volume
+- **General:** bake thresholds `{100, 200, 350}`, HAAE `{30, 50, 100}` — Ph42oN defaults for everything else
 
 ### Auto Crash Reports & Session Tracking
 Every game session generates three files in the game directory automatically:
@@ -124,13 +124,13 @@ dxvk.enableAsync = True
 # GPL async state cache: False (default), True
 dxvk.gplAsyncCache = False
 
-# Per-game config preset: Auto (default), Unity, General
-vegas.gameConfig = Auto
+# Per-game config preset: auto-detected from exe name (no option — Unity
+# gets {200,400,700}, everything else {100,200,350})
 
-# Manual tier override (advanced): 0=auto, 1=low-end, 2=mid, 3=high-end
+# Manual tier override (advanced): 0=auto, 1=entry, 2=mid, 3=high-end
 vegas.forceTier = 0
 
-# Compiler thread count (advanced): 0=auto (max 4 on ARM64)
+# Compiler thread count (advanced): 0=auto (hardware concurrency, max 64)
 dxvk.numCompilerThreads = 0
 
 # Draw profiling: VEGAS_PROFILE_DRAWS=1 enables per-frame CSV dump to /sdcard/
@@ -154,7 +154,7 @@ All other parameters (draw thresholds, bind skip, HAAE pacing, quality scaling) 
 - **Turnip driver:** Use Mesa 25.x+ with Vulkan 1.3 support for best results.
 - **Synthetic benchmarks:** May show lower FPS than stock due to draw thresholds. Judge performance by actual gameplay smoothness.
 - **GPU-bound workloads:** VSync-off provides negligible gain when the GPU is already saturated (17+ ms frame times).
-- **Draw thresholds `{100,200,350}` are Ph42oN GPLAsync battle-tested defaults.** Unity games automatically receive `{200,400,700}` via the game preset system. These values do NOT affect rendering correctness — every draw call still renders, just with more efficient batching.
+- **Bake thresholds `{100,200,350}` are Ph42oN GPLAsync battle-tested defaults.** Unity games automatically receive `{200,400,700}` via the game preset system. These are the governor's seed values — the runtime threshold is recomputed every frame from the draw-load predictor and never drops below `floorMinimumCap` (600). Thresholds do NOT affect rendering correctness — every draw call still renders, just with more efficient batching.
 - **Governor v4.2 (tile-overflow safety).** The split logic counts every draw type (including indirect draws), measures draws since the last submission rather than per-frame totals, and enforces a 600-draw per-render-pass safety floor. Bind-skip is invalidated at every command-buffer boundary so a mid-frame flush can never leave geometry unbound. Verified smooth on Tomb Raider (2013) and Hollow Knight on Adreno 610 — zero tile-overflow artifacts, zero governor flushes at steady state.
 
 ---
@@ -165,10 +165,10 @@ All other parameters (draw thresholds, bind skip, HAAE pacing, quality scaling) 
 A: VEGAS is a performance fork of DXVK 2.4.1 with GPLAsync async pipeline compilation, specifically tuned for Qualcomm Adreno GPUs on Android emulation (Star Emulator / Winlator). It adds a tier-based auto-tuning engine, FSR 1.0 compute upscaling, motion-compensated frame generation, a TBDR-aware adaptive draw governor, per-game config presets, and automatic crash reports — all behind a single master switch.
 
 **Q: How is VEGAS different from stock DXVK?**
-A: Stock DXVK is designed for desktop GPUs with an immediate-mode renderer. Adreno GPUs are Tile-Based Deferred Renderers (TBDR) — accumulating too many draws before flushing the tile buffer causes catastrophic performance collapse. VEGAS addresses this with a TBDR-inverted governor (lowers draw threshold when CPU-bound, opposite of desktop DXVK), adaptive draw flushing, GPU pacing (HAAE), a tier system that auto-tunes thresholds per GPU capability, and bind-skip optimization.
+A: Stock DXVK is designed for desktop GPUs with an immediate-mode renderer. Adreno GPUs are Tile-Based Deferred Renderers (TBDR) — accumulating too many draws before flushing the tile buffer causes catastrophic performance collapse. VEGAS addresses this with a TBDR-aware governor (draw-load density metric instead of the broken Wine GPU-load sensor, closed-loop submission pacing from real GpuIdleTicks, atomic-split dual-mode with a 600-draw tile-overflow safety floor), a tier system that auto-tunes bake thresholds per GPU capability, and bind-skip optimization.
 
 **Q: Which GPUs are supported?**
-A: VEGAS targets Qualcomm Adreno GPUs running Turnip Vulkan driver (Mesa 25.x+). Classification: Tier 1 (506-620 — entry), Tier 2 (630-690 — mid), Tier 3 (7xx/8xx — high-end). Non-Adreno GPUs (Mali, PowerVR) work in stock DXVK mode but VEGAS features are disabled unless `dxvk.enableStarProfile = True` is forced.
+A: VEGAS targets Qualcomm Adreno GPUs running Turnip Vulkan driver (Mesa 25.x+). Classification: Tier 1 (5xx, 6xx < 620 — entry), Tier 2 (6xx 620-689, 7xx < 730 — mid), Tier 3 (690+, 7xx >= 730, 8xx+ — high-end). Non-Adreno GPUs (Mali, PowerVR) work in stock DXVK mode but VEGAS features are disabled unless `dxvk.enableStarProfile = True` is forced.
 
 **Q: Where does VEGAS read its config from?**
 A: VEGAS reads `dxvk.conf` from: `DXVK_CONFIG_FILE` environment variable, `/storage/emulated/0/Winlator/`, `/storage/emulated/0/Download/`, or `/storage/emulated/0/`. A default `dxvk.conf` is bundled in the WCP but is **not required** — VEGAS works out of the box. Only create one if you want to override specific behavior.
