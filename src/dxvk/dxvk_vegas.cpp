@@ -102,10 +102,11 @@ namespace dxvk {
   static FgPendingResources s_fgPending[4];
   static uint32_t           s_fgPendingCount = 0;
 
-  // Watchdog state for the adaptive blend policy: counts consecutive
-  // main-dispatch fence waits > 25ms.  At 5 it forces the warp blend
-  // floor to 0.95 (present mostly-current frame) until a clean wait
-  // (< 25ms) resets it.
+  // Watchdog state for the adaptive blend policy: counts net slow
+  // main-dispatch fence waits (> 25ms).  At 5 it forces the warp blend
+  // floor to 0.95 (present mostly-current frame).  Clean waits decay the
+  // counter by one instead of resetting, so oscillating loads still trip
+  // the watchdog reliably.
   static uint32_t           s_fgSlowCount    = 0;
 
   // Framegen intermediate images
@@ -3297,21 +3298,26 @@ namespace dxvk {
       // Shader contract: pc[0].xy = output pixel size (int() bounds check),
       // pc[0].z = motion grid width (motionSize.x), motionSize.y = ceil(pc.y/16).
       // pc[1] = adaptive blend params (floor, slope, cap) — host policy:
-      //   floor: 0.5 @ 12ms frame time -> 0.9 @ 40ms, linear, clamped.
-      //          Higher GPU load (longer frame time) favors the current
-      //          frame so a backed-up Motion pass cannot ghost the HUD.
+      //   floor: 0.5 @ 12ms frame time -> 0.95 @ 33ms, linear, clamped.
+      //          Slower frames mean the Motion pass is backed up and its
+      //          vectors are untrustworthy — favor the current frame so a
+      //          collapsed search cannot ghost the HUD.  Fast frames keep
+      //          a low floor, preserving real interpolation.
       //   slope: 0.1 (ramp rate over motion magnitude).
       //   cap:   min(floor + 0.1, 0.95) — ramp is clamped to cap in-shader.
-      //   Watchdog: 5 consecutive dispatch waits > 25ms force floor 0.95;
-      //             one clean wait (< 25ms) restores the mapping.
+      //   Watchdog: 5 net slow waits (> 25ms) force floor 0.95; clean
+      //             waits decay the counter by one (oscillation-tolerant).
+      //   Input: gov.smoothFrameTimeMs — governor EMA, updated EVERY
+      //          present in d3d11/d3d9/dxgi (1-frame lag), unlike
+      //          s_lastFrameTime which only refreshes every 5th present.
       float blendFloor = 0.5f;
       if (s_fgSlowCount >= 5) {
         blendFloor = 0.95f;
       } else {
-        float ftMs = s_lastFrameTime;
+        float ftMs = s_gov.smoothFrameTimeMs;
         if (ftMs > 12.0f) {
-          blendFloor = 0.5f + 0.4f * (ftMs - 12.0f) / (40.0f - 12.0f);
-          if (blendFloor > 0.9f) blendFloor = 0.9f;
+          blendFloor = 0.5f + 0.45f * (ftMs - 12.0f) / (33.0f - 12.0f);
+          if (blendFloor > 0.95f) blendFloor = 0.95f;
         }
         if (blendFloor < 0.5f) blendFloor = 0.5f;
       }
@@ -3496,11 +3502,13 @@ namespace dxvk {
         s_fgSlowCount = std::min(s_fgSlowCount + 1u, 5u);
       return false;
     }
-    // Success: one clean wait resets the watchdog
+    // Success: slow wait increments, clean wait DECAYS by one (not a hard
+    // reset) so oscillation between slow/fast frames cannot starve the
+    // watchdog of its trip condition.
     if (fgWaitMs > 25.0f)
       s_fgSlowCount = std::min(s_fgSlowCount + 1u, 5u);
-    else
-      s_fgSlowCount = 0;
+    else if (s_fgSlowCount > 0)
+      s_fgSlowCount--;
 
     // Cleanup views
     s_vk.vkDestroyImageView(device, outputView, nullptr);
