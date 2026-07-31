@@ -102,6 +102,12 @@ namespace dxvk {
   static FgPendingResources s_fgPending[4];
   static uint32_t           s_fgPendingCount = 0;
 
+  // Watchdog state for the adaptive blend policy: counts consecutive
+  // main-dispatch fence waits > 25ms.  At 5 it forces the warp blend
+  // floor to 0.95 (present mostly-current frame) until a clean wait
+  // (< 25ms) resets it.
+  static uint32_t           s_fgSlowCount    = 0;
+
   // Framegen intermediate images
   bool     Vegas::s_fgPrevValid       = false;
   uint64_t Vegas::s_fgPrevImage       = 0;
@@ -2359,7 +2365,7 @@ namespace dxvk {
     VkPushConstantRange pcRange = {};
     pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     pcRange.offset     = 0;
-    pcRange.size       = sizeof(float) * 4;  // vec4
+    pcRange.size       = sizeof(float) * 8;  // 2x vec4: info + adaptive blend
 
     VkPipelineLayoutCreateInfo plCI = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     plCI.setLayoutCount         = 1;
@@ -3288,12 +3294,34 @@ namespace dxvk {
     s_vk.vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
         pipelineLayout, 0, 1, &descSets[2], 0, nullptr);
     {
-      // Shader contract: pc.xy = output pixel size (int() bounds check),
-      // pc.z = motion grid width (motionSize.x), motionSize.y = ceil(pc.y/16).
-      // The old blend-parameter values made int(pc.xy)=0 -> early return.
-      float pcData[4] = {
+      // Shader contract: pc[0].xy = output pixel size (int() bounds check),
+      // pc[0].z = motion grid width (motionSize.x), motionSize.y = ceil(pc.y/16).
+      // pc[1] = adaptive blend params (floor, slope, cap) — host policy:
+      //   floor: 0.5 @ 12ms frame time -> 0.9 @ 40ms, linear, clamped.
+      //          Higher GPU load (longer frame time) favors the current
+      //          frame so a backed-up Motion pass cannot ghost the HUD.
+      //   slope: 0.1 (ramp rate over motion magnitude).
+      //   cap:   min(floor + 0.1, 0.95) — ramp is clamped to cap in-shader.
+      //   Watchdog: 5 consecutive dispatch waits > 25ms force floor 0.95;
+      //             one clean wait (< 25ms) restores the mapping.
+      float blendFloor = 0.5f;
+      if (s_fgSlowCount >= 5) {
+        blendFloor = 0.95f;
+      } else {
+        float ftMs = s_lastFrameTime;
+        if (ftMs > 12.0f) {
+          blendFloor = 0.5f + 0.4f * (ftMs - 12.0f) / (40.0f - 12.0f);
+          if (blendFloor > 0.9f) blendFloor = 0.9f;
+        }
+        if (blendFloor < 0.5f) blendFloor = 0.5f;
+      }
+      float blendSlope = 0.1f;
+      float blendCap   = std::min(blendFloor + 0.1f, 0.95f);
+
+      float pcData[8] = {
         float(extent.width), float(extent.height),
-        float(motionGX), 0.0f };
+        float(motionGX), 0.0f,
+        blendFloor, blendSlope, blendCap, 0.0f };
       s_vk.vkCmdPushConstants(cmdBuf, pipelineLayout,
           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcData), pcData);
     }
@@ -3449,7 +3477,12 @@ namespace dxvk {
       fgCleanup(8); return false;
     }
 
+    auto fgWaitStart = std::chrono::steady_clock::now();
     vr = s_vk.vkWaitForFences(device, 1, &fence, VK_TRUE, 50'000'000);
+    // Watchdog input: actual time spent waiting (ms).  > 25ms counts as
+    // a slow dispatch for the adaptive blend policy next frame.
+    float fgWaitMs = std::chrono::duration<float, std::milli>(
+        std::chrono::steady_clock::now() - fgWaitStart).count();
     if (vr != VK_SUCCESS) {
       // CB may still be executing — do NOT destroy here.  Park everything
       // in the pending list; a later dispatch drains it once the fence
@@ -3459,8 +3492,15 @@ namespace dxvk {
         srcViewCur, srcViewPrev, motionView, motionFilteredView, outputView
       };
       fgQueuePending(device, fence, cmdPool, cmdBuf, timedViews, 5);
+      if (fgWaitMs > 25.0f)
+        s_fgSlowCount = std::min(s_fgSlowCount + 1u, 5u);
       return false;
     }
+    // Success: one clean wait resets the watchdog
+    if (fgWaitMs > 25.0f)
+      s_fgSlowCount = std::min(s_fgSlowCount + 1u, 5u);
+    else
+      s_fgSlowCount = 0;
 
     // Cleanup views
     s_vk.vkDestroyImageView(device, outputView, nullptr);

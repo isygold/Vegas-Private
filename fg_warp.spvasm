@@ -1,0 +1,409 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Khronos Glslang Reference Front End; 11
+; Bound: 310
+; Schema: 0
+               OpCapability Shader
+               OpCapability StorageImageExtendedFormats
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gl_WorkGroupID %gl_LocalInvocationID
+               OpExecutionMode %main LocalSize 8 8 1
+               OpSource GLSL 460
+               OpSourceExtension "GL_EXT_samplerless_texture_functions"
+               OpName %main "main"
+               OpName %tex2DBilinear_t21_vf2_vi2_ "tex2DBilinear(t21;vf2;vi2;"
+               OpName %tex "tex"
+               OpName %uv "uv"
+               OpName %texSize "texSize"
+               OpName %getMotionVector_vi2_vi2_ "getMotionVector(vi2;vi2;"
+               OpName %pixelPos "pixelPos"
+               OpName %motionSize "motionSize"
+               OpName %p "p"
+               OpName %i "i"
+               OpName %t "t"
+               OpName %i0 "i0"
+               OpName %i1 "i1"
+               OpName %i2 "i2"
+               OpName %i3 "i3"
+               OpName %c0 "c0"
+               OpName %c1 "c1"
+               OpName %c2 "c2"
+               OpName %c3 "c3"
+               OpName %col "col"
+               OpName %blockId "blockId"
+               OpName %uFilteredMotion "uFilteredMotion"
+               OpName %outputSize "outputSize"
+               OpName %uPC "uPC"
+                OpMemberName %uPC 0 "info"
+                OpMemberName %uPC 1 "blend"
+               OpName %pc "pc"
+               OpName %tileId "tileId"
+               OpName %gl_WorkGroupID "gl_WorkGroupID"
+               OpName %localIdx "localIdx"
+               OpName %gl_LocalInvocationID "gl_LocalInvocationID"
+               OpName %pixelPos_0 "pixelPos"
+               OpName %motionSize_0 "motionSize"
+               OpName %mv "mv"
+               OpName %param "param"
+               OpName %param_0 "param"
+               OpName %prevUV "prevUV"
+               OpName %currUV "currUV"
+               OpName %prevColor "prevColor"
+               OpName %uPrevious "uPrevious"
+               OpName %param_1 "param"
+               OpName %param_2 "param"
+               OpName %currColor "currColor"
+               OpName %uCurrent "uCurrent"
+               OpName %param_3 "param"
+               OpName %param_4 "param"
+               OpName %motionMag "motionMag"
+               OpName %blendFactor "blendFactor"
+               OpName %outputColor "outputColor"
+               OpName %uOutput "uOutput"
+               OpDecorate %uFilteredMotion NonWritable
+               OpDecorate %uFilteredMotion Binding 2
+               OpDecorate %uFilteredMotion DescriptorSet 0
+               OpDecorate %uPC Block
+                OpMemberDecorate %uPC 0 Offset 0
+                OpMemberDecorate %uPC 1 Offset 16
+               OpDecorate %gl_WorkGroupID BuiltIn WorkgroupId
+               OpDecorate %gl_LocalInvocationID BuiltIn LocalInvocationId
+               OpDecorate %uPrevious Binding 1
+               OpDecorate %uPrevious DescriptorSet 0
+               OpDecorate %uCurrent Binding 0
+               OpDecorate %uCurrent DescriptorSet 0
+               OpDecorate %uOutput Binding 3
+               OpDecorate %uOutput DescriptorSet 0
+               OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+      %float = OpTypeFloat 32
+          %7 = OpTypeImage %float 2D 0 0 0 1 Unknown
+%_ptr_UniformConstant_7 = OpTypePointer UniformConstant %7
+    %v2float = OpTypeVector %float 2
+%_ptr_Function_v2float = OpTypePointer Function %v2float
+        %int = OpTypeInt 32 1
+      %v2int = OpTypeVector %int 2
+%_ptr_Function_v2int = OpTypePointer Function %v2int
+    %v4float = OpTypeVector %float 4
+         %15 = OpTypeFunction %v4float %_ptr_UniformConstant_7 %_ptr_Function_v2float %_ptr_Function_v2int
+         %21 = OpTypeFunction %v2float %_ptr_Function_v2int %_ptr_Function_v2int
+  %float_0_5 = OpConstant %float 0.5
+      %int_0 = OpConstant %int 0
+         %44 = OpConstantComposite %v2int %int_0 %int_0
+      %int_1 = OpConstant %int 1
+         %52 = OpConstantComposite %v2int %int_1 %int_0
+         %60 = OpConstantComposite %v2int %int_0 %int_1
+         %68 = OpConstantComposite %v2int %int_1 %int_1
+%_ptr_Function_v4float = OpTypePointer Function %v4float
+       %uint = OpTypeInt 32 0
+     %uint_0 = OpConstant %uint 0
+%_ptr_Function_float = OpTypePointer Function %float
+     %uint_1 = OpConstant %uint 1
+     %int_16 = OpConstant %int 16
+        %125 = OpTypeImage %float 2D 0 0 0 2 Rg16f
+%_ptr_UniformConstant_125 = OpTypePointer UniformConstant %125
+%uFilteredMotion = OpVariable %_ptr_UniformConstant_125 UniformConstant
+        %uPC = OpTypeStruct %v4float %v4float
+%_ptr_PushConstant_uPC = OpTypePointer PushConstant %uPC
+         %pc = OpVariable %_ptr_PushConstant_uPC PushConstant
+%_ptr_PushConstant_v4float = OpTypePointer PushConstant %v4float
+     %v3uint = OpTypeVector %uint 3
+%_ptr_Input_v3uint = OpTypePointer Input %v3uint
+%gl_WorkGroupID = OpVariable %_ptr_Input_v3uint Input
+     %v2uint = OpTypeVector %uint 2
+%gl_LocalInvocationID = OpVariable %_ptr_Input_v3uint Input
+      %int_8 = OpConstant %int 8
+       %bool = OpTypeBool
+%_ptr_Function_int = OpTypePointer Function %int
+     %uint_2 = OpConstant %uint 2
+%_ptr_PushConstant_float = OpTypePointer PushConstant %float
+   %float_16 = OpConstant %float 16
+  %uPrevious = OpVariable %_ptr_UniformConstant_7 UniformConstant
+   %uCurrent = OpVariable %_ptr_UniformConstant_7 UniformConstant
+    %float_3 = OpConstant %float 3
+%float_0_200000003 = OpConstant %float 0.200000003
+  %float_2_5 = OpConstant %float 2.5
+%float_0_699999988 = OpConstant %float 0.699999988
+        %268 = OpTypeImage %float 2D 0 0 0 2 Unknown
+%_ptr_UniformConstant_268 = OpTypePointer UniformConstant %268
+    %uOutput = OpVariable %_ptr_UniformConstant_268 UniformConstant
+     %uint_8 = OpConstant %uint 8
+%gl_WorkGroupSize = OpConstantComposite %v3uint %uint_8 %uint_8 %uint_1
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+ %outputSize = OpVariable %_ptr_Function_v2int Function
+     %tileId = OpVariable %_ptr_Function_v2int Function
+   %localIdx = OpVariable %_ptr_Function_v2int Function
+ %pixelPos_0 = OpVariable %_ptr_Function_v2int Function
+%motionSize_0 = OpVariable %_ptr_Function_v2int Function
+         %mv = OpVariable %_ptr_Function_v2float Function
+      %param = OpVariable %_ptr_Function_v2int Function
+    %param_0 = OpVariable %_ptr_Function_v2int Function
+     %prevUV = OpVariable %_ptr_Function_v2float Function
+     %currUV = OpVariable %_ptr_Function_v2float Function
+  %prevColor = OpVariable %_ptr_Function_v4float Function
+    %param_1 = OpVariable %_ptr_Function_v2float Function
+    %param_2 = OpVariable %_ptr_Function_v2int Function
+  %currColor = OpVariable %_ptr_Function_v4float Function
+    %param_3 = OpVariable %_ptr_Function_v2float Function
+    %param_4 = OpVariable %_ptr_Function_v2int Function
+  %motionMag = OpVariable %_ptr_Function_float Function
+%blendFactor = OpVariable %_ptr_Function_float Function
+%outputColor = OpVariable %_ptr_Function_v4float Function
+        %139 = OpAccessChain %_ptr_PushConstant_v4float %pc %int_0
+        %140 = OpLoad %v4float %139
+        %141 = OpVectorShuffle %v2float %140 %140 0 1
+        %142 = OpConvertFToS %v2int %141
+               OpStore %outputSize %142
+        %148 = OpLoad %v3uint %gl_WorkGroupID
+        %149 = OpVectorShuffle %v2uint %148 %148 0 1
+        %150 = OpBitcast %v2int %149
+               OpStore %tileId %150
+        %153 = OpLoad %v3uint %gl_LocalInvocationID
+        %154 = OpVectorShuffle %v2uint %153 %153 0 1
+        %155 = OpBitcast %v2int %154
+               OpStore %localIdx %155
+        %157 = OpLoad %v2int %tileId
+        %159 = OpCompositeConstruct %v2int %int_8 %int_8
+        %160 = OpIMul %v2int %157 %159
+        %161 = OpLoad %v2int %localIdx
+        %162 = OpIAdd %v2int %160 %161
+               OpStore %pixelPos_0 %162
+        %165 = OpAccessChain %_ptr_Function_int %pixelPos_0 %uint_0
+        %166 = OpLoad %int %165
+        %167 = OpAccessChain %_ptr_Function_int %outputSize %uint_0
+        %168 = OpLoad %int %167
+        %169 = OpSGreaterThanEqual %bool %166 %168
+        %170 = OpLogicalNot %bool %169
+               OpSelectionMerge %172 None
+               OpBranchConditional %170 %171 %172
+        %171 = OpLabel
+        %173 = OpAccessChain %_ptr_Function_int %pixelPos_0 %uint_1
+        %174 = OpLoad %int %173
+        %175 = OpAccessChain %_ptr_Function_int %outputSize %uint_1
+        %176 = OpLoad %int %175
+        %177 = OpSGreaterThanEqual %bool %174 %176
+               OpBranch %172
+        %172 = OpLabel
+        %178 = OpPhi %bool %169 %5 %177 %171
+               OpSelectionMerge %180 None
+               OpBranchConditional %178 %179 %180
+        %179 = OpLabel
+               OpReturn
+        %180 = OpLabel
+        %185 = OpAccessChain %_ptr_PushConstant_float %pc %int_0 %uint_2
+        %186 = OpLoad %float %185
+        %187 = OpConvertFToS %int %186
+        %188 = OpAccessChain %_ptr_PushConstant_float %pc %int_0 %uint_1
+        %189 = OpLoad %float %188
+        %191 = OpFDiv %float %189 %float_16
+        %192 = OpExtInst %float %1 Ceil %191
+        %193 = OpConvertFToS %int %192
+        %194 = OpCompositeConstruct %v2int %187 %193
+               OpStore %motionSize_0 %194
+        %197 = OpLoad %v2int %pixelPos_0
+               OpStore %param %197
+        %199 = OpLoad %v2int %motionSize_0
+               OpStore %param_0 %199
+        %200 = OpFunctionCall %v2float %getMotionVector_vi2_vi2_ %param %param_0
+               OpStore %mv %200
+        %202 = OpLoad %v2int %pixelPos_0
+        %203 = OpConvertSToF %v2float %202
+        %204 = OpLoad %v2float %mv
+        %205 = OpVectorTimesScalar %v2float %204 %float_0_5
+        %206 = OpFAdd %v2float %203 %205
+        %207 = OpCompositeConstruct %v2float %float_0_5 %float_0_5
+        %208 = OpFAdd %v2float %206 %207
+        %209 = OpLoad %v2int %outputSize
+        %210 = OpConvertSToF %v2float %209
+        %211 = OpFDiv %v2float %208 %210
+               OpStore %prevUV %211
+        %213 = OpLoad %v2int %pixelPos_0
+        %214 = OpConvertSToF %v2float %213
+        %215 = OpLoad %v2float %mv
+        %216 = OpVectorTimesScalar %v2float %215 %float_0_5
+        %217 = OpFSub %v2float %214 %216
+        %218 = OpCompositeConstruct %v2float %float_0_5 %float_0_5
+        %219 = OpFAdd %v2float %217 %218
+        %220 = OpLoad %v2int %outputSize
+        %221 = OpConvertSToF %v2float %220
+        %222 = OpFDiv %v2float %219 %221
+               OpStore %currUV %222
+        %226 = OpLoad %v2float %prevUV
+               OpStore %param_1 %226
+        %228 = OpLoad %v2int %outputSize
+               OpStore %param_2 %228
+        %229 = OpFunctionCall %v4float %tex2DBilinear_t21_vf2_vi2_ %uPrevious %param_1 %param_2
+               OpStore %prevColor %229
+        %233 = OpLoad %v2float %currUV
+               OpStore %param_3 %233
+        %235 = OpLoad %v2int %outputSize
+               OpStore %param_4 %235
+        %236 = OpFunctionCall %v4float %tex2DBilinear_t21_vf2_vi2_ %uCurrent %param_3 %param_4
+               OpStore %currColor %236
+        %238 = OpLoad %v2float %mv
+        %239 = OpExtInst %float %1 Length %238
+                OpStore %motionMag %239
+        %300 = OpAccessChain %_ptr_PushConstant_float %pc %int_1 %uint_0
+        %301 = OpLoad %float %300
+        %302 = OpAccessChain %_ptr_PushConstant_float %pc %int_1 %uint_1
+        %303 = OpLoad %float %302
+        %304 = OpAccessChain %_ptr_PushConstant_float %pc %int_1 %uint_2
+        %305 = OpLoad %float %304
+                OpStore %blendFactor %301
+        %241 = OpLoad %float %motionMag
+        %242 = OpFOrdGreaterThan %bool %241 %float_0_5
+        %243 = OpLoad %float %motionMag
+        %245 = OpFOrdLessThan %bool %243 %float_3
+        %246 = OpLogicalAnd %bool %242 %245
+                OpSelectionMerge %248 None
+                OpBranchConditional %246 %247 %256
+        %247 = OpLabel
+        %250 = OpLoad %float %motionMag
+        %251 = OpFSub %float %250 %float_0_5
+        %252 = OpFMul %float %303 %251
+        %254 = OpFDiv %float %252 %float_2_5
+        %255 = OpFAdd %float %301 %254
+        %306 = OpExtInst %float %1 FMin %255 %305
+                OpStore %blendFactor %306
+                OpBranch %248
+        %256 = OpLabel
+        %257 = OpLoad %float %motionMag
+        %258 = OpFOrdGreaterThanEqual %bool %257 %float_3
+                OpSelectionMerge %260 None
+                OpBranchConditional %258 %259 %260
+        %259 = OpLabel
+                OpStore %blendFactor %305
+                OpBranch %260
+        %260 = OpLabel
+               OpBranch %248
+        %248 = OpLabel
+        %263 = OpLoad %v4float %prevColor
+        %264 = OpLoad %v4float %currColor
+        %265 = OpLoad %float %blendFactor
+        %266 = OpCompositeConstruct %v4float %265 %265 %265 %265
+        %267 = OpExtInst %v4float %1 FMix %263 %264 %266
+               OpStore %outputColor %267
+        %271 = OpLoad %268 %uOutput
+        %272 = OpLoad %v2int %pixelPos_0
+        %273 = OpLoad %v4float %outputColor
+               OpImageWrite %271 %272 %273
+               OpReturn
+               OpFunctionEnd
+%tex2DBilinear_t21_vf2_vi2_ = OpFunction %v4float None %15
+        %tex = OpFunctionParameter %_ptr_UniformConstant_7
+         %uv = OpFunctionParameter %_ptr_Function_v2float
+    %texSize = OpFunctionParameter %_ptr_Function_v2int
+         %20 = OpLabel
+          %p = OpVariable %_ptr_Function_v2float Function
+          %i = OpVariable %_ptr_Function_v2int Function
+          %t = OpVariable %_ptr_Function_v2float Function
+         %i0 = OpVariable %_ptr_Function_v2int Function
+         %i1 = OpVariable %_ptr_Function_v2int Function
+         %i2 = OpVariable %_ptr_Function_v2int Function
+         %i3 = OpVariable %_ptr_Function_v2int Function
+         %c0 = OpVariable %_ptr_Function_v4float Function
+         %c1 = OpVariable %_ptr_Function_v4float Function
+         %c2 = OpVariable %_ptr_Function_v4float Function
+         %c3 = OpVariable %_ptr_Function_v4float Function
+        %col = OpVariable %_ptr_Function_v4float Function
+         %27 = OpLoad %v2float %uv
+         %28 = OpLoad %v2int %texSize
+         %29 = OpConvertSToF %v2float %28
+         %30 = OpFMul %v2float %27 %29
+         %32 = OpCompositeConstruct %v2float %float_0_5 %float_0_5
+         %33 = OpFSub %v2float %30 %32
+               OpStore %p %33
+         %35 = OpLoad %v2float %p
+         %36 = OpExtInst %v2float %1 Floor %35
+         %37 = OpConvertFToS %v2int %36
+               OpStore %i %37
+         %39 = OpLoad %v2float %p
+         %40 = OpExtInst %v2float %1 Fract %39
+               OpStore %t %40
+         %42 = OpLoad %v2int %i
+         %45 = OpLoad %v2int %texSize
+         %47 = OpCompositeConstruct %v2int %int_1 %int_1
+         %48 = OpISub %v2int %45 %47
+         %49 = OpExtInst %v2int %1 SClamp %42 %44 %48
+               OpStore %i0 %49
+         %51 = OpLoad %v2int %i
+         %53 = OpIAdd %v2int %51 %52
+         %54 = OpLoad %v2int %texSize
+         %55 = OpCompositeConstruct %v2int %int_1 %int_1
+         %56 = OpISub %v2int %54 %55
+         %57 = OpExtInst %v2int %1 SClamp %53 %44 %56
+               OpStore %i1 %57
+         %59 = OpLoad %v2int %i
+         %61 = OpIAdd %v2int %59 %60
+         %62 = OpLoad %v2int %texSize
+         %63 = OpCompositeConstruct %v2int %int_1 %int_1
+         %64 = OpISub %v2int %62 %63
+         %65 = OpExtInst %v2int %1 SClamp %61 %44 %64
+               OpStore %i2 %65
+         %67 = OpLoad %v2int %i
+         %69 = OpIAdd %v2int %67 %68
+         %70 = OpLoad %v2int %texSize
+         %71 = OpCompositeConstruct %v2int %int_1 %int_1
+         %72 = OpISub %v2int %70 %71
+         %73 = OpExtInst %v2int %1 SClamp %69 %44 %72
+               OpStore %i3 %73
+         %76 = OpLoad %7 %tex
+         %77 = OpLoad %v2int %i0
+         %78 = OpImageFetch %v4float %76 %77 Lod %int_0
+               OpStore %c0 %78
+         %80 = OpLoad %7 %tex
+         %81 = OpLoad %v2int %i1
+         %82 = OpImageFetch %v4float %80 %81 Lod %int_0
+               OpStore %c1 %82
+         %84 = OpLoad %7 %tex
+         %85 = OpLoad %v2int %i2
+         %86 = OpImageFetch %v4float %84 %85 Lod %int_0
+               OpStore %c2 %86
+         %88 = OpLoad %7 %tex
+         %89 = OpLoad %v2int %i3
+         %90 = OpImageFetch %v4float %88 %89 Lod %int_0
+               OpStore %c3 %90
+         %92 = OpLoad %v4float %c0
+         %93 = OpLoad %v4float %c1
+         %97 = OpAccessChain %_ptr_Function_float %t %uint_0
+         %98 = OpLoad %float %97
+         %99 = OpCompositeConstruct %v4float %98 %98 %98 %98
+        %100 = OpExtInst %v4float %1 FMix %92 %93 %99
+        %101 = OpLoad %v4float %c2
+        %102 = OpLoad %v4float %c3
+        %103 = OpAccessChain %_ptr_Function_float %t %uint_0
+        %104 = OpLoad %float %103
+        %105 = OpCompositeConstruct %v4float %104 %104 %104 %104
+        %106 = OpExtInst %v4float %1 FMix %101 %102 %105
+        %108 = OpAccessChain %_ptr_Function_float %t %uint_1
+        %109 = OpLoad %float %108
+        %110 = OpCompositeConstruct %v4float %109 %109 %109 %109
+        %111 = OpExtInst %v4float %1 FMix %100 %106 %110
+               OpStore %col %111
+        %112 = OpLoad %v4float %col
+               OpReturnValue %112
+               OpFunctionEnd
+%getMotionVector_vi2_vi2_ = OpFunction %v2float None %21
+   %pixelPos = OpFunctionParameter %_ptr_Function_v2int
+ %motionSize = OpFunctionParameter %_ptr_Function_v2int
+         %25 = OpLabel
+    %blockId = OpVariable %_ptr_Function_v2int Function
+        %116 = OpLoad %v2int %pixelPos
+        %118 = OpCompositeConstruct %v2int %int_16 %int_16
+        %119 = OpSDiv %v2int %116 %118
+               OpStore %blockId %119
+        %120 = OpLoad %v2int %blockId
+        %121 = OpLoad %v2int %motionSize
+        %122 = OpCompositeConstruct %v2int %int_1 %int_1
+        %123 = OpISub %v2int %121 %122
+        %124 = OpExtInst %v2int %1 SClamp %120 %44 %123
+               OpStore %blockId %124
+        %128 = OpLoad %125 %uFilteredMotion
+        %129 = OpLoad %v2int %blockId
+        %130 = OpImageRead %v4float %128 %129
+        %131 = OpVectorShuffle %v2float %130 %130 0 1
+               OpReturnValue %131
+               OpFunctionEnd
