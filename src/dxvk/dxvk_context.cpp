@@ -138,6 +138,7 @@ namespace dxvk {
     // Vegas: reset draw counter so shouldFlush doesn't keep firing
     // on subsequent draws after a threshold-triggered flush.
     m_drawsSinceSubmit.store(0, std::memory_order_relaxed);
+    Vegas::onCommandListFlush();
   }
   
   
@@ -1327,10 +1328,12 @@ namespace dxvk {
       initVegasProfile();
 
     // Vegas: threshold-based flush (Adreno-friendly submission pacing).
-    // Uses per-frame TOTAL draw count (direct + indirect) — m_drawsSinceSubmit
-    // only counted direct draws, leaving indirect/instanced-heavy frames
-    // unsplit (tile overflow on TR13 rocks/objects).
-    uint32_t drawCount = Vegas::getFrameDrawCount();
+    // Uses draws-since-last-submission counting ALL draw types (direct +
+    // indirect) — the old m_drawsSinceSubmit only counted direct draws,
+    // leaving indirect/instanced-heavy frames unsplit (tile overflow on
+    // TR13 rocks/objects). Counter resets on every flushCommandList via
+    // Vegas::onCommandListFlush() and at frame end.
+    uint32_t drawCount = Vegas::getSubmissionDrawCount();
     if (unlikely(Vegas::shouldFlush(drawCount))) {
       this->spillRenderPass(true);
       this->flushCommandList(nullptr);
@@ -1360,7 +1363,7 @@ namespace dxvk {
     // counter (m_drawsSinceSubmit), leaving heavy passes unsplit.
     if (unlikely(!m_vegasProfile.initialized))
       initVegasProfile();
-    uint32_t drawCount = Vegas::getFrameDrawCount();
+    uint32_t drawCount = Vegas::getSubmissionDrawCount();
     if (unlikely(Vegas::shouldFlush(drawCount))) {
       this->spillRenderPass(true);
       this->flushCommandList(nullptr);
@@ -1388,7 +1391,7 @@ namespace dxvk {
     // Vegas: threshold-based flush also applies to counted indirect draws.
     if (unlikely(!m_vegasProfile.initialized))
       initVegasProfile();
-    uint32_t drawCount = Vegas::getFrameDrawCount();
+    uint32_t drawCount = Vegas::getSubmissionDrawCount();
     if (unlikely(Vegas::shouldFlush(drawCount))) {
       this->spillRenderPass(true);
       this->flushCommandList(nullptr);
@@ -1423,7 +1426,7 @@ namespace dxvk {
 
     // Vegas: threshold-based flush (Adreno-friendly submission pacing).
     // Uses per-frame TOTAL draw count (direct + indirect).
-    uint32_t drawCount = Vegas::getFrameDrawCount();
+    uint32_t drawCount = Vegas::getSubmissionDrawCount();
     if (unlikely(Vegas::shouldFlush(drawCount))) {
       this->spillRenderPass(true);
       this->flushCommandList(nullptr);
@@ -1452,7 +1455,7 @@ namespace dxvk {
     // Vegas: threshold-based flush also applies to indirect draws.
     if (unlikely(!m_vegasProfile.initialized))
       initVegasProfile();
-    uint32_t drawCount = Vegas::getFrameDrawCount();
+    uint32_t drawCount = Vegas::getSubmissionDrawCount();
     if (unlikely(Vegas::shouldFlush(drawCount))) {
       this->spillRenderPass(true);
       this->flushCommandList(nullptr);
@@ -1480,7 +1483,7 @@ namespace dxvk {
     // Vegas: threshold-based flush also applies to counted indirect draws.
     if (unlikely(!m_vegasProfile.initialized))
       initVegasProfile();
-    uint32_t drawCount = Vegas::getFrameDrawCount();
+    uint32_t drawCount = Vegas::getSubmissionDrawCount();
     if (unlikely(Vegas::shouldFlush(drawCount))) {
       this->spillRenderPass(true);
       this->flushCommandList(nullptr);

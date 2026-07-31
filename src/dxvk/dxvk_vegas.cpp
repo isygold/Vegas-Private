@@ -551,6 +551,7 @@ namespace dxvk {
     gov.frameDrawCount = 0u;
     gov.actualFlushesThisFrame = 0u;
     gov.maxPassDraws = 0u;
+    gov.submissionDrawCount = 0u;
   }
 
 
@@ -911,6 +912,17 @@ namespace dxvk {
       return true;
     }
     return false;
+  }
+
+  uint32_t Vegas::getSubmissionDrawCount() {
+    return s_gov.submissionDrawCount;
+  }
+
+  void Vegas::onCommandListFlush() {
+    // Every command-list flush (vegas split OR DXVK-internal, e.g. map/
+    // discard) starts a new submission — reset the threshold counter so
+    // shouldFlush measures draws-since-last-submission, not frame total.
+    s_gov.submissionDrawCount = 0u;
   }
 
   uint32_t Vegas::getFrameDrawCount() {
@@ -3494,8 +3506,10 @@ namespace dxvk {
   void Vegas::recordDrawCall() {
     VegasGovernorState& gov = s_gov;
 
-    // Increment per-frame draw counter
+    // Increment per-frame draw counter (CSV/predError/histogram)
     gov.frameDrawCount++;
+    // Increment per-submission counter (threshold check)
+    gov.submissionDrawCount++;
 
     // Scene-transition shock absorber: if a mid-frame flush fires because
     // the predictor underestimated the scene, snap threshold to cap.

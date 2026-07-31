@@ -57,6 +57,14 @@ namespace dxvk {
     uint32_t maxPassDraws = 0;  // peak draw count at flush check (pass-size proxy)
     uint64_t frameCounter = 0;
 
+    // Draws since last command-list flush (ALL draw types, direct + indirect).
+    // This is the threshold counter: incremented in recordDrawCall(), reset
+    // in onCommandListFlush() (every flushCommandList) and at frame end.
+    // Must NOT be frameDrawCount — that only resets per frame, which caused
+    // a flush storm once the threshold was crossed mid-frame (v4.2.3 bug:
+    // 46 flushes on a 645-draw frame).
+    uint32_t submissionDrawCount = 0;
+
     // Rolling window data
     std::array<uint32_t, 120> drawHistoryWindow{};
     uint8_t windowIndex = 0;
@@ -397,6 +405,8 @@ namespace dxvk {
     // ---- Autonomous governor state (VegasGovernorState) ----
     static VegasGovernorState  s_gov;
     static void recordDrawCall();
+    static uint32_t getSubmissionDrawCount();
+    static void onCommandListFlush();
     static uint32_t getFrameDrawCount();
     static void dumpDrawCsv();
 
