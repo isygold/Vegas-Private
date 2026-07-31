@@ -410,12 +410,20 @@ namespace dxvk {
   void Vegas::calculateThreshold() {
     VegasGovernorState& gov = s_gov;
 
-    // ---- Variance guard ----
-    if (gov.rollingVarianceRatio > 5.0f) {
-      gov.drawThreshold = gov.dynamicMaxBatchCap;
-      s_drawThreshold = gov.drawThreshold;  // Sync immediately (same as below)
-      return;
-    }
+    // ---- Variance guard (disabled) ----
+    // Rolling ratio (max/min over 120 frames) was intended to catch
+    // scene transitions where the predictor is unreliable. In practice,
+    // a single 1-draw frame (pause/loading) poisons the window for 120+
+    // frames — ratio jumps to 1000+, every frame hits the guard, and
+    // the threshold is pinned to cap (2158). This disables all mid-frame
+    // flushes, defeating the atomic-split that was the whole point.
+    // The immediate sync + atomic-split already handles prediction errors
+    // correctly — the guard is redundant and harmful.
+    //if (gov.rollingVarianceRatio > 5.0f) {
+    //  gov.drawThreshold = gov.dynamicMaxBatchCap;
+    //  s_drawThreshold = gov.drawThreshold;
+    //  return;
+    //}
 
     // ---- Proportional predictor ----
     uint32_t predicted = gov.previousFrameDrawCount;
