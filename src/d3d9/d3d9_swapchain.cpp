@@ -797,8 +797,14 @@ namespace dxvk {
         ? std::min(frameTime / 16.667f, 1.0f) : 0.0f;
       Vegas::updateFrameTiming(gpuLoad, frameTime);
       Vegas::calculateThreshold();
+
+      // Vegas: evaluate framegen eligibility (Tier 2/3 + headroom + ready).
+      // Tier 1 (Adreno 610) is excluded by design — compute budget.
+      m_needsFrameGen = Vegas::isFrameGenReady()
+        && Vegas::needsFrameGen(frameTime, Vegas::getTier());
+
       Vegas::pushMetrics(gpuLoad, frameTime,
-        VegasPerformanceState::Normal, false, false);
+        VegasPerformanceState::Normal, false, m_needsFrameGen);
     }
 
     m_parent->EndFrame();
@@ -852,7 +858,7 @@ namespace dxvk {
       if (m_hud != nullptr)
         m_hud->render(m_context, info.format, info.imageExtent);
 
-      SubmitPresent(sync, i);
+      SubmitPresent(sync, i, imageIndex);
     }
 
     SyncFrameLatency();
@@ -866,7 +872,7 @@ namespace dxvk {
   }
 
 
-  void D3D9SwapChainEx::SubmitPresent(const PresenterSync& Sync, uint32_t Repeat) {
+  void D3D9SwapChainEx::SubmitPresent(const PresenterSync& Sync, uint32_t Repeat, uint32_t ImageIndex) {
     // Bump frame ID
     if (!Repeat)
       m_wctx->frameId += 1;
@@ -875,16 +881,41 @@ namespace dxvk {
     // have to synchronize with it first.
     m_presentStatus.result = VK_NOT_READY;
 
+    // Vegas: framegen inputs captured for the CS lambda. The WSI image
+    // (blit destination) is what framegen interpolates and writes into.
+    const bool      cFgEnabled = m_needsFrameGen;
+    const VkImage   cFgImage   = m_wctx->imageViews.at(ImageIndex)->image()->handle();
+    const VkExtent3D cFgExtent = {
+      m_wctx->presenter->info().imageExtent.width,
+      m_wctx->presenter->info().imageExtent.height, 1 };
+    const VkFormat  cFgFormat  = m_wctx->presenter->info().format.format;
+
     m_parent->EmitCs([this,
       cRepeat      = Repeat,
       cSync        = Sync,
       cHud         = m_hud,
       cPresentMode = m_wctx->presenter->info().presentMode,
       cFrameId     = m_wctx->frameId,
-      cCommandList = m_context->endRecording()
+      cCommandList = m_context->endRecording(),
+      cFgEnabled,
+      cFgImage,
+      cFgExtent,
+      cFgFormat
     ] (DxvkContext* ctx) {
       cCommandList->setWsiSemaphores(cSync);
       m_device->submitCommandList(cCommandList, nullptr);
+
+      // Vegas: framegen dispatch. Runs on the same graphics queue AFTER
+      // the blit command list (queue ordering guarantees the rendered
+      // frame is in the WSI image), and blocks via fence until the
+      // interpolated frame is written back into the WSI image — before
+      // the presenter picks it up. Fail-closed: any error skips FG and
+      // presents the real frame.
+      if (Vegas::isEnabled() && cFgEnabled && cFgImage != VK_NULL_HANDLE) {
+        Vegas::framegenDispatch(
+          cFgImage, VK_NULL_HANDLE,
+          cFgExtent, cFgFormat);
+      }
 
       if (cHud != nullptr && !cRepeat)
         cHud->update();

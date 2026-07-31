@@ -2764,7 +2764,16 @@ namespace dxvk {
       submitInfo.commandBufferCount = 1;
       submitInfo.pCommandBuffers    = &cmdBuf;
       s_vk.vkQueueSubmit(queue, 1, &submitInfo, fence);
-      s_vk.vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+      vr = s_vk.vkWaitForFences(device, 1, &fence, VK_TRUE, 50'000'000);
+      if (vr != VK_SUCCESS) {
+        // Bounded wait: fail-closed on a dead/hung queue instead of
+        // stalling the present thread forever on the capture path.
+        Logger::warn(str::format("Vegas FG: first-frame capture wait failed (", vr, ")"));
+        s_vk.vkDestroyFence(device, fence, nullptr);
+        s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
+        s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+        return false;
+      }
 
       s_vk.vkDestroyFence(device, fence, nullptr);
       s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);

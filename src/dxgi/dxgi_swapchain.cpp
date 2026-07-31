@@ -362,9 +362,17 @@ namespace dxvk {
           ? std::min(frameTime / 16.667f, 1.0f) : 0.0f;
         Vegas::updateFrameTiming(gpuLoad, frameTime);
         Vegas::calculateThreshold();
+
+        // Vegas: framegen eligibility for this frame. NOTE: dispatch
+        // happens downstream in the wrapped D3D11SwapChain::PresentImage
+        // (the live presenter path) — never dispatch here or FG would
+        // run twice per frame. This flag only keeps metrics truthful.
+        bool frameGenReady = Vegas::isFrameGenReady()
+          && Vegas::needsFrameGen(frameTime, Vegas::getTier());
+
         Vegas::pushMetrics(gpuLoad, frameTime,
           VegasPerformanceState::Normal,
-          Vegas::isFsrActive(), false);
+          Vegas::isFsrActive(), frameGenReady);
       }
       // === END VEGAS ===
       hr = m_presenter->Present(SyncInterval, PresentFlags, nullptr);

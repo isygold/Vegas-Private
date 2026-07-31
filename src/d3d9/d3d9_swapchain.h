@@ -193,11 +193,14 @@ namespace dxvk {
     // Vegas: frame timing for metrics push
     std::chrono::steady_clock::time_point m_lastPresentTime;
 
+    // Vegas: framegen eligibility for the current frame
+    bool m_needsFrameGen = false;
+
     D3D9VkExtSwapchain m_swapchainExt;
 
     void PresentImage(UINT PresentInterval);
 
-    void SubmitPresent(const PresenterSync& Sync, uint32_t Repeat);
+    void SubmitPresent(const PresenterSync& Sync, uint32_t Repeat, uint32_t ImageIndex);
 
     void SynchronizePresent();
 

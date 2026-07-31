@@ -133,6 +133,9 @@ namespace dxvk {
     // Vegas real GPU load tracking (GpuIdleTicks delta)
     uint64_t m_prevGpuIdleTicks = 0;
 
+    // Vegas framegen eligibility (evaluated each frame in PresentImage)
+    bool      m_needsFrameGen = false;
+
     bool                      m_dirty = true;
 
     VkColorSpaceKHR           m_colorspace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
@@ -148,9 +151,10 @@ namespace dxvk {
     HRESULT PresentImage(UINT SyncInterval);
 
     void SubmitPresent(
-            D3D11ImmediateContext*  pContext,
-      const PresenterSync&          Sync,
-            uint32_t                Repeat);
+            D3D11ImmediateContext* pContext,
+      const PresenterSync&         Sync,
+            uint32_t               Repeat,
+            uint32_t               ImageIndex);
 
     void SynchronizePresent();
 
