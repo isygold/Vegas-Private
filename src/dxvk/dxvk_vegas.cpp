@@ -542,6 +542,7 @@ namespace dxvk {
         " error=", predAcc, "%",
         " split=", gov.atomicSplitActive,
         " actualFlushes=", gov.actualFlushesThisFrame,
+        " maxPass=", gov.maxPassDraws,
         " targetFlushes=", gov.targetFlushesPerFrame));
     }
 
@@ -549,6 +550,7 @@ namespace dxvk {
     gov.previousFrameDrawCount = gov.frameDrawCount;
     gov.frameDrawCount = 0u;
     gov.actualFlushesThisFrame = 0u;
+    gov.maxPassDraws = 0u;
   }
 
 
@@ -901,11 +903,18 @@ namespace dxvk {
   // ============================================================
 
   bool Vegas::shouldFlush(uint32_t drawCount) {
+    // Track peak draw count at check time = pass-size proxy (reset per frame)
+    if (drawCount > s_gov.maxPassDraws)
+      s_gov.maxPassDraws = drawCount;
     if (s_useFastPath && s_enabled && drawCount >= s_drawThreshold) {
       s_gov.actualFlushesThisFrame++;
       return true;
     }
     return false;
+  }
+
+  uint32_t Vegas::getFrameDrawCount() {
+    return s_gov.frameDrawCount;
   }
 
   bool Vegas::shouldSkipBind() {

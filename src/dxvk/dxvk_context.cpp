@@ -1326,8 +1326,11 @@ namespace dxvk {
     if (unlikely(!m_vegasProfile.initialized))
       initVegasProfile();
 
-    // Vegas: threshold-based flush (Adreno-friendly submission pacing)
-    uint32_t drawCount = m_drawsSinceSubmit.load(std::memory_order_relaxed);
+    // Vegas: threshold-based flush (Adreno-friendly submission pacing).
+    // Uses per-frame TOTAL draw count (direct + indirect) — m_drawsSinceSubmit
+    // only counted direct draws, leaving indirect/instanced-heavy frames
+    // unsplit (tile overflow on TR13 rocks/objects).
+    uint32_t drawCount = Vegas::getFrameDrawCount();
     if (unlikely(Vegas::shouldFlush(drawCount))) {
       this->spillRenderPass(true);
       this->flushCommandList(nullptr);
@@ -1352,6 +1355,17 @@ namespace dxvk {
           VkDeviceSize      offset,
           uint32_t          count,
           uint32_t          stride) {
+    // Vegas: threshold-based flush also applies to indirect draws —
+    // instanced terrain/objects were invisible to the old per-submit
+    // counter (m_drawsSinceSubmit), leaving heavy passes unsplit.
+    if (unlikely(!m_vegasProfile.initialized))
+      initVegasProfile();
+    uint32_t drawCount = Vegas::getFrameDrawCount();
+    if (unlikely(Vegas::shouldFlush(drawCount))) {
+      this->spillRenderPass(true);
+      this->flushCommandList(nullptr);
+    }
+
     Vegas::recordDrawCall();
     if (this->commitGraphicsState<false, true>()) {
       auto descriptor = m_state.id.argBuffer.getDescriptor();
@@ -1371,6 +1385,15 @@ namespace dxvk {
           VkDeviceSize      countOffset,
           uint32_t          maxCount,
           uint32_t          stride) {
+    // Vegas: threshold-based flush also applies to counted indirect draws.
+    if (unlikely(!m_vegasProfile.initialized))
+      initVegasProfile();
+    uint32_t drawCount = Vegas::getFrameDrawCount();
+    if (unlikely(Vegas::shouldFlush(drawCount))) {
+      this->spillRenderPass(true);
+      this->flushCommandList(nullptr);
+    }
+
     Vegas::recordDrawCall();
     if (this->commitGraphicsState<false, true>()) {
       auto argDescriptor = m_state.id.argBuffer.getDescriptor();
@@ -1398,8 +1421,9 @@ namespace dxvk {
     if (unlikely(!m_vegasProfile.initialized))
       initVegasProfile();
 
-    // Vegas: threshold-based flush (Adreno-friendly submission pacing)
-    uint32_t drawCount = m_drawsSinceSubmit.load(std::memory_order_relaxed);
+    // Vegas: threshold-based flush (Adreno-friendly submission pacing).
+    // Uses per-frame TOTAL draw count (direct + indirect).
+    uint32_t drawCount = Vegas::getFrameDrawCount();
     if (unlikely(Vegas::shouldFlush(drawCount))) {
       this->spillRenderPass(true);
       this->flushCommandList(nullptr);
@@ -1425,6 +1449,15 @@ namespace dxvk {
           VkDeviceSize      offset,
           uint32_t          count,
           uint32_t          stride) {
+    // Vegas: threshold-based flush also applies to indirect draws.
+    if (unlikely(!m_vegasProfile.initialized))
+      initVegasProfile();
+    uint32_t drawCount = Vegas::getFrameDrawCount();
+    if (unlikely(Vegas::shouldFlush(drawCount))) {
+      this->spillRenderPass(true);
+      this->flushCommandList(nullptr);
+    }
+
     Vegas::recordDrawCall();
     if (this->commitGraphicsState<true, true>()) {
       auto descriptor = m_state.id.argBuffer.getDescriptor();
@@ -1444,6 +1477,15 @@ namespace dxvk {
           VkDeviceSize      countOffset,
           uint32_t          maxCount,
           uint32_t          stride) {
+    // Vegas: threshold-based flush also applies to counted indirect draws.
+    if (unlikely(!m_vegasProfile.initialized))
+      initVegasProfile();
+    uint32_t drawCount = Vegas::getFrameDrawCount();
+    if (unlikely(Vegas::shouldFlush(drawCount))) {
+      this->spillRenderPass(true);
+      this->flushCommandList(nullptr);
+    }
+
     Vegas::recordDrawCall();
     if (this->commitGraphicsState<true, true>()) {
       auto argDescriptor = m_state.id.argBuffer.getDescriptor();

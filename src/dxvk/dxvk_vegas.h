@@ -54,6 +54,7 @@ namespace dxvk {
 
     // Telemetry
     uint32_t actualFlushesThisFrame = 0;
+    uint32_t maxPassDraws = 0;  // peak draw count at flush check (pass-size proxy)
     uint64_t frameCounter = 0;
 
     // Rolling window data
@@ -396,6 +397,7 @@ namespace dxvk {
     // ---- Autonomous governor state (VegasGovernorState) ----
     static VegasGovernorState  s_gov;
     static void recordDrawCall();
+    static uint32_t getFrameDrawCount();
     static void dumpDrawCsv();
 
     // DxvkDevice stored for DxvkFence creation (set by initializeProfile)
