@@ -7,11 +7,6 @@
 #include "star_fsr_spv.h"
 #include "star_fg_spv.h"
 
-
-#ifndef _WIN32
-#include <dlfcn.h>
-#endif
-
 #include <algorithm>
 #include <string>
 #include <cstring>
@@ -49,6 +44,14 @@ namespace dxvk {
   uint64_t Vegas::s_physicalDevice   = 0;
   uint64_t Vegas::s_vkQueue         = 0;
   uint32_t Vegas::s_queueFamily     = 0;
+
+  // DXVK function tables captured at initializeProfile() time. These are
+  // the canonical source of Vulkan entry points for this process — using
+  // them instead of dlopen/dlsym makes the FSR/FG loader work on Windows
+  // PE (Wine/Android) builds where _WIN32 is defined and dlsym-based
+  // loading is unavailable.
+  static const vk::DeviceFn*   s_vkDeviceFn   = nullptr;
+  static const vk::InstanceFn* s_vkInstanceFn = nullptr;
   // FSR pipeline cache
   uint64_t Vegas::s_fsrPipeline       = 0;
   uint64_t Vegas::s_fsrPipelineLayout = 0;
@@ -860,7 +863,7 @@ namespace dxvk {
           " zeroInit=", shouldZeroInit(s_tier)));
     }
 
-    // Store Vulkan device/queue handles for FSR dispatch.
+    // Store Vulkan device/queue handles for FSR/FG dispatch.
     // The VkDevice handle from device->handle() is an opaque pointer
     // valid for the lifetime of DxvkDevice.
     s_vkQueue         = reinterpret_cast<uint64_t>(device->queues().graphics.queueHandle);
@@ -868,6 +871,13 @@ namespace dxvk {
 
     s_device          = reinterpret_cast<void*>(device->handle());
     s_physicalDevice  = reinterpret_cast<uint64_t>(device->adapter()->handle());
+
+    // Capture DXVK's own Vulkan function tables for the FSR/FG loader.
+    // These are the correct source of entry points on every platform this
+    // build targets (Windows PE under Wine); dlsym-based loading is not
+    // available there.
+    s_vkDeviceFn   = device->vkd().ptr();
+    s_vkInstanceFn = device->adapter()->vki().ptr();
 
     // Store tier in shared DxvkDevice metrics for cross-DLL access
     if (device != nullptr) {
@@ -959,13 +969,12 @@ namespace dxvk {
   // FSR 1.0 EASU Dispatch — with all 4 safety steps
   // ============================================================
 
-  // ---- Vulkan function pointer cache (loaded once via dlsym) ----
+  // ---- Vulkan function pointer cache (loaded once from DXVK tables) ----
 
   namespace {
 
-    // Loaded via dlopen+dlsym at first fsrUpscale call
+    // Filled from DXVK's DeviceFn/InstanceFn tables at first FSR/FG call
     struct FsrVulkanFuncs {
-      PFN_vkGetDeviceProcAddr      vkGetDeviceProcAddr      = nullptr;
       PFN_vkCreateShaderModule     vkCreateShaderModule     = nullptr;
       PFN_vkDestroyShaderModule    vkDestroyShaderModule    = nullptr;
       PFN_vkCreatePipelineLayout   vkCreatePipelineLayout   = nullptr;
@@ -1021,106 +1030,88 @@ namespace dxvk {
 
     static FsrVulkanFuncs s_vk;
 
-    /** Load all needed Vulkan device functions via dlsym + vkGetDeviceProcAddr. */
+    /** Load all needed Vulkan functions from the DXVK device/instance
+     *  tables. Returns false (fail-closed) if the tables are missing or
+     *  any required entry point is null. */
     static bool loadVulkanFuncs(VkDevice device) {
-#ifndef _WIN32
       if (s_vk.loaded)
         return s_vk.vkCreateShaderModule != nullptr;
-      void* lib = dlopen("libvulkan.so", RTLD_NOLOAD | RTLD_LOCAL);
-      if (!lib) lib = dlopen("libvulkan.so.1", RTLD_NOLOAD | RTLD_LOCAL);
-      // Fall back to RTLD_DEFAULT if libvulkan isn't accessible by path
-      s_vk.vkGetDeviceProcAddr =
-          lib ? (PFN_vkGetDeviceProcAddr)dlsym(lib, "vkGetDeviceProcAddr")
-              : (PFN_vkGetDeviceProcAddr)dlsym(RTLD_DEFAULT, "vkGetDeviceProcAddr");
-      if (!s_vk.vkGetDeviceProcAddr) {
-        Logger::warn("Vegas FSR: vkGetDeviceProcAddr not found");
+
+      if (s_vkDeviceFn == nullptr || s_vkInstanceFn == nullptr) {
+        Logger::warn("Vegas: DXVK function tables not captured yet");
         s_vk.loaded = true;
         return false;
       }
-      if (!s_vk.vkGetDeviceProcAddr) {
-        Logger::warn("Vegas FSR: vkGetDeviceProcAddr not found");
-        s_vk.loaded = true;
-        return false;
-      }
-#     define VK_LOAD_DEV_FUNC(name) \
-        s_vk.name = (PFN_##name)s_vk.vkGetDeviceProcAddr(device, #name); \
+
+      const vk::DeviceFn& dev = *s_vkDeviceFn;
+#     define VK_COPY_DEV_FUNC(name) \
+        s_vk.name = dev.name; \
         if (!s_vk.name) { \
-          Logger::warn("Vegas FSR: " #name " not found"); \
+          Logger::warn("Vegas: " #name " not available"); \
           s_vk.loaded = true; \
           return false; \
         }
-      VK_LOAD_DEV_FUNC(vkCreateShaderModule)
-      VK_LOAD_DEV_FUNC(vkDestroyShaderModule)
-      VK_LOAD_DEV_FUNC(vkCreatePipelineLayout)
-      VK_LOAD_DEV_FUNC(vkDestroyPipelineLayout)
-      VK_LOAD_DEV_FUNC(vkCreateComputePipelines)
-      VK_LOAD_DEV_FUNC(vkDestroyPipeline)
-      VK_LOAD_DEV_FUNC(vkCreateDescriptorSetLayout)
-      VK_LOAD_DEV_FUNC(vkDestroyDescriptorSetLayout)
-      VK_LOAD_DEV_FUNC(vkCreateDescriptorPool)
-      VK_LOAD_DEV_FUNC(vkDestroyDescriptorPool)
-      VK_LOAD_DEV_FUNC(vkResetDescriptorPool)
-      VK_LOAD_DEV_FUNC(vkAllocateDescriptorSets)
-      VK_LOAD_DEV_FUNC(vkUpdateDescriptorSets)
-      VK_LOAD_DEV_FUNC(vkCreateImageView)
-      VK_LOAD_DEV_FUNC(vkDestroyImageView)
-      VK_LOAD_DEV_FUNC(vkCreateCommandPool)
-      VK_LOAD_DEV_FUNC(vkDestroyCommandPool)
-      VK_LOAD_DEV_FUNC(vkAllocateCommandBuffers)
-      VK_LOAD_DEV_FUNC(vkFreeCommandBuffers)
-      VK_LOAD_DEV_FUNC(vkBeginCommandBuffer)
-      VK_LOAD_DEV_FUNC(vkEndCommandBuffer)
-      VK_LOAD_DEV_FUNC(vkCmdPipelineBarrier)
-      VK_LOAD_DEV_FUNC(vkCmdBindPipeline)
-      VK_LOAD_DEV_FUNC(vkCmdBindDescriptorSets)
-      VK_LOAD_DEV_FUNC(vkCmdPushConstants)
-      VK_LOAD_DEV_FUNC(vkCmdDispatch)
-      VK_LOAD_DEV_FUNC(vkCmdCopyImage)
-      VK_LOAD_DEV_FUNC(vkQueueSubmit)
-      VK_LOAD_DEV_FUNC(vkQueueWaitIdle)
-      VK_LOAD_DEV_FUNC(vkCreateFence)
-      VK_LOAD_DEV_FUNC(vkDestroyFence)
-      VK_LOAD_DEV_FUNC(vkWaitForFences)
-      VK_LOAD_DEV_FUNC(vkResetFences)
+      VK_COPY_DEV_FUNC(vkCreateShaderModule)
+      VK_COPY_DEV_FUNC(vkDestroyShaderModule)
+      VK_COPY_DEV_FUNC(vkCreatePipelineLayout)
+      VK_COPY_DEV_FUNC(vkDestroyPipelineLayout)
+      VK_COPY_DEV_FUNC(vkCreateComputePipelines)
+      VK_COPY_DEV_FUNC(vkDestroyPipeline)
+      VK_COPY_DEV_FUNC(vkCreateDescriptorSetLayout)
+      VK_COPY_DEV_FUNC(vkDestroyDescriptorSetLayout)
+      VK_COPY_DEV_FUNC(vkCreateDescriptorPool)
+      VK_COPY_DEV_FUNC(vkDestroyDescriptorPool)
+      VK_COPY_DEV_FUNC(vkResetDescriptorPool)
+      VK_COPY_DEV_FUNC(vkAllocateDescriptorSets)
+      VK_COPY_DEV_FUNC(vkUpdateDescriptorSets)
+      VK_COPY_DEV_FUNC(vkCreateImageView)
+      VK_COPY_DEV_FUNC(vkDestroyImageView)
+      VK_COPY_DEV_FUNC(vkCreateCommandPool)
+      VK_COPY_DEV_FUNC(vkDestroyCommandPool)
+      VK_COPY_DEV_FUNC(vkAllocateCommandBuffers)
+      VK_COPY_DEV_FUNC(vkFreeCommandBuffers)
+      VK_COPY_DEV_FUNC(vkBeginCommandBuffer)
+      VK_COPY_DEV_FUNC(vkEndCommandBuffer)
+      VK_COPY_DEV_FUNC(vkCmdPipelineBarrier)
+      VK_COPY_DEV_FUNC(vkCmdBindPipeline)
+      VK_COPY_DEV_FUNC(vkCmdBindDescriptorSets)
+      VK_COPY_DEV_FUNC(vkCmdPushConstants)
+      VK_COPY_DEV_FUNC(vkCmdDispatch)
+      VK_COPY_DEV_FUNC(vkCmdCopyImage)
+      VK_COPY_DEV_FUNC(vkQueueSubmit)
+      VK_COPY_DEV_FUNC(vkQueueWaitIdle)
+      VK_COPY_DEV_FUNC(vkCreateFence)
+      VK_COPY_DEV_FUNC(vkDestroyFence)
+      VK_COPY_DEV_FUNC(vkWaitForFences)
+      VK_COPY_DEV_FUNC(vkResetFences)
       // Intermediate target + blit
-      VK_LOAD_DEV_FUNC(vkCreateImage)
-      VK_LOAD_DEV_FUNC(vkDestroyImage)
-      VK_LOAD_DEV_FUNC(vkGetImageMemoryRequirements)
-      VK_LOAD_DEV_FUNC(vkAllocateMemory)
-      VK_LOAD_DEV_FUNC(vkFreeMemory)
-      VK_LOAD_DEV_FUNC(vkBindImageMemory)
-      VK_LOAD_DEV_FUNC(vkCmdBlitImage)
+      VK_COPY_DEV_FUNC(vkCreateImage)
+      VK_COPY_DEV_FUNC(vkDestroyImage)
+      VK_COPY_DEV_FUNC(vkGetImageMemoryRequirements)
+      VK_COPY_DEV_FUNC(vkAllocateMemory)
+      VK_COPY_DEV_FUNC(vkFreeMemory)
+      VK_COPY_DEV_FUNC(vkBindImageMemory)
+      VK_COPY_DEV_FUNC(vkCmdBlitImage)
       // Buffer functions
-      VK_LOAD_DEV_FUNC(vkCreateBuffer)
-      VK_LOAD_DEV_FUNC(vkDestroyBuffer)
-      VK_LOAD_DEV_FUNC(vkGetBufferMemoryRequirements)
-      VK_LOAD_DEV_FUNC(vkBindBufferMemory)
-      VK_LOAD_DEV_FUNC(vkMapMemory)
-      VK_LOAD_DEV_FUNC(vkUnmapMemory)
-#     undef VK_LOAD_DEV_FUNC
+      VK_COPY_DEV_FUNC(vkCreateBuffer)
+      VK_COPY_DEV_FUNC(vkDestroyBuffer)
+      VK_COPY_DEV_FUNC(vkGetBufferMemoryRequirements)
+      VK_COPY_DEV_FUNC(vkBindBufferMemory)
+      VK_COPY_DEV_FUNC(vkMapMemory)
+      VK_COPY_DEV_FUNC(vkUnmapMemory)
+#     undef VK_COPY_DEV_FUNC
 
-      // Load physical-device-level functions via dlsym (not vkGetDeviceProcAddr)
+      // Physical-device-level function lives in the instance table
+      s_vk.vkGetPhysicalDeviceMemoryProperties =
+          s_vkInstanceFn->vkGetPhysicalDeviceMemoryProperties;
       if (!s_vk.vkGetPhysicalDeviceMemoryProperties) {
-        s_vk.vkGetPhysicalDeviceMemoryProperties =
-            reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
-                dlsym(RTLD_DEFAULT, "vkGetPhysicalDeviceMemoryProperties"));
-        if (!s_vk.vkGetPhysicalDeviceMemoryProperties && lib) {
-          s_vk.vkGetPhysicalDeviceMemoryProperties =
-              reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
-                  dlsym(lib, "vkGetPhysicalDeviceMemoryProperties"));
-        }
-        if (!s_vk.vkGetPhysicalDeviceMemoryProperties) {
-          Logger::warn("Vegas FSR: vkGetPhysicalDeviceMemoryProperties not found");
-          s_vk.loaded = true;
-          return false;
-        }
+        Logger::warn("Vegas: vkGetPhysicalDeviceMemoryProperties not available");
+        s_vk.loaded = true;
+        return false;
       }
 
       s_vk.loaded = true;
       return true;
-#else
-      return false;
-#endif
     }
 
   } // anonymous namespace
