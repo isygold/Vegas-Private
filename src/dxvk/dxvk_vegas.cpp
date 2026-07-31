@@ -91,6 +91,7 @@ namespace dxvk {
   uint64_t Vegas::s_fgPrevMemory      = 0;
   uint32_t Vegas::s_fgPrevW           = 0;
   uint32_t Vegas::s_fgPrevH           = 0;
+  VkFormat Vegas::s_fgFormat          = VK_FORMAT_UNDEFINED;
   uint64_t Vegas::s_fgMotionImage     = 0;
   uint64_t Vegas::s_fgMotionMemory    = 0;
   uint64_t Vegas::s_fgMotionFiltered  = 0;
@@ -2429,7 +2430,7 @@ namespace dxvk {
    *  Creates s_fgPrevImage, s_fgMotionImage, s_fgMotionFiltered, s_fgOutputImage
    *  if dimensions changed or images do not exist.
    */
-  static bool ensureFgIntermediateImages(VkDevice device, uint32_t w, uint32_t h) {
+  static bool ensureFgIntermediateImages(VkDevice device, uint32_t w, uint32_t h, VkFormat format) {
     VkResult vr;
 
     // Motion buffer dimensions: one vector per 16×16 tile
@@ -2438,7 +2439,8 @@ namespace dxvk {
 
     // If dimensions match and images exist, nothing to do
     if (Vegas::s_fgPrevImage && Vegas::s_fgMotionImage && Vegas::s_fgMotionFiltered && Vegas::s_fgOutputImage
-        && Vegas::s_fgPrevW == w && Vegas::s_fgPrevH == h && Vegas::s_fgMotionW == mw && Vegas::s_fgMotionH == mh)
+        && Vegas::s_fgPrevW == w && Vegas::s_fgPrevH == h && Vegas::s_fgMotionW == mw && Vegas::s_fgMotionH == mh
+        && Vegas::s_fgFormat == format)
       return true;
 
     // ---- Destroy old images if any ----
@@ -2463,6 +2465,7 @@ namespace dxvk {
     Vegas::s_fgPrevH = 0;
     Vegas::s_fgMotionW = 0;
     Vegas::s_fgMotionH = 0;
+    Vegas::s_fgFormat = VK_FORMAT_UNDEFINED;
 
     // Helper to create a storage/transfer image
     auto createImage = [&](uint32_t imgW, uint32_t imgH,
@@ -2535,30 +2538,34 @@ namespace dxvk {
     };
 
     // ---- Create images ----
-    // s_fgPrevImage: previous frame (UNORM, same as swapchain)
-    if (!createImage(w, h, VK_FORMAT_R8G8B8A8_UNORM,
+    // s_fgPrevImage: previous frame (same format as swapchain so the
+    // cur→prev copy is a legal same-format vkCmdCopyImage)
+    if (!createImage(w, h, format,
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
         Vegas::s_fgPrevImage, Vegas::s_fgPrevMemory)) {
       return false;
     }
 
-    // s_fgMotionImage: raw motion vectors (R32G32_SFLOAT, storage)
-    if (!createImage(mw, mh, VK_FORMAT_R32G32_SFLOAT,
+    // s_fgMotionImage: raw motion vectors (R16G16_SFLOAT — matches the
+    // shaders' declared Rg16f storage format)
+    if (!createImage(mw, mh, VK_FORMAT_R16G16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         Vegas::s_fgMotionImage, Vegas::s_fgMotionMemory)) {
       return false;
     }
 
-    // s_fgMotionFiltered: median-filtered motion (R32G32_SFLOAT, storage)
-    if (!createImage(mw, mh, VK_FORMAT_R32G32_SFLOAT,
+    // s_fgMotionFiltered: median-filtered motion (R16G16_SFLOAT)
+    if (!createImage(mw, mh, VK_FORMAT_R16G16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         Vegas::s_fgMotionFiltered, Vegas::s_fgMotionFMemory)) {
       return false;
     }
 
-    // s_fgOutputImage: interpolated frame output (UNORM)
-    if (!createImage(w, h, VK_FORMAT_R8G8B8A8_UNORM,
+    // s_fgOutputImage: interpolated frame output (swapchain format so the
+    // final fgOutput → curImage blit is same-format; the warp shader's
+    // uOutput declares Unknown format, see star_fg_spv.h)
+    if (!createImage(w, h, format,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         Vegas::s_fgOutputImage, Vegas::s_fgOutputMemory)) {
       return false;
@@ -2568,6 +2575,7 @@ namespace dxvk {
     Vegas::s_fgPrevH   = h;
     Vegas::s_fgMotionW = mw;
     Vegas::s_fgMotionH = mh;
+    Vegas::s_fgFormat  = format;
 
     Logger::debug(str::format("Vegas FG: intermediate images created (",
                               w, "x", h, ", motion ", mw, "x", mh, ")"));
@@ -2629,7 +2637,7 @@ namespace dxvk {
       return false;
     }
 
-    if (!ensureFgIntermediateImages(device, extent.width, extent.height)) {
+    if (!ensureFgIntermediateImages(device, extent.width, extent.height, format)) {
       Logger::debug("Vegas FG: skipped — intermediate image creation failed");
       return false;
     }
@@ -2878,36 +2886,36 @@ namespace dxvk {
       fgCleanup(3); return false;
     }
 
-    // prevImage view (same format)
+    // prevImage view (same format as image)
     viewCI.image = actualPrev;
-    viewCI.format = VK_FORMAT_R8G8B8A8_UNORM;  // prev is always UNORM
+    viewCI.format = format;  // prev is created in the swapchain format
     vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &srcViewPrev);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreateImageView(prev) failed (", vr, ")"));
       fgCleanup(4); return false;
     }
 
-    // Motion raw view (R32G32_SFLOAT)
+    // Motion raw view (R16G16_SFLOAT — matches shader Rg16f)
     viewCI.image  = motionRaw;
-    viewCI.format = VK_FORMAT_R32G32_SFLOAT;
+    viewCI.format = VK_FORMAT_R16G16_SFLOAT;
     vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &motionView);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreateImageView(motion) failed (", vr, ")"));
       fgCleanup(5); return false;
     }
 
-    // Motion filtered view (R32G32_SFLOAT)
+    // Motion filtered view (R16G16_SFLOAT)
     viewCI.image  = motionFiltered;
-    viewCI.format = VK_FORMAT_R32G32_SFLOAT;
+    viewCI.format = VK_FORMAT_R16G16_SFLOAT;
     vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &motionFilteredView);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreateImageView(motionFiltered) failed (", vr, ")"));
       fgCleanup(6); return false;
     }
 
-    // Output view (R8G8B8A8_UNORM)
+    // Output view (swapchain format — warp uOutput is Unknown in SPIR-V)
     viewCI.image  = fgOutput;
-    viewCI.format = VK_FORMAT_R8G8B8A8_UNORM;
+    viewCI.format = format;
     vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &outputView);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreateImageView(output) failed (", vr, ")"));
@@ -3129,14 +3137,17 @@ namespace dxvk {
     s_vk.vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineMotion);
     s_vk.vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
         pipelineLayout, 0, 1, &descSets[0], 0, nullptr);
+    uint32_t motionGX = (extent.width  + FG_TILE_SIZE - 1) / FG_TILE_SIZE;
+    uint32_t motionGY = (extent.height + FG_TILE_SIZE - 1) / FG_TILE_SIZE;
     {
-      float pcData[4] = { 1.0f / float(FG_TILE_SIZE), 0.0f, 0.0f, 0.0f };
+      // Shader contract: pc.xy = block count (int(pc.xy) compared to
+      // gl_WorkGroupID). Must be the tile grid size, NOT a reciprocal —
+      // int(1/16)=0 made every workgroup early-return.
+      float pcData[4] = { float(motionGX), float(motionGY), 0.0f, 0.0f };
       s_vk.vkCmdPushConstants(cmdBuf, pipelineLayout,
           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcData), pcData);
     }
 
-    uint32_t motionGX = (extent.width  + FG_TILE_SIZE - 1) / FG_TILE_SIZE;
-    uint32_t motionGY = (extent.height + FG_TILE_SIZE - 1) / FG_TILE_SIZE;
     s_vk.vkCmdDispatch(cmdBuf, motionGX, motionGY, 1);
 
     // Barrier: motionRaw GENERAL (write→read for median)
@@ -3161,9 +3172,10 @@ namespace dxvk {
     s_vk.vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineMedian);
     s_vk.vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
         pipelineLayout, 0, 1, &descSets[1], 0, nullptr);
-    // Median push constants are unused but required by layout
+    // Median push constants: pc.xy = motion image size (int(pc.xy)
+    // compared against pixelPos). Zeros made every workgroup early-return.
     {
-      float pcData[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+      float pcData[4] = { float(motionGX), float(motionGY), 0.0f, 0.0f };
       s_vk.vkCmdPushConstants(cmdBuf, pipelineLayout,
           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcData), pcData);
     }
@@ -3195,11 +3207,12 @@ namespace dxvk {
     s_vk.vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
         pipelineLayout, 0, 1, &descSets[2], 0, nullptr);
     {
-      float blendMin     = 0.05f;
-      float blendMax     = 0.95f;
-      float blendStrength = 0.5f;
-      float motionScale   = 1.0f / float(FG_TILE_SIZE);
-      float pcData[4]    = { blendMin, blendMax, blendStrength, motionScale };
+      // Shader contract: pc.xy = output pixel size (int() bounds check),
+      // pc.z = motion grid width (motionSize.x), motionSize.y = ceil(pc.y/16).
+      // The old blend-parameter values made int(pc.xy)=0 -> early return.
+      float pcData[4] = {
+        float(extent.width), float(extent.height),
+        float(motionGX), 0.0f };
       s_vk.vkCmdPushConstants(cmdBuf, pipelineLayout,
           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcData), pcData);
     }

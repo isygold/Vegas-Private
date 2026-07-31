@@ -375,9 +375,10 @@ namespace dxvk {
     static uint64_t            s_fgPrevMemory;        ///< VkDeviceMemory
     static uint32_t            s_fgPrevW;             ///< current width
     static uint32_t            s_fgPrevH;             ///< current height
-    static uint64_t            s_fgMotionImage;       ///< VkImage (raw motion, R32G32_SFLOAT)
+    static VkFormat            s_fgFormat;            ///< swapchain format (prev/output)
+    static uint64_t            s_fgMotionImage;       ///< VkImage (raw motion, R16G16_SFLOAT)
     static uint64_t            s_fgMotionMemory;      ///< VkDeviceMemory
-    static uint64_t            s_fgMotionFiltered;    ///< VkImage (filtered motion, R32G32_SFLOAT)
+    static uint64_t            s_fgMotionFiltered;    ///< VkImage (filtered motion, R16G16_SFLOAT)
     static uint64_t            s_fgMotionFMemory;     ///< VkDeviceMemory
     static uint64_t            s_fgOutputImage;       ///< VkImage (framegen output)
     static uint64_t            s_fgOutputMemory;      ///< VkDeviceMemory
