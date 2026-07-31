@@ -446,18 +446,20 @@ namespace dxvk {
       // conservative for TR13 (43% split=0 during gameplay).
       if (gov.atomicSplitActive) {
         // Split: batch = max(64, pred / flushes), never exceed predicted.
-        // Safe for low-draw frames: min(pred, split) = pred when pred < 64.
-        // Safe for high-draw frames: split scales with pred/flushes, not hard-clamped.
+        // Low-draw frames: floorMinimumCap (64) prevents shouldFlush from
+        // firing on every draw when pred is small (e.g. first frame pred=1).
+        // High-draw frames: split scales with pred/flushes as intended.
         uint32_t split = std::max(gov.floorMinimumCap,
                         std::max(1u, predicted / gov.targetFlushesPerFrame));
-        gov.drawThreshold = std::min(predicted, split);
+        gov.drawThreshold = std::max(gov.floorMinimumCap, std::min(predicted, split));
       } else {
-        gov.drawThreshold = predicted;    // Atomic: flush exactly at end of frame
+        gov.drawThreshold = std::max(gov.floorMinimumCap, predicted);
       }
     } else {
-      gov.drawThreshold = std::min(calcThreshold, gov.dynamicMaxBatchCap);
+      gov.drawThreshold = std::max(gov.floorMinimumCap,
+                            std::min(calcThreshold, gov.dynamicMaxBatchCap));
     }
-
+    
     // Sync s_drawThreshold immediately so shouldFlush() reads the correct
     // threshold this frame instead of waiting for endOfFrameCleanup (1-frame lag).
     s_drawThreshold = gov.drawThreshold;
