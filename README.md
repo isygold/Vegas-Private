@@ -9,7 +9,7 @@
 
 VEGAS is a specialized performance fork of **DXVK v2.4.1** (via the GPLAsync backport) targeting **Qualcomm Adreno GPUs** on Android emulation (Star Emulator / Winlator). It features automatic async shader compilation, tier-based auto-tuning, FSR 1.0 compute upscaling, motion-compensated frame generation, and a TBDR-aware dynamic governor — all configurable through simple DXVK options.
 
-**This is the stable backport branch (`build-fix-2.4.1`).** It ships with auto-generated crash reports, per-game config presets, and automatic session tracking. A `dxvk.conf` file is bundled but **not required** — VEGAS works out of the box with sensible defaults. Only create one if you want to tweak specific behavior.
+**This is the stable release line (`release-v2.4.1`, tag `v2.4.1-V`).** It ships with auto-generated crash reports, per-game config presets, and automatic session tracking. A `dxvk.conf` file is bundled but **not required** — VEGAS works out of the box with sensible defaults. Only create one if you want to tweak specific behavior.
 
 ---
 
@@ -155,6 +155,7 @@ All other parameters (draw thresholds, bind skip, HAAE pacing, quality scaling) 
 - **Synthetic benchmarks:** May show lower FPS than stock due to draw thresholds. Judge performance by actual gameplay smoothness.
 - **GPU-bound workloads:** VSync-off provides negligible gain when the GPU is already saturated (17+ ms frame times).
 - **Draw thresholds `{100,200,350}` are Ph42oN GPLAsync battle-tested defaults.** Unity games automatically receive `{200,400,700}` via the game preset system. These values do NOT affect rendering correctness — every draw call still renders, just with more efficient batching.
+- **Governor v4.2 (tile-overflow safety).** The split logic counts every draw type (including indirect draws), measures draws since the last submission rather than per-frame totals, and enforces a 600-draw per-render-pass safety floor. Bind-skip is invalidated at every command-buffer boundary so a mid-frame flush can never leave geometry unbound. Verified smooth on Tomb Raider (2013) and Hollow Knight on Adreno 610 — zero tile-overflow artifacts, zero governor flushes at steady state.
 
 ---
 

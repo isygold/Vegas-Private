@@ -1,7 +1,7 @@
 # VEGAS Developer Guide — DXVK 2.4.1 Backport
 
 Welcome to the VEGAS (formerly Star Engine) developer documentation for the
-**stability backport branch (`build-fix-2.4.1`)**. This branch combines:
+**stable release line (`release-v2.4.1`, tag `v2.4.1-V`)**. This line combines:
 - DXVK v2.4.1 base (proven stable with Hollow Knight)
 - Ph42oN's GPLAsync v2.4-1 patch (async shader compilation)
 - VEGAS performance features: FSR 1.0, framegen, TBDR governor, VegaHud
@@ -127,7 +127,7 @@ Per-Submit (submitCommandList):
 
 | File | Lines (approx) | What Vegas Does There |
 |------|----------------|-----------------------|
-| `src/dxvk/dxvk_context.cpp` | 83-103, 839-862, 949-973 | Draw flush, bindSkip, GPLAsync compat |
+| `src/dxvk/dxvk_context.cpp` | 82-101, 131-138, 1334-1432 | Bind-skip reset in beginCurrentCommands, submission counter reset in flushCommandList, draw flush paths (all six draw types) |
 | `src/dxvk/dxvk_context.h` | 830-834 | Vegas profile members |
 | `src/dxvk/dxvk_device.cpp` | 26, 39, 260-266 | beginSession (ctor), endSession (dtor), onPresent (presentImage), VEGAS signature |
 | `src/dxvk/hud/dxvk_hud_item.cpp` | 86-98 | HUD shows "VEGAS" version string |
@@ -254,6 +254,19 @@ else                                        -> base (balanced, reset)
 - At 60fps (16.7ms): ~5 frame cooldown
 - At 30fps (33.3ms): ~10 frame cooldown
 
+**v4.2 Governor Hardening (release line):**
+- All six draw paths (incl. `drawIndirect`, `drawIndexedIndirectCount`) increment
+  `submissionDrawCount`, and `shouldFlush()` reads that counter — indirect draws
+  are no longer invisible to the split logic (v4.2.3)
+- `submissionDrawCount` resets on EVERY `flushCommandList` via
+  `onCommandListFlush()`, not just at frame end — split measures draws since the
+  last submission, preventing a mid-frame flush storm after the threshold is
+  crossed once (v4.2.4)
+- `floorMinimumCap = 600` — tile-overflow safety line; the governor never lets a
+  render pass accumulate beyond 600 draws before splitting (v4.2.2)
+- `maxPassDraws` telemetry — peak draw count at flush-check time, reported as
+  `maxPass=NNN` in the predError HUD line (pass-size proxy)
+
 ---
 
 ### 3.4 GPU Pacing (HAAE)
@@ -278,11 +291,19 @@ too large on TBDR architectures.
 
 | Function | Lines | Purpose |
 |----------|-------|---------|
-| `shouldSkipBind()` | ~570 | Returns `s_enabled && s_bindSkipEnabled` |
+| `shouldSkipBind()` | ~932 | Returns `s_enabled && s_bindSkipEnabled` |
 
 **What it skips:** `vkCmdBindPipeline` when the same pipeline handle was
 already bound and pipeline state has not changed. Reduces CPU overhead on
 the draw call path.
+
+**v4.2.5 fix (critical):** the bind-skip cache
+(`m_vegasProfile.lastBoundVkPipeline`) is reset to `VK_NULL_HANDLE` in
+`beginCurrentCommands()`. After any mid-frame flush, DXVK marks the pipeline
+dirty (`GpDirtyPipeline`) and expects a fresh command buffer to issue the full
+`vkCmdBindPipeline`. Without the reset, bind-skip suppressed the rebind and
+geometry was recorded with NO pipeline bound — vanishing rocks/text (the
+tile-overflow artifact look-alike that survived every governor tuning).
 
 ---
 
@@ -649,4 +670,4 @@ The GPLAsync patch for DXVK 2.4 was created by **Ph42oN**
 
 ---
 
-*Last updated: 2026-07-26 | Branch: build-fix-2.4.1*
+*Last updated: 2026-07-31 | Branch: release-v2.4.1 (tag v2.4.1-V)*
