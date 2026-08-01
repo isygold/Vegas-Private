@@ -1,22 +1,32 @@
-// star_fg_motion.comp — VEGAS framegen Motion pass, rewrite v2.
+// star_fg_motion.comp — VEGAS framegen Motion pass, rewrite v2 (atomic
+// reductions).
 //
 // Block-level SAD search with shared-memory staging, hierarchical
 // coarse ±8 + refine ±2, variance-aware confidence.
 //
-// vs. the v1 per-pixel design (81 serial dependent global fetches per
-// thread, ~74M fetches/frame at 720p → 50ms dispatch timeouts on
-// Adreno 610):
-//   - the previous-frame search window is staged into shared memory
-//     once per block (4 fetches/thread), so candidate evaluation never
-//     touches global memory (≈4,000× fewer global fetches per block)
-//   - cost = luma-only on the decimated coarse pass, luma+chroma on the
-//     full-res refine pass — chroma catches dark-vs-dark scene cuts
-//     that luma-only SAD misses
-//   - block variance gates confidence: textureless blocks (sky, walls)
-//     cannot produce meaningful matches, so they distrust themselves
-//   - the winning block SAD is written to the motion buffer's z
-//     component (normalized to [0,1]) — the warp pass turns it into a
-//     per-block scene-cut signal (blend → current frame on distrust)
+// v2 stages the previous-frame search window into shared memory once per
+// block (4 fetches/thread) so candidate evaluation never touches global
+// memory (≈4,000× fewer global fetches than v1).  This iteration replaces
+// the butterfly reductions (36 barriers/workgroup — two 2-pass sum
+// reductions + two 8-level min reductions) with shared atomics
+// (4 barriers).  The butterfly pattern plus 11.5KB shared collapsed
+// occupancy on Adreno 610 TBDR and pushed the dispatch-timeout rate to
+// ~91% on-device; atomics are the minimal fix and also shrink the shared
+// footprint by 384 floats (scratch arrays dropped).
+//
+// Design notes:
+//   - block variance: two uint atomicAdd accumulators in fixed point
+//     (Σ l·2^16, Σ l²·2^16).  Each term ≤ 65536, 256 terms → sum ≤
+//     16,777,216 < 2^24, exactly representable in float, no uint32
+//     overflow.  For a constant-luma block every term is identical so
+//     quantization cancels exactly — the flat-block gate stays exact.
+//   - argmin: packed atomicMin over (uint(cost·16) << 8 | idx).  Costs
+//     ≤ 384 → ≤ 6144, fits 16 bits, packing order-preserving.
+//     floatBitsToUint(cost) << 8 would wrap for costs ≥ 2.0 (exponent
+//     bits shifted out) and break ordering — fixed point is required.
+//   - the coarse winner is broadcast via shared ints (all 25 refine
+//     threads need it); s_minPacked is reset by thread 0 under the same
+//     barrier that publishes the coarse winner.
 
 #version 460
 #extension GL_EXT_samplerless_texture_functions : require
@@ -35,51 +45,24 @@ layout(push_constant) uniform uPC {
 const float kChromaW = 0.5;     // chroma weight in refine cost
 const float kSADMaxPerPx = 1.5; // max per-pixel cost: |dL|<=1 + 0.5*|dC|<=0.5
 const int   kSearch = 8;        // half window ±8
+const uint  kMinPacked = 0xFFFFFFFFu;
 
 shared float s_curL[256];   // current block luma       (16x16)
 shared float s_curC[256];   // current block chroma
 shared float s_prevL[1024]; // previous window luma     (32x32, ±8)
 shared float s_prevC[1024]; // previous window chroma
-shared float s_reduceV[256];// reduction values (256 = variance path)
-shared int   s_reduceI[128];// reduction indices (candidate count ≤ 81)
-shared float s_best[2];     // s_best[0] = best cost, s_best[1] = best idx
+shared uint  s_accL;        // Σ luma·2^16    (atomicAdd accumulator)
+shared uint  s_accL2;       // Σ luma²·2^16   (atomicAdd accumulator)
+shared uint  s_minPacked;   // (cost<<8)|idx   (atomicMin; reset per pass)
+shared int   s_coarseX;     // coarse winner offset, broadcast to refine
+shared int   s_coarseY;
 
 float lumaOf(vec4 c)   { return dot(c.rgb, vec3(0.299, 0.587, 0.114)); }
 float chromaOf(vec4 c) { return 0.5 * (c.r - c.b); }
 
-// Min-reduction over the first `count` entries of s_reduceV (indices in
-// s_reduceI).  Caller must fill V[0..count) with costs and I[0..count)
-// with candidate indices, and V[count..128) with 1e30.  Result lands in
-// s_best; all threads exit synchronized.
-void reduceMin(uint count) {
-  for (uint stride = 64u; stride > 0u; stride >>= 1u) {
-    barrier();
-    uint tid = gl_LocalInvocationIndex;
-    if (tid < stride) {
-      uint other = tid + stride;
-      if (other < count && s_reduceV[other] < s_reduceV[tid]) {
-        s_reduceV[tid] = s_reduceV[other];
-        s_reduceI[tid] = s_reduceI[other];
-      }
-    }
-  }
-  barrier();
-  if (gl_LocalInvocationIndex == 0u) {
-    s_best[0] = s_reduceV[0];
-    s_best[1] = float(s_reduceI[0]);
-  }
-  barrier();
-}
-
-// Sum-reduction of s_reduceV[256] → s_reduceV[0]; all threads exit synced.
-void reduceSum() {
-  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
-    barrier();
-    uint tid = gl_LocalInvocationIndex;
-    if (tid < stride)
-      s_reduceV[tid] += s_reduceV[tid + stride];
-  }
-  barrier();
+// Pack a non-negative cost into an order-preserving uint for atomicMin.
+uint packCost(float cost, uint idx) {
+  return (uint(clamp(cost, 0.0, 4095.0) * 16.0) << 8u) | (idx & 0xFFu);
 }
 
 void main() {
@@ -95,7 +78,8 @@ void main() {
 
   // ---- Stage current block (1 fetch/thread) -------------------------
   vec4 curr = texelFetch(uCurrent, clamp(pixelPos, ivec2(0), clampMax), 0);
-  s_curL[tid] = lumaOf(curr);
+  float l = lumaOf(curr);
+  s_curL[tid] = l;
   s_curC[tid] = chromaOf(curr);
 
   // ---- Stage previous window ±8 (4 fetches/thread) ------------------
@@ -109,19 +93,16 @@ void main() {
     s_prevL[idx] = lumaOf(prev);
     s_prevC[idx] = chromaOf(prev);
   }
-  barrier();
+  if (tid == 0u) {
+    s_accL = 0u;
+    s_accL2 = 0u;
+    s_minPacked = kMinPacked;
+  }
+  barrier();  // (1) staging + accumulator init visible to all threads
 
-  // ---- Block luma variance (texture gate for confidence) ------------
-  float l = s_curL[tid];
-  s_reduceV[tid] = l;
-  reduceSum();
-  float sum = s_reduceV[0];
-  barrier();
-  s_reduceV[tid] = l * l;
-  reduceSum();
-  float sumSq = s_reduceV[0];
-  float blockVar = sumSq / 256.0 - (sum / 256.0) * (sum / 256.0);
-  barrier();
+  // ---- Block luma variance via fixed-point atomicAdd ----------------
+  atomicAdd(s_accL,  uint(l * 65536.0));
+  atomicAdd(s_accL2, uint(l * l * 65536.0));
 
   // ---- Coarse pass: 81 candidates (±8, step 2), decimated 8x8 pixels,
   //      luma-only.  Window index: block-local pixel (xx,yy) + offset →
@@ -136,24 +117,25 @@ void main() {
         sad += abs(s_curL[yy * 16 + xx] - s_prevL[pi]);
       }
     }
-    s_reduceV[tid] = sad;
-    s_reduceI[tid] = int(tid);
-  } else if (tid < 128u) {
-    s_reduceV[tid] = 1e30;
-    s_reduceI[tid] = 0;
+    atomicMin(s_minPacked, packCost(sad, tid));
   }
-  reduceMin(81u);
-  int co = int(s_best[1]);
-  int bestX = (co % 9) * 2 - 8;
-  int bestY = (co / 9) * 2 - 8;
+  barrier();  // (2) variance adds + coarse atomicMin complete
+
+  if (tid == 0u) {
+    uint co = s_minPacked & 0xFFu;
+    s_coarseX = (int(co) % 9) * 2 - 8;
+    s_coarseY = (int(co) / 9) * 2 - 8;
+    s_minPacked = kMinPacked;   // reset for refine pass
+  }
+  barrier();  // (3) coarse winner + reset visible to all threads
 
   // ---- Refine pass: 25 candidates (±2 around coarse), full-res 16x16,
   //      luma+chroma.  Offsets clamped to ±8 so the window index stays
   //      in bounds (edge refinement is clipped, negligible accuracy
   //      cost at the search boundary). --------------------------------
   if (tid < 25u) {
-    int rdx = clamp((int(tid) % 5) - 2 + bestX, -kSearch, kSearch);
-    int rdy = clamp((int(tid) / 5) - 2 + bestY, -kSearch, kSearch);
+    int rdx = clamp((int(tid) % 5) - 2 + s_coarseX, -kSearch, kSearch);
+    int rdy = clamp((int(tid) / 5) - 2 + s_coarseY, -kSearch, kSearch);
     float sad = 0.0;
     for (int yy = 0; yy < 16; yy++) {
       for (int xx = 0; xx < 16; xx++) {
@@ -163,20 +145,21 @@ void main() {
              + kChromaW * abs(s_curC[ci] - s_prevC[pi]);
       }
     }
-    s_reduceV[tid] = sad;
-    s_reduceI[tid] = int(tid);
-  } else if (tid < 128u) {
-    s_reduceV[tid] = 1e30;
-    s_reduceI[tid] = 0;
+    atomicMin(s_minPacked, packCost(sad, tid));
   }
-  reduceMin(25u);
-  int rf = int(s_best[1]);
-  int mvX = clamp((rf % 5) - 2 + bestX, -kSearch, kSearch);
-  int mvY = clamp((rf / 5) - 2 + bestY, -kSearch, kSearch);
-  float bestSad = s_best[0];
+  barrier();  // (4) refine atomicMin complete
 
   // ---- Write: vector + normalized SAD + variance gate ---------------
   if (tid == 0u) {
+    uint rf = s_minPacked & 0xFFu;
+    float bestSad = float(s_minPacked >> 8u) / 16.0;
+    int mvX = clamp((int(rf) % 5) - 2 + s_coarseX, -kSearch, kSearch);
+    int mvY = clamp((int(rf) / 5) - 2 + s_coarseY, -kSearch, kSearch);
+
+    // Fixed-point variance: mean = s_accL/2^16/256, E[l²] = s_accL2/2^16/256
+    float mean = float(s_accL) / 65536.0 / 256.0;
+    float blockVar = max((float(s_accL2) / 65536.0 / 256.0) - mean * mean, 0.0);
+
     float sadNorm = bestSad / (256.0 * kSADMaxPerPx);
     // Textureless blocks: no match is meaningful (sky, walls, fog).
     // smoothstep over [thr/2, thr*2]; low variance → conf≈0 → sadNorm=1
