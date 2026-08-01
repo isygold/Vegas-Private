@@ -3232,7 +3232,12 @@ namespace dxvk {
       // Shader contract: pc.xy = block count (int(pc.xy) compared to
       // gl_WorkGroupID). Must be the tile grid size, NOT a reciprocal —
       // int(1/16)=0 made every workgroup early-return.
-      float pcData[4] = { float(motionGX), float(motionGY), 0.0f, 0.0f };
+      // pc.w = block luma variance threshold for the confidence gate:
+      // blocks with variance below ~thr are textureless (sky/walls/fog)
+      // → no meaningful motion match → distrust → warp presents current.
+      // NOTE: must be > 0 — smoothstep(thr/2, thr*2, x) is undefined when
+      // edge0 == edge1 (pc.w == 0 → driver-dependent garbage confidence).
+      float pcData[4] = { float(motionGX), float(motionGY), 0.0f, 0.0005f };
       s_vk.vkCmdPushConstants(cmdBuf, pipelineLayout,
           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcData), pcData);
     }

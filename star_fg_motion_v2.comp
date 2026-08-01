@@ -1,0 +1,188 @@
+// star_fg_motion.comp — VEGAS framegen Motion pass, rewrite v2.
+//
+// Block-level SAD search with shared-memory staging, hierarchical
+// coarse ±8 + refine ±2, variance-aware confidence.
+//
+// vs. the v1 per-pixel design (81 serial dependent global fetches per
+// thread, ~74M fetches/frame at 720p → 50ms dispatch timeouts on
+// Adreno 610):
+//   - the previous-frame search window is staged into shared memory
+//     once per block (4 fetches/thread), so candidate evaluation never
+//     touches global memory (≈4,000× fewer global fetches per block)
+//   - cost = luma-only on the decimated coarse pass, luma+chroma on the
+//     full-res refine pass — chroma catches dark-vs-dark scene cuts
+//     that luma-only SAD misses
+//   - block variance gates confidence: textureless blocks (sky, walls)
+//     cannot produce meaningful matches, so they distrust themselves
+//   - the winning block SAD is written to the motion buffer's z
+//     component (normalized to [0,1]) — the warp pass turns it into a
+//     per-block scene-cut signal (blend → current frame on distrust)
+
+#version 460
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) uniform texture2D uCurrent;
+layout(set = 0, binding = 1) uniform texture2D uPrevious;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D uMotion;
+
+layout(push_constant) uniform uPC {
+  vec4 info;   // info.xy = block grid size (int), info.z unused,
+               // info.w = variance threshold (0.0005 default)
+} pc;
+
+const float kChromaW = 0.5;     // chroma weight in refine cost
+const float kSADMaxPerPx = 1.5; // max per-pixel cost: |dL|<=1 + 0.5*|dC|<=0.5
+const int   kSearch = 8;        // half window ±8
+
+shared float s_curL[256];   // current block luma       (16x16)
+shared float s_curC[256];   // current block chroma
+shared float s_prevL[1024]; // previous window luma     (32x32, ±8)
+shared float s_prevC[1024]; // previous window chroma
+shared float s_reduceV[256];// reduction values (256 = variance path)
+shared int   s_reduceI[128];// reduction indices (candidate count ≤ 81)
+shared float s_best[2];     // s_best[0] = best cost, s_best[1] = best idx
+
+float lumaOf(vec4 c)   { return dot(c.rgb, vec3(0.299, 0.587, 0.114)); }
+float chromaOf(vec4 c) { return 0.5 * (c.r - c.b); }
+
+// Min-reduction over the first `count` entries of s_reduceV (indices in
+// s_reduceI).  Caller must fill V[0..count) with costs and I[0..count)
+// with candidate indices, and V[count..128) with 1e30.  Result lands in
+// s_best; all threads exit synchronized.
+void reduceMin(uint count) {
+  for (uint stride = 64u; stride > 0u; stride >>= 1u) {
+    barrier();
+    uint tid = gl_LocalInvocationIndex;
+    if (tid < stride) {
+      uint other = tid + stride;
+      if (other < count && s_reduceV[other] < s_reduceV[tid]) {
+        s_reduceV[tid] = s_reduceV[other];
+        s_reduceI[tid] = s_reduceI[other];
+      }
+    }
+  }
+  barrier();
+  if (gl_LocalInvocationIndex == 0u) {
+    s_best[0] = s_reduceV[0];
+    s_best[1] = float(s_reduceI[0]);
+  }
+  barrier();
+}
+
+// Sum-reduction of s_reduceV[256] → s_reduceV[0]; all threads exit synced.
+void reduceSum() {
+  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+    barrier();
+    uint tid = gl_LocalInvocationIndex;
+    if (tid < stride)
+      s_reduceV[tid] += s_reduceV[tid + stride];
+  }
+  barrier();
+}
+
+void main() {
+  ivec2 blocks = ivec2(pc.info.xy);
+  ivec2 blockId = ivec2(gl_WorkGroupID.xy);
+  if (blockId.x >= blocks.x || blockId.y >= blocks.y) return;
+
+  uint  tid = gl_LocalInvocationIndex;
+  ivec2 local = ivec2(gl_LocalInvocationID.xy);
+  ivec2 pixelPos = blockId * 16 + local;
+  ivec2 srcSize = textureSize(uCurrent, 0);
+  ivec2 clampMax = srcSize - 1;
+
+  // ---- Stage current block (1 fetch/thread) -------------------------
+  vec4 curr = texelFetch(uCurrent, clamp(pixelPos, ivec2(0), clampMax), 0);
+  s_curL[tid] = lumaOf(curr);
+  s_curC[tid] = chromaOf(curr);
+
+  // ---- Stage previous window ±8 (4 fetches/thread) ------------------
+  ivec2 winBase = blockId * 16 - ivec2(kSearch);
+  for (int i = 0; i < 4; i++) {
+    int idx = int(tid) * 4 + i;
+    int wx = idx & 31;
+    int wy = idx >> 5;
+    vec4 prev = texelFetch(uPrevious,
+        clamp(winBase + ivec2(wx, wy), ivec2(0), clampMax), 0);
+    s_prevL[idx] = lumaOf(prev);
+    s_prevC[idx] = chromaOf(prev);
+  }
+  barrier();
+
+  // ---- Block luma variance (texture gate for confidence) ------------
+  float l = s_curL[tid];
+  s_reduceV[tid] = l;
+  reduceSum();
+  float sum = s_reduceV[0];
+  barrier();
+  s_reduceV[tid] = l * l;
+  reduceSum();
+  float sumSq = s_reduceV[0];
+  float blockVar = sumSq / 256.0 - (sum / 256.0) * (sum / 256.0);
+  barrier();
+
+  // ---- Coarse pass: 81 candidates (±8, step 2), decimated 8x8 pixels,
+  //      luma-only.  Window index: block-local pixel (xx,yy) + offset →
+  //      (yy + 8 + dy) * 32 + (xx + 8 + dx) — always within [0,32). -----
+  if (tid < 81u) {
+    int cdx = (int(tid) % 9) * 2 - 8;
+    int cdy = (int(tid) / 9) * 2 - 8;
+    float sad = 0.0;
+    for (int yy = 0; yy < 16; yy += 2) {
+      for (int xx = 0; xx < 16; xx += 2) {
+        int pi = (yy + kSearch + cdy) * 32 + (xx + kSearch + cdx);
+        sad += abs(s_curL[yy * 16 + xx] - s_prevL[pi]);
+      }
+    }
+    s_reduceV[tid] = sad;
+    s_reduceI[tid] = int(tid);
+  } else if (tid < 128u) {
+    s_reduceV[tid] = 1e30;
+    s_reduceI[tid] = 0;
+  }
+  reduceMin(81u);
+  int co = int(s_best[1]);
+  int bestX = (co % 9) * 2 - 8;
+  int bestY = (co / 9) * 2 - 8;
+
+  // ---- Refine pass: 25 candidates (±2 around coarse), full-res 16x16,
+  //      luma+chroma.  Offsets clamped to ±8 so the window index stays
+  //      in bounds (edge refinement is clipped, negligible accuracy
+  //      cost at the search boundary). --------------------------------
+  if (tid < 25u) {
+    int rdx = clamp((int(tid) % 5) - 2 + bestX, -kSearch, kSearch);
+    int rdy = clamp((int(tid) / 5) - 2 + bestY, -kSearch, kSearch);
+    float sad = 0.0;
+    for (int yy = 0; yy < 16; yy++) {
+      for (int xx = 0; xx < 16; xx++) {
+        int ci = yy * 16 + xx;
+        int pi = (yy + kSearch + rdy) * 32 + (xx + kSearch + rdx);
+        sad += abs(s_curL[ci] - s_prevL[pi])
+             + kChromaW * abs(s_curC[ci] - s_prevC[pi]);
+      }
+    }
+    s_reduceV[tid] = sad;
+    s_reduceI[tid] = int(tid);
+  } else if (tid < 128u) {
+    s_reduceV[tid] = 1e30;
+    s_reduceI[tid] = 0;
+  }
+  reduceMin(25u);
+  int rf = int(s_best[1]);
+  int mvX = clamp((rf % 5) - 2 + bestX, -kSearch, kSearch);
+  int mvY = clamp((rf / 5) - 2 + bestY, -kSearch, kSearch);
+  float bestSad = s_best[0];
+
+  // ---- Write: vector + normalized SAD + variance gate ---------------
+  if (tid == 0u) {
+    float sadNorm = bestSad / (256.0 * kSADMaxPerPx);
+    // Textureless blocks: no match is meaningful (sky, walls, fog).
+    // smoothstep over [thr/2, thr*2]; low variance → conf≈0 → sadNorm=1
+    // → warp presents the current frame for this block.
+    float conf = smoothstep(pc.info.w * 0.5, pc.info.w * 2.0, blockVar);
+    sadNorm = max(sadNorm, 1.0 - conf);
+    imageStore(uMotion, blockId, vec4(float(mvX), float(mvY), sadNorm, 0.0));
+  }
+}
