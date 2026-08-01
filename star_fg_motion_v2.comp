@@ -45,6 +45,7 @@ layout(push_constant) uniform uPC {
 const float kChromaW = 0.5;     // chroma weight in refine cost
 const float kSADMaxPerPx = 1.5; // max per-pixel cost: |dL|<=1 + 0.5*|dC|<=0.5
 const int   kSearch = 8;        // half window ±8
+const int   kMaxDisp = 4;       // cap warp displacement to ±4 (reduces HUD ghosting from wrong vectors)
 const uint  kMinPacked = 0xFFFFFFFFu;
 
 shared float s_curL[256];   // current block luma       (16x16)
@@ -153,8 +154,8 @@ void main() {
   if (tid == 0u) {
     uint rf = s_minPacked & 0xFFu;
     float bestSad = float(s_minPacked >> 8u) / 16.0;
-    int mvX = clamp((int(rf) % 5) - 2 + s_coarseX, -kSearch, kSearch);
-    int mvY = clamp((int(rf) / 5) - 2 + s_coarseY, -kSearch, kSearch);
+    int mvX = clamp((int(rf) % 5) - 2 + s_coarseX, -kMaxDisp, kMaxDisp);
+    int mvY = clamp((int(rf) / 5) - 2 + s_coarseY, -kMaxDisp, kMaxDisp);
 
     // Fixed-point variance: mean = s_accL/2^16/256, E[l²] = s_accL2/2^16/256
     float mean = float(s_accL) / 65536.0 / 256.0;

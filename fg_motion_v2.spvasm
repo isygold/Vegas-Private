@@ -1,7 +1,7 @@
 ; SPIR-V
 ; Version: 1.0
 ; Generator: Khronos Glslang Reference Front End; 11
-; Bound: 488
+; Bound: 489
 ; Schema: 0
                OpCapability Shader
                OpCapability StorageImageExtendedFormats
@@ -177,15 +177,16 @@
   %s_coarseY = OpVariable %_ptr_Workgroup_int Workgroup
     %uint_25 = OpConstant %uint 25
      %int_n8 = OpConstant %int -8
+     %int_n4 = OpConstant %int -4
   %float_256 = OpConstant %float 256
   %float_384 = OpConstant %float 384
      %uint_3 = OpConstant %uint 3
 %_ptr_PushConstant_float = OpTypePointer PushConstant %float
     %float_2 = OpConstant %float 2
     %float_1 = OpConstant %float 1
-        %474 = OpTypeImage %float 2D 0 0 0 2 Rgba16f
-%_ptr_UniformConstant_474 = OpTypePointer UniformConstant %474
-    %uMotion = OpVariable %_ptr_UniformConstant_474 UniformConstant
+        %475 = OpTypeImage %float 2D 0 0 0 2 Rgba16f
+%_ptr_UniformConstant_475 = OpTypePointer UniformConstant %475
+    %uMotion = OpVariable %_ptr_UniformConstant_475 UniformConstant
     %uint_16 = OpConstant %uint 16
 %gl_WorkGroupSize = OpConstantComposite %v3uint %uint_16 %uint_16 %uint_1
   %float_1_5 = OpConstant %float 1.5
@@ -614,57 +615,57 @@
         %425 = OpISub %int %424 %int_2
         %426 = OpLoad %int %s_coarseX
         %427 = OpIAdd %int %425 %426
-        %428 = OpExtInst %int %1 SClamp %427 %int_n8 %int_8
-               OpStore %mvX %428
-        %430 = OpLoad %uint %rf
-        %431 = OpBitcast %int %430
-        %432 = OpSDiv %int %431 %int_5
-        %433 = OpISub %int %432 %int_2
-        %434 = OpLoad %int %s_coarseY
-        %435 = OpIAdd %int %433 %434
-        %436 = OpExtInst %int %1 SClamp %435 %int_n8 %int_8
-               OpStore %mvY %436
-        %438 = OpLoad %uint %s_accL
-        %439 = OpConvertUToF %float %438
-        %440 = OpFDiv %float %439 %float_65536
-        %442 = OpFDiv %float %440 %float_256
-               OpStore %mean %442
-        %444 = OpLoad %uint %s_accL2
-        %445 = OpConvertUToF %float %444
-        %446 = OpFDiv %float %445 %float_65536
-        %447 = OpFDiv %float %446 %float_256
-        %448 = OpLoad %float %mean
+        %429 = OpExtInst %int %1 SClamp %427 %int_n4 %int_4
+               OpStore %mvX %429
+        %431 = OpLoad %uint %rf
+        %432 = OpBitcast %int %431
+        %433 = OpSDiv %int %432 %int_5
+        %434 = OpISub %int %433 %int_2
+        %435 = OpLoad %int %s_coarseY
+        %436 = OpIAdd %int %434 %435
+        %437 = OpExtInst %int %1 SClamp %436 %int_n4 %int_4
+               OpStore %mvY %437
+        %439 = OpLoad %uint %s_accL
+        %440 = OpConvertUToF %float %439
+        %441 = OpFDiv %float %440 %float_65536
+        %443 = OpFDiv %float %441 %float_256
+               OpStore %mean %443
+        %445 = OpLoad %uint %s_accL2
+        %446 = OpConvertUToF %float %445
+        %447 = OpFDiv %float %446 %float_65536
+        %448 = OpFDiv %float %447 %float_256
         %449 = OpLoad %float %mean
-        %450 = OpFMul %float %448 %449
-        %451 = OpFSub %float %447 %450
-        %452 = OpExtInst %float %1 FMax %451 %float_0
-               OpStore %blockVar %452
-        %454 = OpLoad %float %bestSad
-        %456 = OpFDiv %float %454 %float_384
-               OpStore %sadNorm %456
-        %460 = OpAccessChain %_ptr_PushConstant_float %pc %int_0 %uint_3
-        %461 = OpLoad %float %460
-        %462 = OpFMul %float %461 %float_0_5
-        %463 = OpAccessChain %_ptr_PushConstant_float %pc %int_0 %uint_3
-        %464 = OpLoad %float %463
-        %466 = OpFMul %float %464 %float_2
-        %467 = OpLoad %float %blockVar
-        %468 = OpExtInst %float %1 SmoothStep %462 %466 %467
-               OpStore %conf %468
-        %469 = OpLoad %float %sadNorm
-        %471 = OpLoad %float %conf
-        %472 = OpFSub %float %float_1 %471
-        %473 = OpExtInst %float %1 FMax %469 %472
-               OpStore %sadNorm %473
-        %477 = OpLoad %474 %uMotion
-        %478 = OpLoad %v2int %blockId
-        %479 = OpLoad %int %mvX
-        %480 = OpConvertSToF %float %479
-        %481 = OpLoad %int %mvY
-        %482 = OpConvertSToF %float %481
-        %483 = OpLoad %float %sadNorm
-        %484 = OpCompositeConstruct %v4float %480 %482 %483 %float_0
-               OpImageWrite %477 %478 %484
+        %450 = OpLoad %float %mean
+        %451 = OpFMul %float %449 %450
+        %452 = OpFSub %float %448 %451
+        %453 = OpExtInst %float %1 FMax %452 %float_0
+               OpStore %blockVar %453
+        %455 = OpLoad %float %bestSad
+        %457 = OpFDiv %float %455 %float_384
+               OpStore %sadNorm %457
+        %461 = OpAccessChain %_ptr_PushConstant_float %pc %int_0 %uint_3
+        %462 = OpLoad %float %461
+        %463 = OpFMul %float %462 %float_0_5
+        %464 = OpAccessChain %_ptr_PushConstant_float %pc %int_0 %uint_3
+        %465 = OpLoad %float %464
+        %467 = OpFMul %float %465 %float_2
+        %468 = OpLoad %float %blockVar
+        %469 = OpExtInst %float %1 SmoothStep %463 %467 %468
+               OpStore %conf %469
+        %470 = OpLoad %float %sadNorm
+        %472 = OpLoad %float %conf
+        %473 = OpFSub %float %float_1 %472
+        %474 = OpExtInst %float %1 FMax %470 %473
+               OpStore %sadNorm %474
+        %478 = OpLoad %475 %uMotion
+        %479 = OpLoad %v2int %blockId
+        %480 = OpLoad %int %mvX
+        %481 = OpConvertSToF %float %480
+        %482 = OpLoad %int %mvY
+        %483 = OpConvertSToF %float %482
+        %484 = OpLoad %float %sadNorm
+        %485 = OpCompositeConstruct %v4float %481 %483 %484 %float_0
+               OpImageWrite %478 %479 %485
                OpBranch %412
         %412 = OpLabel
                OpReturn
