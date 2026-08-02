@@ -62,9 +62,10 @@ shared float s_prevL[1024]; // previous window luma     (32x32, ±8)
 shared float s_prevC[1024]; // previous window chroma
 shared uint  s_accL;        // Σ luma·2^16    (atomicAdd accumulator)
 shared uint  s_accL2;       // Σ luma²·2^16   (atomicAdd accumulator)
-shared uint  s_minPacked;   // (cost<<8)|idx   (atomicMin; reset per pass)
+shared uint  s_minPacked;   // (cost<<8)|idx   (atomicMin; coarse pass only)
 shared int   s_coarseX;     // coarse winner offset, broadcast to refine
 shared int   s_coarseY;
+shared float s_refSad[25];  // refine-pass SADs for the bimodal gate
 
 float lumaOf(vec4 c)   { return dot(c.rgb, vec3(0.299, 0.587, 0.114)); }
 float chromaOf(vec4 c) { return 0.5 * (c.r - c.b); }
@@ -156,14 +157,15 @@ void main() {
     uint co = s_minPacked & 0xFFu;
     s_coarseX = (int(co) % 9) * 2 - 8;
     s_coarseY = (int(co) / 9) * 2 - 8;
-    s_minPacked = kMinPacked;   // reset for refine pass
   }
   barrier();  // (3) coarse winner + reset visible to all threads
 
   // ---- Refine pass: 25 candidates (±2 around coarse), full-res 16x16,
   //      luma+chroma.  Offsets clamped to ±8 so the window index stays
   //      in bounds (edge refinement is clipped, negligible accuracy
-  //      cost at the search boundary). --------------------------------
+  //      cost at the search boundary). Each tid stores its SAD in
+  //      shared memory — the bimodal gate needs ALL 25, not just the
+  //      winner, so we drop the refine atomicMin. -----------------------
   if (tid < 25u) {
     int rdx = clamp((int(tid) % 5) - 2 + s_coarseX, -kSearch, kSearch);
     int rdy = clamp((int(tid) / 5) - 2 + s_coarseY, -kSearch, kSearch);
@@ -176,17 +178,50 @@ void main() {
              + kChromaW * abs(s_curC[ci] - s_prevC[pi]);
       }
     }
-    atomicMin(s_minPacked, packCost(sad, tid));
+    s_refSad[tid] = sad;
   }
-  barrier();  // (4) refine atomicMin complete
+  barrier();  // (4) refine SADs visible
 
-  // ---- Write: vector + normalized SAD + variance gate ---------------
+// ---- Write: vector + normalized SAD + variance gate -----------------
   if (tid == 0u) {
-    uint rf = s_minPacked & 0xFFu;
-    float bestSad = float(s_minPacked >> 8u) / 16.0;
+    // Bimodal gate: scan the 25 stored SADs.
+    //  bestSad  = the winner (lowest SAD).
+    //  spread   = maxSad - bestSad  (landscape amplitude).
+    //  distinct = cheapest candidate >1 GRID STEP from the winner
+    //             (a second motion valley, e.g. sprite vs parallax).
+    //  dominance = (distinct - bestSad) / max(spread, 1e-4).
+    //    Unimodal block: distinct >> bestSad, spread large -> dominance ~1.
+    //    Bimodal block:  distinct ~ bestSad  -> dominance ~0 -> distrust.
+    //    Flat block:     spread ~ 0 -> clamped -> dominance ~0 -> distrust.
+    //  Grid-step (not pixel-offset) distance is used so the metric is
+    //  immune to the edge clamps in refineCandidate. The median-
+    //  normalization idea was rejected after analysis: a true bimodal
+    //  block has ~half the non-winner SADs near the second valley, so
+    //  otherMedian ≈ distinct → numerator ≈ denominator → dominance ≥1 —
+    //  the signal cancels exactly when needed.
+    int  bestIdx = 0;
+    float bestSad = s_refSad[0];
+    float maxSad  = s_refSad[0];
+    for (int k = 1; k < 25; k++) {
+      if (s_refSad[k] < bestSad) { bestSad = s_refSad[k]; bestIdx = k; }
+      if (s_refSad[k] > maxSad)  maxSad = s_refSad[k];
+    }
+    int bx = bestIdx % 5;   // grid position of the winner (0..4)
+    int by = bestIdx / 5;
+    float distinct = 3.402823466e+38;
+    for (int k = 0; k < 25; k++) {
+      int gx = k % 5;
+      int gy = k / 5;
+      int dist = abs(gx - bx) + abs(gy - by);
+      if (dist > 1 && s_refSad[k] < distinct) distinct = s_refSad[k];
+    }
+    if (distinct >= 3.402823466e+38) distinct = bestSad;  // no far candidate
+    float spread = max(maxSad - bestSad, 1e-4);
+    float dominance = clamp((distinct - bestSad) / spread, 0.0, 1.0);
+
     // Absolute vector = temporal center + best relative offset.
-    int rawX = (int(rf) % 5) - 2 + s_coarseX + center.x;
-    int rawY = (int(rf) / 5) - 2 + s_coarseY + center.y;
+    int rawX = (bestIdx % 5) - 2 + s_coarseX + center.x;
+    int rawY = (bestIdx / 5) - 2 + s_coarseY + center.y;
 
     // Block variance from fixed-point accumulators
     float mean = float(s_accL) / 65536.0 / 256.0;
@@ -203,18 +238,17 @@ void main() {
     // (0.35-0.65) kills boundary flicker that caused HUD popping at the
     // 0.45-0.55 gate.
     float trust = smoothstep(0.35, 0.65, conf);
+    // Bimodal dominance gate: distrust blocks whose SAD landscape has a
+    // second, nearly-equal valley in a DIFFERENT direction (a block
+    // straddling a sprite silhouette sees sprite AND parallax motion —
+    // any single vector is a compromise that shows up as halo/fuzz).
+    // Multiplicative on `trust` so the falloff is continuous (ny jumps):
+    // at dominance >= 0.55 the block is warp-trusted; below 0.10 it is
+    // distrusted (current frame). 0.10/0.55 are the device-tuning knobs.
+    trust *= smoothstep(0.10, 0.55, dominance);
+
     int mvX = int(float(rawX) * trust);
     int mvY = int(float(rawY) * trust);
-
-    // Even-quantize the output vector: the warp displaces by mv*0.5, so
-    // odd vectors land on half-texel positions. Integer search on
-    // fractional motion (1-3 px/frame camera follow, e.g. HK walk) flips
-    // between adjacent integers frame-to-frame (SAD nearly ties) → the
-    // warp oscillates between two sampled positions → whole-frame wobble.
-    // Quantizing to even makes mv/2 an integer texel offset → stable
-    // samples. % on negatives keeps the sign (-3 → -2).
-    mvX -= mvX % 2;
-    mvY -= mvY % 2;
 
     // Apply variance gate to SAD norm for warp pass
     sadNorm = max(sadNorm, 1.0 - conf);
