@@ -51,6 +51,7 @@ layout(push_constant) uniform uPC {
 const float kChromaW = 0.5;     // chroma weight in refine cost
 const float kSADMaxPerPx = 1.5; // max per-pixel cost: |dL|<=1 + 0.5*|dC|<=0.5
 const int   kSearch = 8;        // half window ±8
+const int   kMaxDisp = 4;       // measured tracking envelope (camera-clean at f90f488)
 const uint  kMinPacked = 0xFFFFFFFFu;
 
 shared float s_curL[256];   // current block luma       (16x16)
@@ -170,13 +171,13 @@ void main() {
     // Confidence: variance gate (textureless → low) × SAD quality gate (poor match → low)
     float conf = smoothstep(pc.info.w * 0.5, pc.info.w * 2.0, blockVar);
     conf *= 1.0 - smoothstep(0.3, 0.6, sadNorm);  // distrust high-SAD blocks (HUD/overlays)
-    // Trust gate: trusted blocks keep FULL integer displacement (up to the
-    // ±8 search range); untrusted blocks get zero (warp presents the current
-    // frame via sadNorm). No magnitude cap — fractional displacement was the
-    // camera-wobble source in confidence-scaled mode.
-    float trust = smoothstep(0.45, 0.55, conf);
-    int mvX = int(clamp(float(rawX) * trust, float(-kSearch), float(kSearch)));
-    int mvY = int(clamp(float(rawY) * trust, float(-kSearch), float(kSearch)));
+    // Trust gate: trusted blocks keep full integer displacement up to the
+    // measured ±4 tracking envelope; untrusted blocks get zero (current
+    // frame via sadNorm). Wide transition (0.35-0.65) kills boundary
+    // flicker that caused HUD popping at the 0.45-0.55 gate.
+    float trust = smoothstep(0.35, 0.65, conf);
+    int mvX = int(clamp(float(rawX) * trust, float(-kMaxDisp), float(kMaxDisp)));
+    int mvY = int(clamp(float(rawY) * trust, float(-kMaxDisp), float(kMaxDisp)));
 
     // Apply variance gate to SAD norm for warp pass
     sadNorm = max(sadNorm, 1.0 - conf);

@@ -188,10 +188,10 @@
     %float_1 = OpConstant %float 1
 %float_0_300000012 = OpConstant %float 0.300000012
 %float_0_600000024 = OpConstant %float 0.600000024
-%float_0_449999988 = OpConstant %float 0.449999988
-%float_0_550000012 = OpConstant %float 0.550000012
-   %float_n8 = OpConstant %float -8
-    %float_8 = OpConstant %float 8
+%float_0_349999994 = OpConstant %float 0.349999994
+%float_0_649999976 = OpConstant %float 0.649999976
+   %float_n4 = OpConstant %float -4
+    %float_4 = OpConstant %float 4
         %500 = OpTypeImage %float 2D 0 0 0 2 Rgba16f
 %_ptr_UniformConstant_500 = OpTypePointer UniformConstant %500
     %uMotion = OpVariable %_ptr_UniformConstant_500 UniformConstant
@@ -668,20 +668,20 @@
         %474 = OpFMul %float %473 %472
                OpStore %conf %474
         %478 = OpLoad %float %conf
-        %479 = OpExtInst %float %1 SmoothStep %float_0_449999988 %float_0_550000012 %478
+        %479 = OpExtInst %float %1 SmoothStep %float_0_349999994 %float_0_649999976 %478
                OpStore %trust %479
         %481 = OpLoad %int %rawX
         %482 = OpConvertSToF %float %481
         %483 = OpLoad %float %trust
         %484 = OpFMul %float %482 %483
-        %487 = OpExtInst %float %1 FClamp %484 %float_n8 %float_8
+        %487 = OpExtInst %float %1 FClamp %484 %float_n4 %float_4
         %488 = OpConvertFToS %int %487
                OpStore %mvX %488
         %490 = OpLoad %int %rawY
         %491 = OpConvertSToF %float %490
         %492 = OpLoad %float %trust
         %493 = OpFMul %float %491 %492
-        %494 = OpExtInst %float %1 FClamp %493 %float_n8 %float_8
+        %494 = OpExtInst %float %1 FClamp %493 %float_n4 %float_4
         %495 = OpConvertFToS %int %494
                OpStore %mvY %495
         %496 = OpLoad %float %sadNorm
