@@ -206,6 +206,16 @@ void main() {
     int mvX = int(float(rawX) * trust);
     int mvY = int(float(rawY) * trust);
 
+    // Even-quantize the output vector: the warp displaces by mv*0.5, so
+    // odd vectors land on half-texel positions. Integer search on
+    // fractional motion (1-3 px/frame camera follow, e.g. HK walk) flips
+    // between adjacent integers frame-to-frame (SAD nearly ties) → the
+    // warp oscillates between two sampled positions → whole-frame wobble.
+    // Quantizing to even makes mv/2 an integer texel offset → stable
+    // samples. % on negatives keeps the sign (-3 → -2).
+    mvX -= mvX % 2;
+    mvY -= mvY % 2;
+
     // Apply variance gate to SAD norm for warp pass
     sadNorm = max(sadNorm, 1.0 - conf);
     imageStore(uMotion, blockId, vec4(float(mvX), float(mvY), sadNorm, 0.0));
