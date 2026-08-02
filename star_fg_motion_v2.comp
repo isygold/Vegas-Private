@@ -42,16 +42,18 @@ layout(local_size_x = 16, local_size_y = 16) in;
 layout(set = 0, binding = 0) uniform texture2D uCurrent;
 layout(set = 0, binding = 1) uniform texture2D uPrevious;
 layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D uMotion;
+layout(set = 0, binding = 4) uniform texture2D uMotionPrev;
 
 layout(push_constant) uniform uPC {
-  vec4 info;   // info.xy = block grid size (int), info.z unused,
-               // info.w = variance threshold (0.0005 default)
+  vec4 info;    // info.xy = block grid size (int), info.z = temporal
+                 // center valid (0/1), info.w = variance threshold
+  vec4 hudRect; // HUD graph rect in block coords (x0,y0,x1,y1);
+                 // x0 > x1 = mask disabled
 } pc;
 
 const float kChromaW = 0.5;     // chroma weight in refine cost
 const float kSADMaxPerPx = 1.5; // max per-pixel cost: |dL|<=1 + 0.5*|dC|<=0.5
-const int   kSearch = 8;        // half window ±8
-const int   kMaxDisp = 4;       // measured tracking envelope (camera-clean at f90f488)
+const int   kSearch = 8;        // half window ±8 around temporal center
 const uint  kMinPacked = 0xFFFFFFFFu;
 
 shared float s_curL[256];   // current block luma       (16x16)
@@ -83,14 +85,36 @@ void main() {
   ivec2 srcSize = textureSize(uCurrent, 0);
   ivec2 clampMax = srcSize - 1;
 
+  // ---- HUD graph mask: exempt the dynamic frametimes graph ----------
+  // Masked blocks present the exact current frame ({0,0,1,0} → warp
+  // samples at zero displacement with full distrust) and skip the whole
+  // search — the graph is a 1px line scrolling at ~1px/frame, which no
+  // interpolation can render cleanly (fractional sample offsets smear
+  // it), so it is excluded deterministically.
+  ivec4 hud = ivec4(round(pc.hudRect));
+  if (blockId.x >= hud.x && blockId.x <= hud.z &&
+      blockId.y >= hud.y && blockId.y <= hud.w) {
+    if (tid == 0u)
+      imageStore(uMotion, blockId, vec4(0.0, 0.0, 1.0, 0.0));
+    return;
+  }
+
+  // ---- Temporal search center: previous frame's filtered vector -----
+  // Camera pans keep their velocity across frames, so centering the ±8
+  // search window on last frame's vector tracks pans up to ~16 px/frame
+  // with the same window cost. Invalid (first frame / resize) → (0,0).
+  ivec2 center = ivec2(0);
+  if (pc.info.z > 0.5f)
+    center = ivec2(round(texelFetch(uMotionPrev, blockId, 0).xy));
+
   // ---- Stage current block (1 fetch/thread) -------------------------
   vec4 curr = texelFetch(uCurrent, clamp(pixelPos, ivec2(0), clampMax), 0);
   float l = lumaOf(curr);
   s_curL[tid] = l;
   s_curC[tid] = chromaOf(curr);
 
-  // ---- Stage previous window ±8 (4 fetches/thread) ------------------
-  ivec2 winBase = blockId * 16 - ivec2(kSearch);
+  // ---- Stage previous window ±8 around the temporal center (4 fetches/thread)
+  ivec2 winBase = blockId * 16 + center - ivec2(kSearch);
   for (int i = 0; i < 4; i++) {
     int idx = int(tid) * 4 + i;
     int wx = idx & 31;
@@ -160,8 +184,9 @@ void main() {
   if (tid == 0u) {
     uint rf = s_minPacked & 0xFFu;
     float bestSad = float(s_minPacked >> 8u) / 16.0;
-    int rawX = (int(rf) % 5) - 2 + s_coarseX;
-    int rawY = (int(rf) / 5) - 2 + s_coarseY;
+    // Absolute vector = temporal center + best relative offset.
+    int rawX = (int(rf) % 5) - 2 + s_coarseX + center.x;
+    int rawY = (int(rf) / 5) - 2 + s_coarseY + center.y;
 
     // Block variance from fixed-point accumulators
     float mean = float(s_accL) / 65536.0 / 256.0;
@@ -171,13 +196,15 @@ void main() {
     // Confidence: variance gate (textureless → low) × SAD quality gate (poor match → low)
     float conf = smoothstep(pc.info.w * 0.5, pc.info.w * 2.0, blockVar);
     conf *= 1.0 - smoothstep(0.3, 0.6, sadNorm);  // distrust high-SAD blocks (HUD/overlays)
-    // Trust gate: trusted blocks keep full integer displacement up to the
-    // measured ±4 tracking envelope; untrusted blocks get zero (current
-    // frame via sadNorm). Wide transition (0.35-0.65) kills boundary
-    // flicker that caused HUD popping at the 0.45-0.55 gate.
+    // Trust gate: trusted blocks keep the full integer search vector
+    // (temporal center + offset, no hard cap — the ±4/±8 caps clipped
+    // real gameplay pans of 5-20 px/frame and caused ghosting); untrusted
+    // blocks get zero (current frame via sadNorm). Wide transition
+    // (0.35-0.65) kills boundary flicker that caused HUD popping at the
+    // 0.45-0.55 gate.
     float trust = smoothstep(0.35, 0.65, conf);
-    int mvX = int(clamp(float(rawX) * trust, float(-kMaxDisp), float(kMaxDisp)));
-    int mvY = int(clamp(float(rawY) * trust, float(-kMaxDisp), float(kMaxDisp)));
+    int mvX = int(float(rawX) * trust);
+    int mvY = int(float(rawY) * trust);
 
     // Apply variance gate to SAD norm for warp pass
     sadNorm = max(sadNorm, 1.0 - conf);

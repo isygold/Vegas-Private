@@ -246,12 +246,17 @@ namespace dxvk {
     /// \param [in] prevImage Previous frame (VK_IMAGE_LAYOUT_GENERAL)
     /// \param [in] extent    Image dimensions
     /// \param [in] format    Image format (must be R8G8B8A8_UNORM)
+    /// \param [in] hudRectValid  True when hudRect holds a valid HUD graph
+    ///                           rect in WSI pixels (exempted from FG)
+    /// \param [in] hudRect   [x0, y0, x1, y1] of the HUD frametimes graph
     /// \returns true if dispatch completed successfully
     static bool framegenDispatch(
             VkImage              curImage,
             VkImage              prevImage,
             VkExtent3D           extent,
-            VkFormat             format);
+            VkFormat             format,
+            bool                 hudRectValid = false,
+      const float*               hudRect      = nullptr);
 
     // ---- FSR (user-facing only via Tristate config) ----
 
@@ -380,6 +385,9 @@ namespace dxvk {
     static uint64_t            s_fgMotionMemory;      ///< VkDeviceMemory
     static uint64_t            s_fgMotionFiltered;    ///< VkImage (filtered motion, R16G16_SFLOAT)
     static uint64_t            s_fgMotionFMemory;     ///< VkDeviceMemory
+    static uint64_t            s_fgMotionPrevImage;   ///< VkImage (prev frame's filtered motion, search center)
+    static uint64_t            s_fgMotionPrevMemory;  ///< VkDeviceMemory
+    static bool                s_fgMotionPrevValid;   ///< motionPrev layout is GENERAL (not UNDEFINED)
     static uint64_t            s_fgOutputImage;       ///< VkImage (framegen output)
     static uint64_t            s_fgOutputMemory;      ///< VkDeviceMemory
     static uint32_t            s_fgMotionW;           ///< motion buffer width (blocks)

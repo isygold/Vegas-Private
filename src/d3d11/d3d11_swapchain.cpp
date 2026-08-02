@@ -2,6 +2,8 @@
 #include "d3d11_device.h"
 #include "d3d11_swapchain.h"
 
+#include <array>
+
 #include "../util/util_win32_compat.h"
 
 namespace dxvk {
@@ -453,7 +455,18 @@ namespace dxvk {
       if (m_hud != nullptr)
         m_hud->render(m_context, info.format, info.imageExtent);
       
-      SubmitPresent(immediateContext, sync, i, imageIndex);
+      // Vegas: capture the HUD frametimes-graph rect (in WSI pixels) so
+      // framegen can exempt it from interpolation. Set by
+      // HudRenderer::drawGraph on the same thread, this frame.
+      const bool hudRectValid = hud::HudRenderer::graphRectValid;
+      const float hudRect[4] = {
+        hud::HudRenderer::graphRect[0],
+        hud::HudRenderer::graphRect[1],
+        hud::HudRenderer::graphRect[2],
+        hud::HudRenderer::graphRect[3],
+      };
+      
+      SubmitPresent(immediateContext, sync, i, imageIndex, hudRectValid, hudRect);
     }
 
     return S_OK;
@@ -464,7 +477,9 @@ namespace dxvk {
           D3D11ImmediateContext*  pContext,
     const PresenterSync&          Sync,
           uint32_t                Repeat,
-          uint32_t                ImageIndex) {
+          uint32_t                ImageIndex,
+          bool                    HudRectValid,
+    const float                   HudRect[4]) {
     auto lock = pContext->LockContext();
 
     // Bump frame ID as necessary
@@ -483,6 +498,9 @@ namespace dxvk {
       m_presenter->info().imageExtent.width,
       m_presenter->info().imageExtent.height, 1 };
     const VkFormat  cFgFormat  = m_presenter->info().format.format;
+    const bool      cFgHudRectValid = HudRectValid;
+    const std::array<float, 4> cFgHudRect = {
+      HudRect[0], HudRect[1], HudRect[2], HudRect[3] };
 
     pContext->EmitCs([this,
       cRepeat      = Repeat,
@@ -494,7 +512,9 @@ namespace dxvk {
       cFgEnabled,
       cFgImage,
       cFgExtent,
-      cFgFormat
+      cFgFormat,
+      cFgHudRectValid,
+      cFgHudRect
     ] (DxvkContext* ctx) {
       cCommandList->setWsiSemaphores(cSync);
       m_device->submitCommandList(cCommandList, nullptr);
@@ -508,7 +528,8 @@ namespace dxvk {
       if (Vegas::isEnabled() && cFgEnabled && cFgImage != VK_NULL_HANDLE) {
         Vegas::framegenDispatch(
           cFgImage, VK_NULL_HANDLE,
-          cFgExtent, cFgFormat);
+          cFgExtent, cFgFormat,
+          cFgHudRectValid, cFgHudRect.data());
       }
 
       if (cHud != nullptr && !cRepeat)

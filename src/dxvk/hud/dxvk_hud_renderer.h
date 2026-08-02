@@ -129,6 +129,12 @@ namespace dxvk::hud {
     float scale() const {
       return m_scale;
     }
+
+    /// Last graph rect drawn this frame, in surface (WSI) pixels.
+    /// [x0, y0, x1, y1]; valid only if graphRectValid. Framegen uses
+    /// this to exempt the dynamic frametimes graph from interpolation.
+    static float graphRect[4];
+    static bool  graphRectValid;
     
   private:
     

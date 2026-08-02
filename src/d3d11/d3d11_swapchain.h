@@ -154,7 +154,9 @@ namespace dxvk {
             D3D11ImmediateContext* pContext,
       const PresenterSync&         Sync,
             uint32_t               Repeat,
-            uint32_t               ImageIndex);
+            uint32_t               ImageIndex,
+            bool                   HudRectValid,
+      const float                  HudRect[4]);
 
     void SynchronizePresent();
 

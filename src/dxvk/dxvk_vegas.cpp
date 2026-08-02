@@ -96,7 +96,7 @@ namespace dxvk {
     VkFence        fence     = VK_NULL_HANDLE;
     VkCommandPool  pool      = VK_NULL_HANDLE;
     VkCommandBuffer cmdBuf   = VK_NULL_HANDLE;
-    VkImageView    views[5]  = {};
+    VkImageView    views[6]  = {};
     uint32_t       viewCount = 0;
   };
   static FgPendingResources s_fgPending[4];
@@ -120,6 +120,9 @@ namespace dxvk {
   uint64_t Vegas::s_fgMotionMemory    = 0;
   uint64_t Vegas::s_fgMotionFiltered  = 0;
   uint64_t Vegas::s_fgMotionFMemory   = 0;
+  uint64_t Vegas::s_fgMotionPrevImage = 0;
+  uint64_t Vegas::s_fgMotionPrevMemory = 0;
+  bool     Vegas::s_fgMotionPrevValid = false;
   uint64_t Vegas::s_fgOutputImage     = 0;
   uint64_t Vegas::s_fgOutputMemory    = 0;
   uint32_t Vegas::s_fgMotionW         = 0;
@@ -2289,6 +2292,7 @@ namespace dxvk {
     FG_BIND_PREVIOUS    = 1,  // sampled
     FG_BIND_MOTION      = 2,  // storage (raw / filtered input)
     FG_BIND_OUTPUT      = 3,  // storage (median output / warp output)
+    FG_BIND_MOTION_PREV = 4,  // sampled (prev frame's filtered motion)
 
     FG_DESC_POOL_SIZE  = 3,   // one descriptor set per pass
     FG_TILE_SIZE       = 16,  // motion search tile
@@ -2325,8 +2329,8 @@ namespace dxvk {
       }
     }
 
-    // ---- Descriptor set layout (4 bindings, shared) ----
-    VkDescriptorSetLayoutBinding bindings[4] = {};
+    // ---- Descriptor set layout (5 bindings, shared) ----
+    VkDescriptorSetLayoutBinding bindings[5] = {};
     // Binding 0: uCurrent (sampled)
     bindings[0].binding            = FG_BIND_CURRENT;
     bindings[0].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
@@ -2347,9 +2351,14 @@ namespace dxvk {
     bindings[3].descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[3].descriptorCount    = 1;
     bindings[3].stageFlags         = VK_SHADER_STAGE_COMPUTE_BIT;
+    // Binding 4: previous frame's filtered motion (sampled, search center)
+    bindings[4].binding            = FG_BIND_MOTION_PREV;
+    bindings[4].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    bindings[4].descriptorCount    = 1;
+    bindings[4].stageFlags         = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo dslCI = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    dslCI.bindingCount = 4;
+    dslCI.bindingCount = 5;
     dslCI.pBindings    = bindings;
 
     VkDescriptorSetLayout dsLayout = VK_NULL_HANDLE;
@@ -2464,6 +2473,7 @@ namespace dxvk {
 
     // If dimensions match and images exist, nothing to do
     if (Vegas::s_fgPrevImage && Vegas::s_fgMotionImage && Vegas::s_fgMotionFiltered && Vegas::s_fgOutputImage
+        && Vegas::s_fgMotionPrevImage
         && Vegas::s_fgPrevW == w && Vegas::s_fgPrevH == h && Vegas::s_fgMotionW == mw && Vegas::s_fgMotionH == mh
         && Vegas::s_fgFormat == format)
       return true;
@@ -2483,9 +2493,11 @@ namespace dxvk {
     destroyImage(Vegas::s_fgPrevImage,       Vegas::s_fgPrevMemory);
     destroyImage(Vegas::s_fgMotionImage,     Vegas::s_fgMotionMemory);
     destroyImage(Vegas::s_fgMotionFiltered,  Vegas::s_fgMotionFMemory);
+    destroyImage(Vegas::s_fgMotionPrevImage, Vegas::s_fgMotionPrevMemory);
     destroyImage(Vegas::s_fgOutputImage,     Vegas::s_fgOutputMemory);
 
     Vegas::s_fgPrevValid = false;
+    Vegas::s_fgMotionPrevValid = false;
     Vegas::s_fgPrevW = 0;
     Vegas::s_fgPrevH = 0;
     Vegas::s_fgMotionW = 0;
@@ -2585,6 +2597,14 @@ namespace dxvk {
     if (!createImage(mw, mh, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         Vegas::s_fgMotionFiltered, Vegas::s_fgMotionFMemory)) {
+      return false;
+    }
+
+    // s_fgMotionPrevImage: previous frame's filtered motion — temporal
+    // search center for the next frame's motion pass (R16G16B16A16_SFLOAT)
+    if (!createImage(mw, mh, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        Vegas::s_fgMotionPrevImage, Vegas::s_fgMotionPrevMemory)) {
       return false;
     }
 
@@ -2692,7 +2712,19 @@ namespace dxvk {
           VkImage              curImage,
           VkImage              prevImage,
           VkExtent3D           extent,
-          VkFormat             format) {
+          VkFormat             format,
+          bool                 hudRectValid,
+    const float*               hudRect) {
+    // HUD graph rect → motion block coords (one block per 16×16 tile).
+    // Sentinel: x0 > x1 disables the mask.
+    int hudX0 = 1, hudY0 = 1, hudX1 = 0, hudY1 = 0;
+    if (hudRectValid && hudRect != nullptr) {
+      const float invTile = 1.0f / float(FG_TILE_SIZE);
+      hudX0 = std::max(int(hudRect[0] * invTile) - 1, 0);
+      hudY0 = std::max(int(hudRect[1] * invTile) - 1, 0);
+      hudX1 = int(hudRect[2] * invTile) + 1;
+      hudY1 = int(hudRect[3] * invTile) + 1;
+    }
     // ================================================================
     // Guard: only UNORM supported
     // ================================================================
@@ -2935,8 +2967,10 @@ namespace dxvk {
     // Cleanup helper — call with stage number indicating what was allocated.
     // Stage: 0=none, 1=cmdPool, 2=cmdBuf, 3=fence,
     //        4=srcViewCur, 5=srcViewPrev, 6=motionView,
-    //        7=motionFilteredView, 8=outputView
+    //        7=motionFilteredView, 8=outputView, 9=motionPrevView
     auto fgCleanup = [&](int stage) {
+      if (stage >= 9)
+        s_vk.vkDestroyImageView(device, motionPrevView, nullptr);
       if (stage >= 8)
         s_vk.vkDestroyImageView(device, outputView, nullptr);
       if (stage >= 7)
@@ -3009,6 +3043,16 @@ namespace dxvk {
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreateImageView(output) failed (", vr, ")"));
       fgCleanup(7); return false;
+    }
+
+    // Motion-prev view (R16G16B16A16_SFLOAT — temporal search center)
+    VkImageView motionPrevView = VK_NULL_HANDLE;
+    viewCI.image  = reinterpret_cast<VkImage>(Vegas::s_fgMotionPrevImage);
+    viewCI.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &motionPrevView);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkCreateImageView(motionPrev) failed (", vr, ")"));
+      fgCleanup(8); return false;
     }
 
     // ================================================================
@@ -3139,6 +3183,11 @@ namespace dxvk {
     mfiltImgInfo.imageView   = motionFilteredView;
     mfiltImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
+    VkDescriptorImageInfo motionPrevImgInfo = {};
+    motionPrevImgInfo.sampler     = VK_NULL_HANDLE;
+    motionPrevImgInfo.imageView   = motionPrevView;
+    motionPrevImgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
     VkDescriptorImageInfo outputImgInfo = {};
     outputImgInfo.sampler     = VK_NULL_HANDLE;
     outputImgInfo.imageView   = outputView;
@@ -3168,7 +3217,14 @@ namespace dxvk {
     writes[2].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[2].pImageInfo      = &motionImgInfo;
 
-    s_vk.vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
+    writes[3].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[3].dstSet          = descSets[0];
+    writes[3].dstBinding      = FG_BIND_MOTION_PREV;
+    writes[3].descriptorCount = 1;
+    writes[3].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[3].pImageInfo      = &motionPrevImgInfo;
+
+    s_vk.vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
 
     // Pass 2 (MEDIAN): bind 2=motion, 3=motionFiltered
     VkWriteDescriptorSet medianWrites[2] = {};
@@ -3237,7 +3293,12 @@ namespace dxvk {
       // → no meaningful motion match → distrust → warp presents current.
       // NOTE: must be > 0 — smoothstep(thr/2, thr*2, x) is undefined when
       // edge0 == edge1 (pc.w == 0 → driver-dependent garbage confidence).
-      float pcData[4] = { float(motionGX), float(motionGY), 0.0f, 0.0005f };
+      // pc.e = HUD graph rect in block coords (x0 > x1 = mask disabled);
+      // masked blocks write {0,0,1,0} and skip the search entirely.
+      float pcData[8] = {
+        float(motionGX), float(motionGY),
+        Vegas::s_fgMotionPrevValid ? 1.0f : 0.0f, 0.0005f,
+        float(hudX0), float(hudY0), float(hudX1), float(hudY1) };
       s_vk.vkCmdPushConstants(cmdBuf, pipelineLayout,
           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcData), pcData);
     }
@@ -3458,6 +3519,78 @@ namespace dxvk {
         1, &blitFG, VK_FILTER_NEAREST);
 
     // ----------------------------------------------------------------
+    // Motion-prev refresh: copy motionFiltered → s_fgMotionPrevImage so
+    // the NEXT frame's motion pass can center its search on the previous
+    // frame's median-filtered vector (temporal prediction for pans).
+    // ----------------------------------------------------------------
+    VkImageMemoryBarrier prevMotionPrep[2] = {};
+    prevMotionPrep[0].sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    prevMotionPrep[0].srcAccessMask       = VK_ACCESS_SHADER_READ_BIT;  // warp read
+    prevMotionPrep[0].dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+    prevMotionPrep[0].oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    prevMotionPrep[0].newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    prevMotionPrep[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    prevMotionPrep[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    prevMotionPrep[0].image               = motionFiltered;
+    prevMotionPrep[0].subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    prevMotionPrep[1].sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    prevMotionPrep[1].srcAccessMask       = 0;
+    prevMotionPrep[1].dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+    prevMotionPrep[1].oldLayout           = Vegas::s_fgMotionPrevValid
+      ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;
+    prevMotionPrep[1].newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    prevMotionPrep[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    prevMotionPrep[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    prevMotionPrep[1].image               = reinterpret_cast<VkImage>(Vegas::s_fgMotionPrevImage);
+    prevMotionPrep[1].subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    s_vk.vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 2, prevMotionPrep);
+
+    VkImageCopy prevMotionCopy = {};
+    prevMotionCopy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    prevMotionCopy.srcSubresource.layerCount = 1;
+    prevMotionCopy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    prevMotionCopy.dstSubresource.layerCount = 1;
+    prevMotionCopy.extent = { Vegas::s_fgMotionW, Vegas::s_fgMotionH, 1 };
+
+    s_vk.vkCmdCopyImage(cmdBuf,
+        motionFiltered, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        reinterpret_cast<VkImage>(Vegas::s_fgMotionPrevImage), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1, &prevMotionCopy);
+
+    VkImageMemoryBarrier prevMotionDone[2] = {};
+    prevMotionDone[0].sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    prevMotionDone[0].srcAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+    prevMotionDone[0].dstAccessMask       = 0;
+    prevMotionDone[0].oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    prevMotionDone[0].newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    prevMotionDone[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    prevMotionDone[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    prevMotionDone[0].image               = motionFiltered;
+    prevMotionDone[0].subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    prevMotionDone[1].sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    prevMotionDone[1].srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+    prevMotionDone[1].dstAccessMask       = 0;
+    prevMotionDone[1].oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    prevMotionDone[1].newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+    prevMotionDone[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    prevMotionDone[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    prevMotionDone[1].image               = reinterpret_cast<VkImage>(Vegas::s_fgMotionPrevImage);
+    prevMotionDone[1].subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    s_vk.vkCmdPipelineBarrier(cmdBuf,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 2, prevMotionDone);
+
+    Vegas::s_fgMotionPrevValid = true;
+
+    // ----------------------------------------------------------------
     // Final barrier: restore curImage to PRESENT_SRC_KHR
     // ----------------------------------------------------------------
     VkImageMemoryBarrier curFinal = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
@@ -3506,10 +3639,11 @@ namespace dxvk {
       // in the pending list; a later dispatch drains it once the fence
       // signals.  This is the fix for the repeated-timeout hard freeze.
       Logger::warn(str::format("Vegas FG: vkWaitForFences timeout (", vr, ")"));
-      VkImageView timedViews[5] = {
-        srcViewCur, srcViewPrev, motionView, motionFilteredView, outputView
+      VkImageView timedViews[6] = {
+        srcViewCur, srcViewPrev, motionView, motionFilteredView, outputView,
+        motionPrevView
       };
-      fgQueuePending(device, fence, cmdPool, cmdBuf, timedViews, 5);
+      fgQueuePending(device, fence, cmdPool, cmdBuf, timedViews, 6);
       if (fgWaitMs > 25.0f)
         s_fgSlowCount = std::min(s_fgSlowCount + 1u, 5u);
       return false;

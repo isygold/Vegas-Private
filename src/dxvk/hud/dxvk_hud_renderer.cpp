@@ -8,6 +8,9 @@
 
 namespace dxvk::hud {
   
+  float HudRenderer::graphRect[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+  bool  HudRenderer::graphRectValid = false;
+  
   HudRenderer::HudRenderer(const Rc<DxvkDevice>& device)
   : m_mode          (Mode::RenderNone),
     m_scale         (1.0f),
@@ -105,6 +108,13 @@ namespace dxvk::hud {
     pushData.scale.x = m_scale / std::max(float(m_surfaceSize.width),  1.0f);
     pushData.scale.y = m_scale / std::max(float(m_surfaceSize.height), 1.0f);
     pushData.opacity = m_opacity;
+
+    // Record the graph rect in surface pixels for framegen masking.
+    graphRect[0] = pos.x * m_scale;
+    graphRect[1] = pos.y * m_scale;
+    graphRect[2] = (pos.x + size.x) * m_scale;
+    graphRect[3] = (pos.y + size.y) * m_scale;
+    graphRectValid = true;
 
     m_context->pushConstants(0, sizeof(pushData), &pushData);
     m_context->draw(4, 1, 0, 0);
