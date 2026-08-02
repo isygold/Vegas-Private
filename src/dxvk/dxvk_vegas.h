@@ -377,13 +377,13 @@ namespace dxvk {
     // Framegen bimodal-gate diagnostic stats (set 1 / binding 0)
     // Separate pipeline-resource path from the shared 5-binding image
     // layout, so the OOM-era descriptor accounting stays frozen.
-    static uint64_t            s_fgStatsBuffer;       ///< VkBuffer  (16B, 4 x u32)
+    static uint64_t            s_fgStatsBuffer;       ///< VkBuffer  (20B, 5 x u32: count,sumQ,zero,full,epoch)
     static uint64_t            s_fgStatsMemory;       ///< VkDeviceMemory (host-visible)
     static uint64_t            s_fgStatsMapping;      ///< void*     (persistent map)
     static uint64_t            s_fgStatsLayout;       ///< VkDescriptorSetLayout (set 1)
     static uint64_t            s_fgStatsPool;         ///< VkDescriptorPool
     static uint64_t            s_fgStatsSet;          ///< VkDescriptorSet (bound in motion pass)
-    static uint32_t            s_fgStatsFrames;       ///< #dispatches accumulated since (diagnostic)
+    static uint32_t            s_fgStatsFrames;       ///< #dispatches w/ readback attempted
 
     // Framegen intermediate images
     static bool                s_fgPrevValid;         ///< true after first frame saved to prev

@@ -118,6 +118,15 @@ namespace dxvk {
   // the watchdog reliably.
   static uint32_t           s_fgSlowCount    = 0;
 
+  // Monotonic epoch for the bimodal-gate stats buffer word[4].  The host
+  // increments per dispatch and writes it into the mapped buffer AFTER the
+  // vkCmdFillBuffer zero (which only covers words 0..3).  The readback
+  // then rejects stats where the epoch mismatches — i.e. any row produced
+  // by a pinned/older parked CB racing the stat accumulation window
+  // (arithmetically-impossible histogram rows like domMean=0.97 + 72%
+  // zeroed were observed before this guard).
+  static uint32_t           s_fgStatsEpoch   = 0;
+
   // Framegen intermediate images
   bool     Vegas::s_fgPrevValid       = false;
   uint64_t Vegas::s_fgPrevImage       = 0;
@@ -2490,13 +2499,17 @@ namespace dxvk {
     }
 
     // ---- Stats buffer (set 1 / binding 0) ----
-    // 16-byte host-visible buffer: { u32 count, u32 sumQ16, u32 zero, u32 full }.
+    // 20-byte host-visible buffer: { u32 count, u32 sumQ16, u32 zero, u32
+    // full, u32 epoch }.  Shader atomically writes words 0..3; the HOST
+    // writes a per-dispatch epoch word so the readback can reject rows
+    // contaminated by a timeout-parked CB (a parked CB carries an older
+    // epoch → stats[4] mismatches → we skip it instead of logging an
+    // arithmetically-impossible histogram row).
     // Host-visible+coherent so the readback after vkWaitForFences needs no
-    // invalidate call.  Written only by motion block-thread-0 atomicAdd —
-    // no memory barrier in the dispatch path changes (the fence is the sync).
+    // invalidate call.
     {
       VkBufferCreateInfo bufCI = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-      bufCI.size               = 4 * sizeof(uint32_t);
+      bufCI.size               = 5 * sizeof(uint32_t);
       bufCI.usage              = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
       bufCI.sharingMode        = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -2597,7 +2610,7 @@ namespace dxvk {
         Vegas::s_fgInitialized = true;
         return false;
       }
-      memset(mapPtr, 0, 4 * sizeof(uint32_t));
+      memset(mapPtr, 0, 5 * sizeof(uint32_t));
 
       // Own pool for the single stats set (no touch to the OOM-tuned pool)
       VkDescriptorPoolSize statsPoolSizes[1] = {};
@@ -3509,10 +3522,10 @@ namespace dxvk {
     // Pass 1: Motion search
     // ----------------------------------------------------------------
     s_vk.vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineMotion);
-    bool statsEnabled = (Vegas::s_fgStatsSet != 0);
-    // Zero stats buffer before this dispatch accumulates into it (the
-    // previous dispatch's block-thread-0 atomicAdds must not carry over).
-    // Buffer memory barrier: transfer-write -> shader-write, then bind set 1.
+bool statsEnabled = (Vegas::s_fgStatsSet != 0);
+    // Zero stats words 0..3 before this dispatch accumulates into them
+    // (the previous dispatch's atomicAdds must not carry over).  Word 4
+    // (epoch) is written by the HOST after the fill, below.
     if (statsEnabled) {
       s_vk.vkCmdFillBuffer(cmdBuf,
           reinterpret_cast<VkBuffer>(Vegas::s_fgStatsBuffer),
@@ -3529,6 +3542,15 @@ namespace dxvk {
           VK_PIPELINE_STAGE_TRANSFER_BIT,
           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
           0, 0, nullptr, 1, &statsBarrier, 0, nullptr);
+      // Epoch stamp: written host-side (word 4 is outside the fill range
+      // and outside the shader's SSBO struct).  If a parked CB from a
+      // previous timeout is still executing its atomicAdds when this
+      // dispatch runs, the epoch remains from THAT older dispatch and the
+      // readback rejects this row as stale.
+      {
+        uint32_t* ep = reinterpret_cast<uint32_t*>(Vegas::s_fgStatsMapping) + 4;
+        *ep = ++s_fgStatsEpoch;
+      }
     }
     VkDescriptorSet motionSets[2] = {};
     motionSets[0] = descSets[0];
@@ -3924,19 +3946,31 @@ namespace dxvk {
     // Every dispatch (including timeouts that later drained) wrote its
     // own block statistics; log them so the 0.10/0.55 bound behavior is
     // observable in the device log instead of inferred from visuals.
+    // EPOCH GUARD: a timeout-parked CB can still be executing its
+    // atomicAdds while we read — that produced the impossible rows
+    // (domMean=0.97 with 72% zeroed violates the clamp math).  We stamp
+    // each dispatch's epoch into word[4] AFTER the fill; a parked CB
+    // carries an OLDER epoch, so mismatch here means "stale row" → skip.
     if (Vegas::s_fgStatsMapping) {
       const uint32_t* stats = reinterpret_cast<const uint32_t*>(Vegas::s_fgStatsMapping);
-      uint32_t count = stats[0];
-      uint32_t sumQ  = stats[1];
-      uint32_t zero  = stats[2];
-      uint32_t full  = stats[3];
-      int meanThousand = count ? int((double(sumQ) / double(count) / 65535.0) * 1000.0) : 0;
-      uint32_t zeroPct = count ? zero * 100 / count : 0;
-      uint32_t fullPct = count ? full * 100 / count : 0;
-      Logger::debug(str::format(
-        "Vegas FG: stat domMean=", meanThousand / 1000, ".", (meanThousand < 0 ? -meanThousand : meanThousand) % 1000,
-        " blocks=", count, " zero<0.10=", zeroPct, "%",
-        " full>=0.55=", fullPct, "%"));
+      bool stale;
+      stale = (stats[4] != s_fgStatsEpoch);
+      if (!stale) {
+        uint32_t count = stats[0];
+        uint32_t sumQ  = stats[1];
+        uint32_t zero  = stats[2];
+        uint32_t full  = stats[3];
+        int meanThousand = count ? int((double(sumQ) / double(count) / 65535.0) * 1000.0) : 0;
+        uint32_t zeroPct = count ? zero * 100 / count : 0;
+        uint32_t fullPct = count ? full * 100 / count : 0;
+        Logger::debug(str::format(
+          "Vegas FG: stat domMean=", meanThousand / 1000, ".", (meanThousand < 0 ? -meanThousand : meanThousand) % 1000,
+          " blocks=", count, " zero<0.10=", zeroPct, "%",
+          " full>=0.55=", fullPct, "%"));
+      } else {
+        Logger::debug(str::format(
+          "Vegas FG: stat SKIPPED stale epoch (", s_fgStatsEpoch, " vs ", stats[4], ")"));
+      }
       Vegas::s_fgStatsFrames++;
     }
 
