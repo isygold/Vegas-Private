@@ -45,7 +45,6 @@ layout(push_constant) uniform uPC {
 const float kChromaW = 0.5;     // chroma weight in refine cost
 const float kSADMaxPerPx = 1.5; // max per-pixel cost: |dL|<=1 + 0.5*|dC|<=0.5
 const int   kSearch = 8;        // half window ±8
-const int   kMaxDisp = 2;       // cap warp displacement to ±2 (reduces heat-haze ghosting on moving objects)
 const uint  kMinPacked = 0xFFFFFFFFu;
 
 shared float s_curL[256];   // current block luma       (16x16)
@@ -154,18 +153,22 @@ void main() {
   if (tid == 0u) {
     uint rf = s_minPacked & 0xFFu;
     float bestSad = float(s_minPacked >> 8u) / 16.0;
-    int mvX = clamp((int(rf) % 5) - 2 + s_coarseX, -kMaxDisp, kMaxDisp);
-    int mvY = clamp((int(rf) / 5) - 2 + s_coarseY, -kMaxDisp, kMaxDisp);
+    int rawX = (int(rf) % 5) - 2 + s_coarseX;
+    int rawY = (int(rf) / 5) - 2 + s_coarseY;
 
-    // Fixed-point variance: mean = s_accL/2^16/256, E[l²] = s_accL2/2^16/256
+    // Block variance from fixed-point accumulators
     float mean = float(s_accL) / 65536.0 / 256.0;
     float blockVar = max((float(s_accL2) / 65536.0 / 256.0) - mean * mean, 0.0);
 
     float sadNorm = bestSad / (256.0 * kSADMaxPerPx);
-    // Textureless blocks: no match is meaningful (sky, walls, fog).
-    // smoothstep over [thr/2, thr*2]; low variance → conf≈0 → sadNorm=1
-    // → warp presents the current frame for this block.
+    // Confidence: variance gate (textureless → low) × SAD quality gate (poor match → low)
     float conf = smoothstep(pc.info.w * 0.5, pc.info.w * 2.0, blockVar);
+    conf *= 1.0 - smoothstep(0.3, 0.6, sadNorm);  // distrust high-SAD blocks (HUD/overlays)
+    // Scale displacement by confidence; clamp to full search range
+    int mvX = int(clamp(float(rawX) * conf, float(-kSearch), float(kSearch)));
+    int mvY = int(clamp(float(rawY) * conf, float(-kSearch), float(kSearch)));
+
+    // Apply variance gate to SAD norm for warp pass
     sadNorm = max(sadNorm, 1.0 - conf);
     imageStore(uMotion, blockId, vec4(float(mvX), float(mvY), sadNorm, 0.0));
   }
