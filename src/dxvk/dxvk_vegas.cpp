@@ -1040,6 +1040,7 @@ namespace dxvk {
       PFN_vkCmdPushConstants       vkCmdPushConstants       = nullptr;
       PFN_vkCmdDispatch            vkCmdDispatch            = nullptr;
       PFN_vkCmdCopyImage           vkCmdCopyImage           = nullptr;
+      PFN_vkCmdFillBuffer          vkCmdFillBuffer          = nullptr;
       PFN_vkQueueSubmit            vkQueueSubmit            = nullptr;
       PFN_vkQueueWaitIdle          vkQueueWaitIdle          = nullptr;
       PFN_vkCreateFence            vkCreateFence            = nullptr;
@@ -1116,6 +1117,7 @@ namespace dxvk {
       VK_COPY_DEV_FUNC(vkCmdPushConstants)
       VK_COPY_DEV_FUNC(vkCmdDispatch)
       VK_COPY_DEV_FUNC(vkCmdCopyImage)
+      VK_COPY_DEV_FUNC(vkCmdFillBuffer)
       VK_COPY_DEV_FUNC(vkQueueSubmit)
       VK_COPY_DEV_FUNC(vkQueueWaitIdle)
       VK_COPY_DEV_FUNC(vkCreateFence)
