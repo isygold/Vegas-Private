@@ -27,6 +27,12 @@
 //   - the coarse winner is broadcast via shared ints (all 25 refine
 //     threads need it); s_minPacked is reset by thread 0 under the same
 //     barrier that publishes the coarse winner.
+//   - displacement: trust gate (smoothstep over confidence) outputs either
+//     the full integer search vector or zero — never a fractional vector.
+//     Fractional scaling (conf * mv) produced camera wobble on HK pans;
+//     hard caps (±2/±4) either ghosted movers or under-tracked pans.
+//     Trusted blocks keep full ±8 displacement; untrusted blocks fall back
+//     to the current frame through sadNorm=1.
 
 #version 460
 #extension GL_EXT_samplerless_texture_functions : require
@@ -164,9 +170,13 @@ void main() {
     // Confidence: variance gate (textureless → low) × SAD quality gate (poor match → low)
     float conf = smoothstep(pc.info.w * 0.5, pc.info.w * 2.0, blockVar);
     conf *= 1.0 - smoothstep(0.3, 0.6, sadNorm);  // distrust high-SAD blocks (HUD/overlays)
-    // Scale displacement by confidence; clamp to full search range
-    int mvX = int(clamp(float(rawX) * conf, float(-kSearch), float(kSearch)));
-    int mvY = int(clamp(float(rawY) * conf, float(-kSearch), float(kSearch)));
+    // Trust gate: trusted blocks keep FULL integer displacement (up to the
+    // ±8 search range); untrusted blocks get zero (warp presents the current
+    // frame via sadNorm). No magnitude cap — fractional displacement was the
+    // camera-wobble source in confidence-scaled mode.
+    float trust = smoothstep(0.45, 0.55, conf);
+    int mvX = int(clamp(float(rawX) * trust, float(-kSearch), float(kSearch)));
+    int mvY = int(clamp(float(rawY) * trust, float(-kSearch), float(kSearch)));
 
     // Apply variance gate to SAD norm for warp pass
     sadNorm = max(sadNorm, 1.0 - conf);
