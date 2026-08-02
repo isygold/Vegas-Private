@@ -177,7 +177,7 @@
   %s_coarseY = OpVariable %_ptr_Workgroup_int Workgroup
     %uint_25 = OpConstant %uint 25
      %int_n8 = OpConstant %int -8
-     %int_n4 = OpConstant %int -4
+     %int_n2 = OpConstant %int -2
   %float_256 = OpConstant %float 256
   %float_384 = OpConstant %float 384
      %uint_3 = OpConstant %uint 3
@@ -615,7 +615,7 @@
         %425 = OpISub %int %424 %int_2
         %426 = OpLoad %int %s_coarseX
         %427 = OpIAdd %int %425 %426
-        %429 = OpExtInst %int %1 SClamp %427 %int_n4 %int_4
+        %429 = OpExtInst %int %1 SClamp %427 %int_n2 %int_2
                OpStore %mvX %429
         %431 = OpLoad %uint %rf
         %432 = OpBitcast %int %431
@@ -623,7 +623,7 @@
         %434 = OpISub %int %433 %int_2
         %435 = OpLoad %int %s_coarseY
         %436 = OpIAdd %int %434 %435
-        %437 = OpExtInst %int %1 SClamp %436 %int_n4 %int_4
+        %437 = OpExtInst %int %1 SClamp %436 %int_n2 %int_2
                OpStore %mvY %437
         %439 = OpLoad %uint %s_accL
         %440 = OpConvertUToF %float %439

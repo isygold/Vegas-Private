@@ -45,7 +45,7 @@ layout(push_constant) uniform uPC {
 const float kChromaW = 0.5;     // chroma weight in refine cost
 const float kSADMaxPerPx = 1.5; // max per-pixel cost: |dL|<=1 + 0.5*|dC|<=0.5
 const int   kSearch = 8;        // half window ±8
-const int   kMaxDisp = 4;       // cap warp displacement to ±4 (reduces HUD ghosting from wrong vectors)
+const int   kMaxDisp = 2;       // cap warp displacement to ±2 (reduces heat-haze ghosting on moving objects)
 const uint  kMinPacked = 0xFFFFFFFFu;
 
 shared float s_curL[256];   // current block luma       (16x16)
