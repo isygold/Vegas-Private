@@ -2927,6 +2927,7 @@ namespace dxvk {
     VkImageView srcViewPrev  = VK_NULL_HANDLE;
     VkImageView motionView   = VK_NULL_HANDLE;
     VkImageView motionFilteredView = VK_NULL_HANDLE;
+    VkImageView motionPrevView     = VK_NULL_HANDLE;
     VkImageView outputView   = VK_NULL_HANDLE;
 
     // ================================================================
@@ -3046,13 +3047,12 @@ namespace dxvk {
     }
 
     // Motion-prev view (R16G16B16A16_SFLOAT — temporal search center)
-    VkImageView motionPrevView = VK_NULL_HANDLE;
     viewCI.image  = reinterpret_cast<VkImage>(Vegas::s_fgMotionPrevImage);
     viewCI.format = VK_FORMAT_R16G16B16A16_SFLOAT;
     vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &motionPrevView);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreateImageView(motionPrev) failed (", vr, ")"));
-      fgCleanup(8); return false;
+      fgCleanup(9); return false;
     }
 
     // ================================================================
