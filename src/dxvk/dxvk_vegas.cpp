@@ -2422,11 +2422,14 @@ namespace dxvk {
       s_vk.vkDestroyShaderModule(device, modules[i], nullptr);
 
     // ---- Descriptor pool ----
+    // NOTE: all 3 sets share ONE layout (3 sampled + 2 storage bindings),
+    // so pool accounting is per-set full-layout: 3*3 = 9 sampled, 3*2 = 6 storage.
+    // Allocate with headroom for driver exact-fit quirks.
     VkDescriptorPoolSize poolSizes[2] = {};
     poolSizes[0].type            = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    poolSizes[0].descriptorCount = FG_DESC_POOL_SIZE * 2;  // each pass uses up to 2 sampled
+    poolSizes[0].descriptorCount = FG_DESC_POOL_SIZE * 4;  // 9 needed (shared layout), 12 with headroom
     poolSizes[1].type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[1].descriptorCount = FG_DESC_POOL_SIZE * 2;  // each pass uses up to 2 storage
+    poolSizes[1].descriptorCount = FG_DESC_POOL_SIZE * 3;  // 6 needed, 9 with headroom
 
     VkDescriptorPoolCreateInfo dpCI = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpCI.maxSets       = FG_DESC_POOL_SIZE;
