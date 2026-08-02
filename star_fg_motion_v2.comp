@@ -44,6 +44,20 @@ layout(set = 0, binding = 1) uniform texture2D uPrevious;
 layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D uMotion;
 layout(set = 0, binding = 4) uniform texture2D uMotionPrev;
 
+// ---- Diagnostic stats (set 1, separate from the shared image layout) ----
+// Per-dispatch accumulator for the bimodal dominance gate.  Thread 0 of
+// each block that reaches the gate adds its dominance quantized to Q16.
+// Host zeroes the buffer with vkCmdFillBuffer before the motion dispatch
+// and reads it back after the fence so we can confirm *which* regime each
+// game actually sits in (unimodal ~1 vs bimodal ~0 vs flat ~0) instead of
+// guessing from visuals.
+layout(set = 1, binding = 0, std430) buffer FGStats {
+  uint s_blockCount;   // (+1 per block that ran the gate)
+  uint s_domSumQ16;    // Σ dominance·65535 (Q16 fixed point; mean = sum/count/65535)
+  uint s_zeroCount;    // blocks with dominance <= 0.10 (gate zeroed them)
+  uint s_fullCount;    // blocks with dominance >= 0.55 (full trust)
+} fgStats;
+
 layout(push_constant) uniform uPC {
   vec4 info;    // info.xy = block grid size (int), info.z = temporal
                  // center valid (0/1), info.w = variance threshold
@@ -246,6 +260,19 @@ void main() {
     // at dominance >= 0.55 the block is warp-trusted; below 0.10 it is
     // distrusted (current frame). 0.10/0.55 are the device-tuning knobs.
     trust *= smoothstep(0.10, 0.55, dominance);
+
+    // Diagnostic accumulation (host reads after the dispatch fence).
+    // Only thread 0 of each block touches the buffer, so 54x30 = 1620
+    // atomic ops per dispatch — negligible vs the search work.  The
+    // zero/full split tells us the true regime: unimodal games should
+    // show fullCount high (dominance >= 0.55) and zeroCount low; a
+    // bimodal game (HK sprite edges) shows zeroCount near 100%.
+    atomicAdd(fgStats.s_blockCount, 1u);
+    atomicAdd(fgStats.s_domSumQ16, uint(dominance * 65535.0));
+    if (dominance <= 0.10)
+      atomicAdd(fgStats.s_zeroCount, 1u);
+    if (dominance >= 0.55)
+      atomicAdd(fgStats.s_fullCount, 1u);
 
     int mvX = int(float(rawX) * trust);
     int mvY = int(float(rawY) * trust);

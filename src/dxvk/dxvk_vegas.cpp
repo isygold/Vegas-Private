@@ -84,6 +84,15 @@ namespace dxvk {
   uint64_t Vegas::s_fgDescPool        = 0;
   bool     Vegas::s_fgInitialized     = false;
 
+  // Framegen bimodal-gate diagnostics
+  uint64_t Vegas::s_fgStatsBuffer   = 0;
+  uint64_t Vegas::s_fgStatsMemory   = 0;
+  uint64_t Vegas::s_fgStatsMapping  = 0;
+  uint64_t Vegas::s_fgStatsLayout   = 0;
+  uint64_t Vegas::s_fgStatsPool     = 0;
+  uint64_t Vegas::s_fgStatsSet      = 0;
+  uint32_t Vegas::s_fgStatsFrames   = 0;
+
 
   // Pending-drain list for the framegen fence-timeout path.  When a
   // vkWaitForFences times out, the submitted command buffer may still be
@@ -2371,15 +2380,41 @@ namespace dxvk {
       return false;
     }
 
-    // ---- Pipeline layout (push constants + DS) ----
+    // ---- Set 1: bimodal-gate diagnostic stats buffer ----
+    // One storage-buffer binding read by the motion pass only (thread-0
+    // per block, atomicAdd).  Own layout + own pool so the shared
+    // 5-binding image layout and pool stay exactly as OOM-tuned.
+    VkDescriptorSetLayoutBinding statsBindings[1] = {};
+    statsBindings[0].binding            = 0;
+    statsBindings[0].descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    statsBindings[0].descriptorCount    = 1;
+    statsBindings[0].stageFlags         = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo statsDSLCI = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    statsDSLCI.bindingCount = 1;
+    statsDSLCI.pBindings    = statsBindings;
+
+    VkDescriptorSetLayout statsLayout = VK_NULL_HANDLE;
+    vr = s_vk.vkCreateDescriptorSetLayout(device, &statsDSLCI, nullptr, &statsLayout);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FG: vkCreateDescriptorSetLayout(stats) failed (", vr, ")"));
+      s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
+      for (uint32_t i = 0; i < 3; i++)
+        s_vk.vkDestroyShaderModule(device, modules[i], nullptr);
+      Vegas::s_fgInitialized = true;
+      return false;
+    }
+
+    // ---- Pipeline layout (push constants + image set 0 + stats set 1) ----
     VkPushConstantRange pcRange = {};
     pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     pcRange.offset     = 0;
     pcRange.size       = sizeof(float) * 8;  // 2x vec4: info + adaptive blend
 
+    VkDescriptorSetLayout plLayouts[2] = { dsLayout, statsLayout };
     VkPipelineLayoutCreateInfo plCI = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-    plCI.setLayoutCount         = 1;
-    plCI.pSetLayouts            = &dsLayout;
+    plCI.setLayoutCount         = 2;
+    plCI.pSetLayouts            = plLayouts;
     plCI.pushConstantRangeCount = 1;
     plCI.pPushConstantRanges    = &pcRange;
 
@@ -2388,6 +2423,7 @@ namespace dxvk {
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreatePipelineLayout failed (", vr, ")"));
       s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
+      s_vk.vkDestroyDescriptorSetLayout(device, statsLayout, nullptr);
       for (uint32_t i = 0; i < 3; i++)
         s_vk.vkDestroyShaderModule(device, modules[i], nullptr);
       Vegas::s_fgInitialized = true;
@@ -2409,6 +2445,7 @@ namespace dxvk {
     vr = s_vk.vkCreateComputePipelines(device, VK_NULL_HANDLE, 3, cpCI, nullptr, pipelines);
     if (vr != VK_SUCCESS) {
       Logger::warn(str::format("Vegas FG: vkCreateComputePipelines failed (", vr, ")"));
+      s_vk.vkDestroyDescriptorSetLayout(device, statsLayout, nullptr);
       s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
       s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
       for (uint32_t i = 0; i < 3; i++)
@@ -2443,10 +2480,197 @@ namespace dxvk {
       s_vk.vkDestroyPipeline(device, pipelines[0], nullptr);
       s_vk.vkDestroyPipeline(device, pipelines[1], nullptr);
       s_vk.vkDestroyPipeline(device, pipelines[2], nullptr);
+      s_vk.vkDestroyDescriptorSetLayout(device, statsLayout, nullptr);
       s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
       s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
       Vegas::s_fgInitialized = true;
       return false;
+    }
+
+    // ---- Stats buffer (set 1 / binding 0) ----
+    // 16-byte host-visible buffer: { u32 count, u32 sumQ16, u32 zero, u32 full }.
+    // Host-visible+coherent so the readback after vkWaitForFences needs no
+    // invalidate call.  Written only by motion block-thread-0 atomicAdd —
+    // no memory barrier in the dispatch path changes (the fence is the sync).
+    {
+      VkBufferCreateInfo bufCI = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+      bufCI.size               = 4 * sizeof(uint32_t);
+      bufCI.usage              = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+      bufCI.sharingMode        = VK_SHARING_MODE_EXCLUSIVE;
+
+      VkBuffer statsBuf = VK_NULL_HANDLE;
+      vr = s_vk.vkCreateBuffer(device, &bufCI, nullptr, &statsBuf);
+      if (vr != VK_SUCCESS) {
+        Logger::warn(str::format("Vegas FG: vkCreateBuffer(stats) failed (", vr, ")"));
+        s_vk.vkDestroyDescriptorPool(device, descPool, nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[0], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[1], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[2], nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, statsLayout, nullptr);
+        s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
+        Vegas::s_fgInitialized = true;
+        return false;
+      }
+
+      VkMemoryRequirements memReq;
+      s_vk.vkGetBufferMemoryRequirements(device, statsBuf, &memReq);
+
+      VkPhysicalDeviceMemoryProperties memProps;
+      s_vk.vkGetPhysicalDeviceMemoryProperties(
+          reinterpret_cast<VkPhysicalDevice>(Vegas::s_physicalDevice), &memProps);
+
+      uint32_t memType = VK_MAX_MEMORY_TYPES;
+      for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+        if ((memReq.memoryTypeBits & (1u << i)) &&
+            (memProps.memoryTypes[i].propertyFlags &
+             (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
+          memType = i;
+          break;
+        }
+      }
+      if (memType == VK_MAX_MEMORY_TYPES) {
+        Logger::warn("Vegas FG: no host-visible memory type for stats buffer");
+        s_vk.vkDestroyBuffer(device, statsBuf, nullptr);
+        s_vk.vkDestroyDescriptorPool(device, descPool, nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[0], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[1], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[2], nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, statsLayout, nullptr);
+        s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
+        Vegas::s_fgInitialized = true;
+        return false;
+      }
+
+      VkMemoryAllocateInfo allocAI = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+      allocAI.allocationSize  = memReq.size;
+      allocAI.memoryTypeIndex = memType;
+
+      VkDeviceMemory mem = VK_NULL_HANDLE;
+      vr = s_vk.vkAllocateMemory(device, &allocAI, nullptr, &mem);
+      if (vr != VK_SUCCESS) {
+        Logger::warn(str::format("Vegas FG: vkAllocateMemory(stats) failed (", vr, ")"));
+        s_vk.vkDestroyBuffer(device, statsBuf, nullptr);
+        s_vk.vkDestroyDescriptorPool(device, descPool, nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[0], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[1], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[2], nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, statsLayout, nullptr);
+        s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
+        Vegas::s_fgInitialized = true;
+        return false;
+      }
+
+      vr = s_vk.vkBindBufferMemory(device, statsBuf, mem, 0);
+      if (vr != VK_SUCCESS) {
+        Logger::warn(str::format("Vegas FG: vkBindBufferMemory(stats) failed (", vr, ")"));
+        s_vk.vkFreeMemory(device, mem, nullptr);
+        s_vk.vkDestroyBuffer(device, statsBuf, nullptr);
+        s_vk.vkDestroyDescriptorPool(device, descPool, nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[0], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[1], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[2], nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, statsLayout, nullptr);
+        s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
+        Vegas::s_fgInitialized = true;
+        return false;
+      }
+
+      void* mapPtr = nullptr;
+      vr = s_vk.vkMapMemory(device, mem, 0, VK_WHOLE_SIZE, 0, &mapPtr);
+      if (vr != VK_SUCCESS) {
+        Logger::warn(str::format("Vegas FG: vkMapMemory(stats) failed (", vr, ")"));
+        s_vk.vkFreeMemory(device, mem, nullptr);
+        s_vk.vkDestroyBuffer(device, statsBuf, nullptr);
+        s_vk.vkDestroyDescriptorPool(device, descPool, nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[0], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[1], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[2], nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, statsLayout, nullptr);
+        s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
+        Vegas::s_fgInitialized = true;
+        return false;
+      }
+      memset(mapPtr, 0, 4 * sizeof(uint32_t));
+
+      // Own pool for the single stats set (no touch to the OOM-tuned pool)
+      VkDescriptorPoolSize statsPoolSizes[1] = {};
+      statsPoolSizes[0].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      statsPoolSizes[0].descriptorCount = 1;
+
+      VkDescriptorPoolCreateInfo statsPoolCI = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+      statsPoolCI.maxSets       = 1;
+      statsPoolCI.poolSizeCount = 1;
+      statsPoolCI.pPoolSizes    = statsPoolSizes;
+
+      VkDescriptorPool statsPool = VK_NULL_HANDLE;
+      vr = s_vk.vkCreateDescriptorPool(device, &statsPoolCI, nullptr, &statsPool);
+      if (vr != VK_SUCCESS) {
+        Logger::warn(str::format("Vegas FG: vkCreateDescriptorPool(stats) failed (", vr, ")"));
+        s_vk.vkUnmapMemory(device, mem);
+        s_vk.vkFreeMemory(device, mem, nullptr);
+        s_vk.vkDestroyBuffer(device, statsBuf, nullptr);
+        s_vk.vkDestroyDescriptorPool(device, descPool, nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[0], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[1], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[2], nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, statsLayout, nullptr);
+        s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
+        Vegas::s_fgInitialized = true;
+        return false;
+      }
+
+      VkDescriptorSetAllocateInfo statsAlloc = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+      statsAlloc.descriptorPool     = statsPool;
+      statsAlloc.descriptorSetCount = 1;
+      statsAlloc.pSetLayouts        = &statsLayout;
+
+      VkDescriptorSet statsSet = VK_NULL_HANDLE;
+      vr = s_vk.vkAllocateDescriptorSets(device, &statsAlloc, &statsSet);
+      if (vr != VK_SUCCESS) {
+        Logger::warn(str::format("Vegas FG: vkAllocateDescriptorSets(stats) failed (", vr, ")"));
+        s_vk.vkDestroyDescriptorPool(device, statsPool, nullptr);
+        s_vk.vkUnmapMemory(device, mem);
+        s_vk.vkFreeMemory(device, mem, nullptr);
+        s_vk.vkDestroyBuffer(device, statsBuf, nullptr);
+        s_vk.vkDestroyDescriptorPool(device, descPool, nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[0], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[1], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[2], nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, statsLayout, nullptr);
+        s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
+        Vegas::s_fgInitialized = true;
+        return false;
+      }
+
+      VkDescriptorBufferInfo statsBufInfo = {};
+      statsBufInfo.buffer = statsBuf;
+      statsBufInfo.offset = 0;
+      statsBufInfo.range  = VK_WHOLE_SIZE;
+
+      VkWriteDescriptorSet statsWrite = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+      statsWrite.dstSet          = statsSet;
+      statsWrite.dstBinding      = 0;
+      statsWrite.dstArrayElement = 0;
+      statsWrite.descriptorCount = 1;
+      statsWrite.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      statsWrite.pBufferInfo     = &statsBufInfo;
+
+      s_vk.vkUpdateDescriptorSets(device, 1, &statsWrite, 0, nullptr);
+
+      Vegas::s_fgStatsBuffer  = reinterpret_cast<uint64_t>(statsBuf);
+      Vegas::s_fgStatsMemory   = reinterpret_cast<uint64_t>(mem);
+      Vegas::s_fgStatsMapping  = reinterpret_cast<uint64_t>(mapPtr);
+      Vegas::s_fgStatsLayout   = reinterpret_cast<uint64_t>(statsLayout);
+      Vegas::s_fgStatsPool     = reinterpret_cast<uint64_t>(statsPool);
+      Vegas::s_fgStatsSet      = reinterpret_cast<uint64_t>(statsSet);
+      Vegas::s_fgStatsFrames   = 0;
     }
 
     // ---- Store as boxed uint64_t ----
@@ -3283,8 +3507,32 @@ namespace dxvk {
     // Pass 1: Motion search
     // ----------------------------------------------------------------
     s_vk.vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineMotion);
+    bool statsEnabled = (Vegas::s_fgStatsSet != 0);
+    // Zero stats buffer before this dispatch accumulates into it (the
+    // previous dispatch's block-thread-0 atomicAdds must not carry over).
+    // Buffer memory barrier: transfer-write -> shader-write, then bind set 1.
+    if (statsEnabled) {
+      s_vk.vkCmdFillBuffer(cmdBuf,
+          reinterpret_cast<VkBuffer>(Vegas::s_fgStatsBuffer),
+          0, 4 * sizeof(uint32_t), 0);
+      VkBufferMemoryBarrier statsBarrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+      statsBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      statsBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+      statsBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      statsBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      statsBarrier.buffer        = reinterpret_cast<VkBuffer>(Vegas::s_fgStatsBuffer);
+      statsBarrier.offset        = 0;
+      statsBarrier.size          = 4 * sizeof(uint32_t);
+      s_vk.vkCmdPipelineBarrier(cmdBuf,
+          VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+          0, 0, nullptr, 1, &statsBarrier, 0, nullptr);
+    }
+    VkDescriptorSet motionSets[2] = {};
+    motionSets[0] = descSets[0];
+    motionSets[1] = reinterpret_cast<VkDescriptorSet>(Vegas::s_fgStatsSet);
     s_vk.vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
-        pipelineLayout, 0, 1, &descSets[0], 0, nullptr);
+        pipelineLayout, 0, statsEnabled ? 2 : 1, motionSets, 0, nullptr);
     uint32_t motionGX = (extent.width  + FG_TILE_SIZE - 1) / FG_TILE_SIZE;
     uint32_t motionGY = (extent.height + FG_TILE_SIZE - 1) / FG_TILE_SIZE;
     {
@@ -3669,6 +3917,26 @@ namespace dxvk {
     s_vk.vkDestroyFence(device, fence, nullptr);
     s_vk.vkFreeCommandBuffers(device, cmdPool, 1, &cmdBuf);
     s_vk.vkDestroyCommandPool(device, cmdPool, nullptr);
+
+    // ---- Bimodal-gate diagnostic readback ----
+    // Every dispatch (including timeouts that later drained) wrote its
+    // own block statistics; log them so the 0.10/0.55 bound behavior is
+    // observable in the device log instead of inferred from visuals.
+    if (Vegas::s_fgStatsMapping) {
+      const uint32_t* stats = reinterpret_cast<const uint32_t*>(Vegas::s_fgStatsMapping);
+      uint32_t count = stats[0];
+      uint32_t sumQ  = stats[1];
+      uint32_t zero  = stats[2];
+      uint32_t full  = stats[3];
+      int meanThousand = count ? int((double(sumQ) / double(count) / 65535.0) * 1000.0) : 0;
+      uint32_t zeroPct = count ? zero * 100 / count : 0;
+      uint32_t fullPct = count ? full * 100 / count : 0;
+      Logger::debug(str::format(
+        "Vegas FG: stat domMean=", meanThousand / 1000, ".", (meanThousand < 0 ? -meanThousand : meanThousand) % 1000,
+        " blocks=", count, " zero<0.10=", zeroPct, "%",
+        " full>=0.55=", fullPct, "%"));
+      Vegas::s_fgStatsFrames++;
+    }
 
     Logger::debug(str::format("Vegas FG: dispatch complete (", extent.width, "x", extent.height, ")"));
     return true;
