@@ -190,11 +190,15 @@ glsl_generator = generator(
 )
 
 dxvk_version = vcs_tag(
-  # --always: never fails on tag-less/shallow checkouts (GHA fetch-depth: 1).
-  # With tags: "v2.4.1-V-28-g723945e"; without: bare short hash "723945e".
-  # The build must always self-identify its commit for device-side
-  # binary identity verification (HUD/banner "VEGAS <hash>").
-  command: ['git', 'describe', '--always', '--dirty=-1-vegas'],
+  # Prefer git describe (local full checkouts with tags).  GHA's
+  # fedora container has no git at checkout time, so actions/checkout
+  # falls back to the REST API tarball (no .git dir) and git describe
+  # fails there; fall back to GITHUB_SHA (default GHA env var injected
+  # into container steps) so the build still self-identifies its commit
+  # in every environment (HUD/banner "VEGAS <hash>").
+  command: ['sh', '-c',
+    'git describe --always --dirty=-1-vegas 2>/dev/null || '
+    '{ test -n "$GITHUB_SHA" && echo "$GITHUB_SHA" | cut -c1-7 || echo unknown-commit; }'],
   fallback: 'unknown-commit',
   input:  'version.h.in',
   output: 'version.h',
