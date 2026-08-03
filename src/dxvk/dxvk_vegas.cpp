@@ -90,7 +90,8 @@ namespace dxvk {
   uint64_t Vegas::s_fgStatsMapping  = 0;
   uint64_t Vegas::s_fgStatsLayout   = 0;
   uint64_t Vegas::s_fgStatsPool     = 0;
-  uint64_t Vegas::s_fgStatsSet      = 0;
+  uint64_t Vegas::s_fgStatsSet[4]   = {0, 0, 0, 0};
+  uint32_t Vegas::s_fgStatsSeq      = 0;
   uint32_t Vegas::s_fgStatsFrames   = 0;
 
 
@@ -107,6 +108,7 @@ namespace dxvk {
     VkCommandBuffer cmdBuf   = VK_NULL_HANDLE;
     VkImageView    views[6]  = {};
     uint32_t       viewCount = 0;
+    uint32_t       statsSlot = UINT32_MAX;  ///< ring slot this CB accumulated into (UINT32_MAX = none)
   };
   static FgPendingResources s_fgPending[4];
   static uint32_t           s_fgPendingCount = 0;
@@ -170,6 +172,7 @@ namespace dxvk {
 
   // Draw count histogram
   uint32_t Vegas::s_drawHistory[DRAW_HISTORY_SIZE] = {};
+  float    Vegas::s_drawFtHistory[DRAW_HISTORY_SIZE] = {};
   uint32_t Vegas::s_drawHead           = 0;
   uint32_t Vegas::s_frameDrawCount     = 0;
   uint32_t Vegas::s_dumpCounter        = 0;
@@ -2498,18 +2501,25 @@ namespace dxvk {
       return false;
     }
 
-    // ---- Stats buffer (set 1 / binding 0) ----
-    // 20-byte host-visible buffer: { u32 count, u32 sumQ16, u32 zero, u32
-    // full, u32 epoch }.  Shader atomically writes words 0..3; the HOST
-    // writes a per-dispatch epoch word so the readback can reject rows
-    // contaminated by a timeout-parked CB (a parked CB carries an older
-    // epoch → stats[4] mismatches → we skip it instead of logging an
-    // arithmetically-impossible histogram row).
+    // ---- Stats ring buffer (set 1 / binding 0) ----
+    // One 80-byte host-visible buffer split into 4 slots of 20 bytes:
+    //   slot i: { u32 count, u32 sumQ16, u32 zero, u32 full, u32 epoch }
+    // One descriptor set per slot (offset = slot * 20).  Dispatch N uses
+    // slot N % 4.  A timeout-parked CB keeps accumulating atomicAdds into
+    // ITS OWN slot only; the readback always reads the current dispatch's
+    // slot, so a parked CB's late atomics land in a different slot and can
+    // never contaminate the row being logged.  The epoch word stays as a
+    // belt-and-suspenders canary (the shader never writes word 4; the
+    // host stamps it per dispatch).
     // Host-visible+coherent so the readback after vkWaitForFences needs no
     // invalidate call.
     {
+      constexpr uint32_t FG_STATS_SLOTS    = 4;
+      constexpr uint32_t FG_STATS_WORDS    = 5;      // count, sumQ16, zero, full, epoch
+      constexpr uint32_t FG_STATS_SLOT_B   = FG_STATS_WORDS * sizeof(uint32_t);
+
       VkBufferCreateInfo bufCI = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-      bufCI.size               = 5 * sizeof(uint32_t);
+      bufCI.size               = FG_STATS_SLOTS * FG_STATS_SLOT_B;
       bufCI.usage              = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
       bufCI.sharingMode        = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -2610,15 +2620,15 @@ namespace dxvk {
         Vegas::s_fgInitialized = true;
         return false;
       }
-      memset(mapPtr, 0, 5 * sizeof(uint32_t));
+      memset(mapPtr, 0, FG_STATS_SLOTS * FG_STATS_SLOT_B);
 
-      // Own pool for the single stats set (no touch to the OOM-tuned pool)
+      // Own pool for the 4 stats sets (no touch to the OOM-tuned pool)
       VkDescriptorPoolSize statsPoolSizes[1] = {};
       statsPoolSizes[0].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-      statsPoolSizes[0].descriptorCount = 1;
+      statsPoolSizes[0].descriptorCount = FG_STATS_SLOTS;
 
       VkDescriptorPoolCreateInfo statsPoolCI = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-      statsPoolCI.maxSets       = 1;
+      statsPoolCI.maxSets       = FG_STATS_SLOTS;
       statsPoolCI.poolSizeCount = 1;
       statsPoolCI.pPoolSizes    = statsPoolSizes;
 
@@ -2645,46 +2655,50 @@ namespace dxvk {
       statsAlloc.descriptorSetCount = 1;
       statsAlloc.pSetLayouts        = &statsLayout;
 
-      VkDescriptorSet statsSet = VK_NULL_HANDLE;
-      vr = s_vk.vkAllocateDescriptorSets(device, &statsAlloc, &statsSet);
-      if (vr != VK_SUCCESS) {
-        Logger::warn(str::format("Vegas FG: vkAllocateDescriptorSets(stats) failed (", vr, ")"));
-        s_vk.vkDestroyDescriptorPool(device, statsPool, nullptr);
-        s_vk.vkUnmapMemory(device, mem);
-        s_vk.vkFreeMemory(device, mem, nullptr);
-        s_vk.vkDestroyBuffer(device, statsBuf, nullptr);
-        s_vk.vkDestroyDescriptorPool(device, descPool, nullptr);
-        s_vk.vkDestroyPipeline(device, pipelines[0], nullptr);
-        s_vk.vkDestroyPipeline(device, pipelines[1], nullptr);
-        s_vk.vkDestroyPipeline(device, pipelines[2], nullptr);
-        s_vk.vkDestroyDescriptorSetLayout(device, statsLayout, nullptr);
-        s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-        s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
-        Vegas::s_fgInitialized = true;
-        return false;
+      for (uint32_t s = 0; s < FG_STATS_SLOTS; s++) {
+        VkDescriptorSet statsSet = VK_NULL_HANDLE;
+        vr = s_vk.vkAllocateDescriptorSets(device, &statsAlloc, &statsSet);
+        if (vr != VK_SUCCESS) {
+          Logger::warn(str::format("Vegas FG: vkAllocateDescriptorSets(stats) failed (", vr, ")"));
+          s_vk.vkDestroyDescriptorPool(device, statsPool, nullptr);
+          s_vk.vkUnmapMemory(device, mem);
+          s_vk.vkFreeMemory(device, mem, nullptr);
+          s_vk.vkDestroyBuffer(device, statsBuf, nullptr);
+          s_vk.vkDestroyDescriptorPool(device, descPool, nullptr);
+          s_vk.vkDestroyPipeline(device, pipelines[0], nullptr);
+          s_vk.vkDestroyPipeline(device, pipelines[1], nullptr);
+          s_vk.vkDestroyPipeline(device, pipelines[2], nullptr);
+          s_vk.vkDestroyDescriptorSetLayout(device, statsLayout, nullptr);
+          s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+          s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
+          Vegas::s_fgInitialized = true;
+          return false;
+        }
+
+        VkDescriptorBufferInfo statsBufInfo = {};
+        statsBufInfo.buffer = statsBuf;
+        statsBufInfo.offset = s * FG_STATS_SLOT_B;
+        statsBufInfo.range  = FG_STATS_SLOT_B;
+
+        VkWriteDescriptorSet statsWrite = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        statsWrite.dstSet          = statsSet;
+        statsWrite.dstBinding      = 0;
+        statsWrite.dstArrayElement = 0;
+        statsWrite.descriptorCount = 1;
+        statsWrite.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        statsWrite.pBufferInfo     = &statsBufInfo;
+
+        s_vk.vkUpdateDescriptorSets(device, 1, &statsWrite, 0, nullptr);
+
+        Vegas::s_fgStatsSet[s] = reinterpret_cast<uint64_t>(statsSet);
       }
-
-      VkDescriptorBufferInfo statsBufInfo = {};
-      statsBufInfo.buffer = statsBuf;
-      statsBufInfo.offset = 0;
-      statsBufInfo.range  = VK_WHOLE_SIZE;
-
-      VkWriteDescriptorSet statsWrite = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-      statsWrite.dstSet          = statsSet;
-      statsWrite.dstBinding      = 0;
-      statsWrite.dstArrayElement = 0;
-      statsWrite.descriptorCount = 1;
-      statsWrite.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-      statsWrite.pBufferInfo     = &statsBufInfo;
-
-      s_vk.vkUpdateDescriptorSets(device, 1, &statsWrite, 0, nullptr);
 
       Vegas::s_fgStatsBuffer  = reinterpret_cast<uint64_t>(statsBuf);
       Vegas::s_fgStatsMemory   = reinterpret_cast<uint64_t>(mem);
       Vegas::s_fgStatsMapping  = reinterpret_cast<uint64_t>(mapPtr);
       Vegas::s_fgStatsLayout   = reinterpret_cast<uint64_t>(statsLayout);
       Vegas::s_fgStatsPool     = reinterpret_cast<uint64_t>(statsPool);
-      Vegas::s_fgStatsSet      = reinterpret_cast<uint64_t>(statsSet);
+      Vegas::s_fgStatsSeq      = 0;
       Vegas::s_fgStatsFrames   = 0;
     }
 
@@ -2925,7 +2939,8 @@ namespace dxvk {
   // risk destroying still-executing objects.
   static void fgQueuePending(VkDevice device, VkFence fence,
       VkCommandPool pool, VkCommandBuffer cmdBuf,
-      const VkImageView* views, uint32_t viewCount) {
+      const VkImageView* views, uint32_t viewCount,
+      uint32_t statsSlotArg) {
     if (s_fgPendingCount >= 4) {
       VkResult vr = s_vk.vkWaitForFences(device, 1,
           &s_fgPending[0].fence, VK_TRUE, UINT64_MAX);
@@ -2945,6 +2960,7 @@ namespace dxvk {
       p.pool      = pool;
       p.cmdBuf    = cmdBuf;
       p.viewCount = viewCount;
+      p.statsSlot = statsSlotArg;
       for (uint32_t v = 0; v < viewCount; v++)
         p.views[v] = views[v];
     }
@@ -3133,7 +3149,7 @@ namespace dxvk {
         // CB may still be executing — park the resources and let a later
         // dispatch destroy them once the fence signals.
         Logger::warn(str::format("Vegas FG: first-frame capture wait failed (", vr, ")"));
-        fgQueuePending(device, fence, cmdPool, cmdBuf, nullptr, 0);
+        fgQueuePending(device, fence, cmdPool, cmdBuf, nullptr, 0, UINT32_MAX);
         return false;
       }
 
@@ -3522,39 +3538,56 @@ namespace dxvk {
     // Pass 1: Motion search
     // ----------------------------------------------------------------
     s_vk.vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineMotion);
-bool statsEnabled = (Vegas::s_fgStatsSet != 0);
-    // Zero stats words 0..3 before this dispatch accumulates into them
-    // (the previous dispatch's atomicAdds must not carry over).  Word 4
-    // (epoch) is written by the HOST after the fill, below.
+bool statsEnabled = (Vegas::s_fgStatsSet[0] != 0);
+    // Per-dispatch ring slot: the fill + atomics + readback for THIS
+    // dispatch all target slot = seq % 4.  A timeout-parked CB (pending
+    // list capped at 4) only ever dirties ITS OWN slot, so its late
+    // atomicAdds can never land in the row we log here.
+    uint32_t statsSlot = (Vegas::s_fgStatsSeq++) % 4;
+    // Slot-ownership wait: if a PARKED CB from an earlier timeout still
+    // owns THIS slot (i.e. it timed out on the same slot 4 dispatches
+    // ago), block until its fence signals before the fill+dispatch below
+    // can overwrite the slot.  Without this, slot reuse could race a
+    // still-running parked CB on a non-strictly-FIFO queue.
+    if (statsEnabled) {
+      for (uint32_t i = 0; i < s_fgPendingCount; i++) {
+        if (s_fgPending[i].statsSlot == statsSlot) {
+          s_vk.vkWaitForFences(device, 1, &s_fgPending[i].fence, VK_TRUE, UINT64_MAX);
+          break;
+        }
+      }
+    }
+    // Zero stats words 0..3 of THIS slot before this dispatch accumulates
+    // into them (the previous dispatch's atomicAdds must not carry over).
+    // Word 4 (epoch) is written by the HOST after the fill, below.
     if (statsEnabled) {
       s_vk.vkCmdFillBuffer(cmdBuf,
           reinterpret_cast<VkBuffer>(Vegas::s_fgStatsBuffer),
-          0, 4 * sizeof(uint32_t), 0);
+          statsSlot * 5 * sizeof(uint32_t), 4 * sizeof(uint32_t), 0);
       VkBufferMemoryBarrier statsBarrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
       statsBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
       statsBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       statsBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
       statsBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
       statsBarrier.buffer        = reinterpret_cast<VkBuffer>(Vegas::s_fgStatsBuffer);
-      statsBarrier.offset        = 0;
+      statsBarrier.offset        = statsSlot * 5 * sizeof(uint32_t);
       statsBarrier.size          = 4 * sizeof(uint32_t);
       s_vk.vkCmdPipelineBarrier(cmdBuf,
           VK_PIPELINE_STAGE_TRANSFER_BIT,
           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
           0, 0, nullptr, 1, &statsBarrier, 0, nullptr);
-      // Epoch stamp: written host-side (word 4 is outside the fill range
-      // and outside the shader's SSBO struct).  If a parked CB from a
-      // previous timeout is still executing its atomicAdds when this
-      // dispatch runs, the epoch remains from THAT older dispatch and the
-      // readback rejects this row as stale.
+      // Epoch stamp: written host-side (word 4 of THIS slot is outside the
+      // fill range and outside the shader's SSBO struct).  Belt-and-
+      // suspenders canary — with the ring, a parked CB cannot even reach
+      // this slot's words.
       {
-        uint32_t* ep = reinterpret_cast<uint32_t*>(Vegas::s_fgStatsMapping) + 4;
+        uint32_t* ep = reinterpret_cast<uint32_t*>(Vegas::s_fgStatsMapping) + statsSlot * 5 + 4;
         *ep = ++s_fgStatsEpoch;
       }
     }
     VkDescriptorSet motionSets[2] = {};
     motionSets[0] = descSets[0];
-    motionSets[1] = reinterpret_cast<VkDescriptorSet>(Vegas::s_fgStatsSet);
+    motionSets[1] = reinterpret_cast<VkDescriptorSet>(Vegas::s_fgStatsSet[statsSlot]);
     s_vk.vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
         pipelineLayout, 0, statsEnabled ? 2 : 1, motionSets, 0, nullptr);
     uint32_t motionGX = (extent.width  + FG_TILE_SIZE - 1) / FG_TILE_SIZE;
@@ -3918,7 +3951,7 @@ bool statsEnabled = (Vegas::s_fgStatsSet != 0);
         srcViewCur, srcViewPrev, motionView, motionFilteredView, outputView,
         motionPrevView
       };
-      fgQueuePending(device, fence, cmdPool, cmdBuf, timedViews, 6);
+      fgQueuePending(device, fence, cmdPool, cmdBuf, timedViews, 6, statsSlot);
       if (fgWaitMs > 25.0f)
         s_fgSlowCount = std::min(s_fgSlowCount + 1u, 5u);
       return false;
@@ -3946,13 +3979,18 @@ bool statsEnabled = (Vegas::s_fgStatsSet != 0);
     // Every dispatch (including timeouts that later drained) wrote its
     // own block statistics; log them so the 0.10/0.55 bound behavior is
     // observable in the device log instead of inferred from visuals.
-    // EPOCH GUARD: a timeout-parked CB can still be executing its
-    // atomicAdds while we read — that produced the impossible rows
-    // (domMean=0.97 with 72% zeroed violates the clamp math).  We stamp
-    // each dispatch's epoch into word[4] AFTER the fill; a parked CB
-    // carries an OLDER epoch, so mismatch here means "stale row" → skip.
+    // RING GUARD: each dispatch accumulates into its own slot (seq%4);
+    // the readback reads THIS dispatch's slot, and slot reuse is
+    // serialized against the previous owner's parked CB, so the epoch
+    // check below is a belt-and-suspenders canary rather than the
+    // primary defense.
     if (Vegas::s_fgStatsMapping) {
-      const uint32_t* stats = reinterpret_cast<const uint32_t*>(Vegas::s_fgStatsMapping);
+      // Read THIS dispatch's slot: (seq-1) because the slot was chosen and
+      // seq incremented at record time.  A timeout-parked CB's atomics can
+      // only have landed in a DIFFERENT slot, so the row below is
+      // guaranteed to be this dispatch's own accumulation.
+      uint32_t slot = (Vegas::s_fgStatsSeq - 1u) % 4u;
+      const uint32_t* stats = reinterpret_cast<const uint32_t*>(Vegas::s_fgStatsMapping) + slot * 5;
       bool stale;
       stale = (stats[4] != s_fgStatsEpoch);
       if (!stale) {
@@ -4018,6 +4056,7 @@ bool statsEnabled = (Vegas::s_fgStatsSet != 0);
     // reset is handled by endOfFrameCleanup at end of Present).
     if (s_gov.frameDrawCount > 0) {
       s_drawHistory[s_drawHead] = s_gov.frameDrawCount;
+      s_drawFtHistory[s_drawHead] = frameTime;   // paired ms → fps in CSV dump
       s_drawHead = (s_drawHead + 1) % DRAW_HISTORY_SIZE;
     }
 
@@ -4165,13 +4204,15 @@ bool statsEnabled = (Vegas::s_fgStatsSet != 0);
         fprintf(fp, "# Device: %s\n",          deviceName.c_str());
         fprintf(fp, "# Game: %s\n",            gameTag.c_str());
         fprintf(fp, "# Created: %s\n",         timeBuf);
-        fprintf(fp, "# Columns: session_frame,drawCount\n");
-        fprintf(fp, "session_frame,drawCount\n");
+        fprintf(fp, "# Columns: session_frame,drawCount,fps\n");
+        fprintf(fp, "session_frame,drawCount,fps\n");
       }
       for (uint32_t i = 0; i < DRAW_HISTORY_SIZE; i++) {
         uint32_t idx = (h + i) % DRAW_HISTORY_SIZE;
-        fprintf(fp, "%" PRIu64 ",%u\n",
-                s_profileFrame + i, s_drawHistory[idx]);
+        float ft = s_drawFtHistory[idx];
+        float fps = (ft > 0.01f) ? (1000.0f / ft) : 0.0f;
+        fprintf(fp, "%" PRIu64 ",%u,%.1f\n",
+                s_profileFrame + i, s_drawHistory[idx], fps);
       }
       s_profileFrame += DRAW_HISTORY_SIZE;
     } else {
@@ -4179,11 +4220,13 @@ bool statsEnabled = (Vegas::s_fgStatsSet != 0);
       fprintf(fp, "# Device: %s\n",          deviceName.c_str());
       fprintf(fp, "# Game: %s\n",            gameTag.c_str());
       fprintf(fp, "# Created: %s\n",         timeBuf);
-      fprintf(fp, "# Columns: frame,drawCount\n");
-      fprintf(fp, "frame,drawCount\n");
+      fprintf(fp, "# Columns: frame,drawCount,fps\n");
+      fprintf(fp, "frame,drawCount,fps\n");
       for (uint32_t i = 0; i < DRAW_HISTORY_SIZE; i++) {
         uint32_t idx = (h + i) % DRAW_HISTORY_SIZE;
-        fprintf(fp, "%u,%u\n", i, s_drawHistory[idx]);
+        float ft = s_drawFtHistory[idx];
+        float fps = (ft > 0.01f) ? (1000.0f / ft) : 0.0f;
+        fprintf(fp, "%u,%u,%.1f\n", i, s_drawHistory[idx], fps);
       }
     }
 
