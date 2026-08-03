@@ -84,14 +84,16 @@ namespace dxvk {
   uint64_t Vegas::s_fgDescPool        = 0;
   bool     Vegas::s_fgInitialized     = false;
 
-  // Framegen bimodal-gate diagnostics
+  // Framegen bimodal-gate diagnostics (single 16B block, gated by env
+  // vegas_telemetry=1 — the 74766cd-style minimal telemetry, without the
+  // ring slots / epoch canary that chased a never-existed bug).
   uint64_t Vegas::s_fgStatsBuffer   = 0;
   uint64_t Vegas::s_fgStatsMemory   = 0;
   uint64_t Vegas::s_fgStatsMapping  = 0;
   uint64_t Vegas::s_fgStatsLayout   = 0;
   uint64_t Vegas::s_fgStatsPool     = 0;
-  uint64_t Vegas::s_fgStatsSet[4]   = {0, 0, 0, 0};
-  uint32_t Vegas::s_fgStatsSeq      = 0;
+  uint64_t Vegas::s_fgStatsSet      = 0;
+  bool     Vegas::s_fgStatsEnabled  = false;
   uint32_t Vegas::s_fgStatsFrames   = 0;
   uint32_t Vegas::s_fgStatsCorrupt  = 0;
 
@@ -109,7 +111,6 @@ namespace dxvk {
     VkCommandBuffer cmdBuf   = VK_NULL_HANDLE;
     VkImageView    views[6]  = {};
     uint32_t       viewCount = 0;
-    uint32_t       statsSlot = UINT32_MAX;  ///< ring slot this CB accumulated into (UINT32_MAX = none)
   };
   static FgPendingResources s_fgPending[4];
   static uint32_t           s_fgPendingCount = 0;
@@ -121,14 +122,15 @@ namespace dxvk {
   // the watchdog reliably.
   static uint32_t           s_fgSlowCount    = 0;
 
-  // Monotonic epoch for the bimodal-gate stats buffer word[4].  The host
-  // increments per dispatch and writes it into the mapped buffer AFTER the
-  // vkCmdFillBuffer zero (which only covers words 0..3).  The readback
-  // then rejects stats where the epoch mismatches — i.e. any row produced
-  // by a pinned/older parked CB racing the stat accumulation window
-  // (arithmetically-impossible histogram rows like domMean=0.97 + 72%
-  // zeroed were observed before this guard).
-  static uint32_t           s_fgStatsEpoch   = 0;
+  // Zero-pad a value to exactly 3 digits ("97" -> "097").  str::format is
+  // stringstream-based (no printf %-flags), and the stat logs print a
+  // manual "%.3f"-style mean — without this, domMean=0.097 would log as
+  // "0.97" and be misread as mean 0.97 (the 2026-08-01 parsing error).
+  static std::string fmt03(uint32_t v) {
+    std::string s = std::to_string(v);
+    while (s.size() < 3) s = "0" + s;
+    return s;
+  }
 
   // Framegen intermediate images
   bool     Vegas::s_fgPrevValid       = false;
@@ -2502,25 +2504,19 @@ namespace dxvk {
       return false;
     }
 
-    // ---- Stats ring buffer (set 1 / binding 0) ----
-    // One 80-byte host-visible buffer split into 4 slots of 20 bytes:
-    //   slot i: { u32 count, u32 sumQ16, u32 zero, u32 full, u32 epoch }
-    // One descriptor set per slot (offset = slot * 20).  Dispatch N uses
-    // slot N % 4.  A timeout-parked CB keeps accumulating atomicAdds into
-    // ITS OWN slot only; the readback always reads the current dispatch's
-    // slot, so a parked CB's late atomics land in a different slot and can
-    // never contaminate the row being logged.  The epoch word stays as a
-    // belt-and-suspenders canary (the shader never writes word 4; the
-    // host stamps it per dispatch).
-    // Host-visible+coherent so the readback after vkWaitForFences needs no
-    // invalidate call.
+    // ---- Stats buffer (set 1 / binding 0) ----
+    // Single 16-byte host-visible buffer: { u32 count, u32 sumQ16, u32 zero, u32 full }.
+    // Written only by motion block-thread-0 atomicAdd; host-visible+coherent so
+    // the readback after vkWaitForFences needs no invalidate call.
+    // TELEMETRY GATE: the whole diagnostic path (fill, barrier, readback, log)
+    // runs only when env vegas_telemetry=1 (default OFF). The buffer + descriptor
+    // set are still created so the motion shader's atomicAdds always have a valid
+    // target — the gate skips the per-dispatch fill/bind cost and the readback log.
     {
-      constexpr uint32_t FG_STATS_SLOTS    = 4;
-      constexpr uint32_t FG_STATS_WORDS    = 5;      // count, sumQ16, zero, full, epoch
-      constexpr uint32_t FG_STATS_SLOT_B   = FG_STATS_WORDS * sizeof(uint32_t);
+      constexpr uint32_t FG_STATS_WORDS = 4;      // count, sumQ16, zero, full
 
       VkBufferCreateInfo bufCI = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-      bufCI.size               = FG_STATS_SLOTS * FG_STATS_SLOT_B;
+      bufCI.size               = FG_STATS_WORDS * sizeof(uint32_t);
       bufCI.usage              = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
       bufCI.sharingMode        = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -2621,15 +2617,16 @@ namespace dxvk {
         Vegas::s_fgInitialized = true;
         return false;
       }
-      memset(mapPtr, 0, FG_STATS_SLOTS * FG_STATS_SLOT_B);
+      memset(mapPtr, 0, FG_STATS_WORDS * sizeof(uint32_t));
+      Vegas::s_fgStatsEnabled = (env::getEnvVar("vegas_telemetry") == "1");
 
-      // Own pool for the 4 stats sets (no touch to the OOM-tuned pool)
+      // Own pool for the single stats set (no touch to the OOM-tuned pool)
       VkDescriptorPoolSize statsPoolSizes[1] = {};
       statsPoolSizes[0].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-      statsPoolSizes[0].descriptorCount = FG_STATS_SLOTS;
+      statsPoolSizes[0].descriptorCount = 1;
 
       VkDescriptorPoolCreateInfo statsPoolCI = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-      statsPoolCI.maxSets       = FG_STATS_SLOTS;
+      statsPoolCI.maxSets       = 1;
       statsPoolCI.poolSizeCount = 1;
       statsPoolCI.pPoolSizes    = statsPoolSizes;
 
@@ -2656,52 +2653,48 @@ namespace dxvk {
       statsAlloc.descriptorSetCount = 1;
       statsAlloc.pSetLayouts        = &statsLayout;
 
-      for (uint32_t s = 0; s < FG_STATS_SLOTS; s++) {
-        VkDescriptorSet statsSet = VK_NULL_HANDLE;
-        vr = s_vk.vkAllocateDescriptorSets(device, &statsAlloc, &statsSet);
-        if (vr != VK_SUCCESS) {
-          Logger::warn(str::format("Vegas FG: vkAllocateDescriptorSets(stats) failed (", vr, ")"));
-          s_vk.vkDestroyDescriptorPool(device, statsPool, nullptr);
-          s_vk.vkUnmapMemory(device, mem);
-          s_vk.vkFreeMemory(device, mem, nullptr);
-          s_vk.vkDestroyBuffer(device, statsBuf, nullptr);
-          s_vk.vkDestroyDescriptorPool(device, descPool, nullptr);
-          s_vk.vkDestroyPipeline(device, pipelines[0], nullptr);
-          s_vk.vkDestroyPipeline(device, pipelines[1], nullptr);
-          s_vk.vkDestroyPipeline(device, pipelines[2], nullptr);
-          s_vk.vkDestroyDescriptorSetLayout(device, statsLayout, nullptr);
-          s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-          s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
-          Vegas::s_fgInitialized = true;
-          return false;
-        }
-
-        VkDescriptorBufferInfo statsBufInfo = {};
-        statsBufInfo.buffer = statsBuf;
-        statsBufInfo.offset = s * FG_STATS_SLOT_B;
-        statsBufInfo.range  = FG_STATS_SLOT_B;
-
-        VkWriteDescriptorSet statsWrite = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        statsWrite.dstSet          = statsSet;
-        statsWrite.dstBinding      = 0;
-        statsWrite.dstArrayElement = 0;
-        statsWrite.descriptorCount = 1;
-        statsWrite.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        statsWrite.pBufferInfo     = &statsBufInfo;
-
-        s_vk.vkUpdateDescriptorSets(device, 1, &statsWrite, 0, nullptr);
-
-        Vegas::s_fgStatsSet[s] = reinterpret_cast<uint64_t>(statsSet);
+      VkDescriptorSet statsSet = VK_NULL_HANDLE;
+      vr = s_vk.vkAllocateDescriptorSets(device, &statsAlloc, &statsSet);
+      if (vr != VK_SUCCESS) {
+        Logger::warn(str::format("Vegas FG: vkAllocateDescriptorSets(stats) failed (", vr, ")"));
+        s_vk.vkDestroyDescriptorPool(device, statsPool, nullptr);
+        s_vk.vkUnmapMemory(device, mem);
+        s_vk.vkFreeMemory(device, mem, nullptr);
+        s_vk.vkDestroyBuffer(device, statsBuf, nullptr);
+        s_vk.vkDestroyDescriptorPool(device, descPool, nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[0], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[1], nullptr);
+        s_vk.vkDestroyPipeline(device, pipelines[2], nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, statsLayout, nullptr);
+        s_vk.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        s_vk.vkDestroyDescriptorSetLayout(device, dsLayout, nullptr);
+        Vegas::s_fgInitialized = true;
+        return false;
       }
 
+      VkDescriptorBufferInfo statsBufInfo = {};
+      statsBufInfo.buffer = statsBuf;
+      statsBufInfo.offset = 0;
+      statsBufInfo.range  = FG_STATS_WORDS * sizeof(uint32_t);
+
+      VkWriteDescriptorSet statsWrite = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+      statsWrite.dstSet          = statsSet;
+      statsWrite.dstBinding      = 0;
+      statsWrite.dstArrayElement = 0;
+      statsWrite.descriptorCount = 1;
+      statsWrite.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      statsWrite.pBufferInfo     = &statsBufInfo;
+
+      s_vk.vkUpdateDescriptorSets(device, 1, &statsWrite, 0, nullptr);
+
       Vegas::s_fgStatsBuffer  = reinterpret_cast<uint64_t>(statsBuf);
-      Vegas::s_fgStatsMemory   = reinterpret_cast<uint64_t>(mem);
-      Vegas::s_fgStatsMapping  = reinterpret_cast<uint64_t>(mapPtr);
-      Vegas::s_fgStatsLayout   = reinterpret_cast<uint64_t>(statsLayout);
-      Vegas::s_fgStatsPool     = reinterpret_cast<uint64_t>(statsPool);
-      Vegas::s_fgStatsSeq      = 0;
-      Vegas::s_fgStatsFrames   = 0;
-      Vegas::s_fgStatsCorrupt  = 0;
+      Vegas::s_fgStatsMemory  = reinterpret_cast<uint64_t>(mem);
+      Vegas::s_fgStatsMapping = reinterpret_cast<uint64_t>(mapPtr);
+      Vegas::s_fgStatsLayout  = reinterpret_cast<uint64_t>(statsLayout);
+      Vegas::s_fgStatsPool    = reinterpret_cast<uint64_t>(statsPool);
+      Vegas::s_fgStatsSet     = reinterpret_cast<uint64_t>(statsSet);
+      Vegas::s_fgStatsFrames  = 0;
+      Vegas::s_fgStatsCorrupt = 0;
     }
 
     // ---- Store as boxed uint64_t ----
@@ -2941,8 +2934,7 @@ namespace dxvk {
   // risk destroying still-executing objects.
   static void fgQueuePending(VkDevice device, VkFence fence,
       VkCommandPool pool, VkCommandBuffer cmdBuf,
-      const VkImageView* views, uint32_t viewCount,
-      uint32_t statsSlotArg) {
+      const VkImageView* views, uint32_t viewCount) {
     if (s_fgPendingCount >= 4) {
       VkResult vr = s_vk.vkWaitForFences(device, 1,
           &s_fgPending[0].fence, VK_TRUE, UINT64_MAX);
@@ -2962,7 +2954,6 @@ namespace dxvk {
       p.pool      = pool;
       p.cmdBuf    = cmdBuf;
       p.viewCount = viewCount;
-      p.statsSlot = statsSlotArg;
       for (uint32_t v = 0; v < viewCount; v++)
         p.views[v] = views[v];
     }
@@ -3540,58 +3531,35 @@ namespace dxvk {
     // Pass 1: Motion search
     // ----------------------------------------------------------------
     s_vk.vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineMotion);
-bool statsEnabled = (Vegas::s_fgStatsSet[0] != 0);
-    // Per-dispatch ring slot: the fill + atomics + readback for THIS
-    // dispatch all target slot = seq % 4.  A timeout-parked CB (pending
-    // list capped at 4) only ever dirties ITS OWN slot, so its late
-    // atomicAdds can never land in the row we log here.
-    uint32_t statsSlot = (Vegas::s_fgStatsSeq++) % 4;
-    // Slot-ownership wait: if a PARKED CB from an earlier timeout still
-    // owns THIS slot (i.e. it timed out on the same slot 4 dispatches
-    // ago), block until its fence signals before the fill+dispatch below
-    // can overwrite the slot.  Without this, slot reuse could race a
-    // still-running parked CB on a non-strictly-FIFO queue.
-    if (statsEnabled) {
-      for (uint32_t i = 0; i < s_fgPendingCount; i++) {
-        if (s_fgPending[i].statsSlot == statsSlot) {
-          s_vk.vkWaitForFences(device, 1, &s_fgPending[i].fence, VK_TRUE, UINT64_MAX);
-          break;
-        }
-      }
-    }
-    // Zero stats words 0..3 of THIS slot before this dispatch accumulates
-    // into them (the previous dispatch's atomicAdds must not carry over).
-    // Word 4 (epoch) is written by the HOST after the fill, below.
-    if (statsEnabled) {
+    // TELEMETRY GATE (env vegas_telemetry=1, default OFF): the fill+bind
+    // below is the whole per-dispatch diagnostic cost, so it is skipped
+    // entirely when the gate is closed.  The buffer + set are still created
+    // and always bound — the motion shader's atomicAdds need a valid target,
+    // and an un-zeroed accumulating buffer is harmless when never read back.
+    if (Vegas::s_fgStatsEnabled) {
+      // Zero stats buffer before this dispatch accumulates into it (the
+      // previous dispatch's block-thread-0 atomicAdds must not carry over).
       s_vk.vkCmdFillBuffer(cmdBuf,
           reinterpret_cast<VkBuffer>(Vegas::s_fgStatsBuffer),
-          statsSlot * 5 * sizeof(uint32_t), 4 * sizeof(uint32_t), 0);
+          0, 4 * sizeof(uint32_t), 0);
       VkBufferMemoryBarrier statsBarrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
       statsBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
       statsBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       statsBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
       statsBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
       statsBarrier.buffer        = reinterpret_cast<VkBuffer>(Vegas::s_fgStatsBuffer);
-      statsBarrier.offset        = statsSlot * 5 * sizeof(uint32_t);
+      statsBarrier.offset        = 0;
       statsBarrier.size          = 4 * sizeof(uint32_t);
       s_vk.vkCmdPipelineBarrier(cmdBuf,
           VK_PIPELINE_STAGE_TRANSFER_BIT,
           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
           0, 0, nullptr, 1, &statsBarrier, 0, nullptr);
-      // Epoch stamp: written host-side (word 4 of THIS slot is outside the
-      // fill range and outside the shader's SSBO struct).  Belt-and-
-      // suspenders canary — with the ring, a parked CB cannot even reach
-      // this slot's words.
-      {
-        uint32_t* ep = reinterpret_cast<uint32_t*>(Vegas::s_fgStatsMapping) + statsSlot * 5 + 4;
-        *ep = ++s_fgStatsEpoch;
-      }
     }
     VkDescriptorSet motionSets[2] = {};
     motionSets[0] = descSets[0];
-    motionSets[1] = reinterpret_cast<VkDescriptorSet>(Vegas::s_fgStatsSet[statsSlot]);
+    motionSets[1] = reinterpret_cast<VkDescriptorSet>(Vegas::s_fgStatsSet);
     s_vk.vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
-        pipelineLayout, 0, statsEnabled ? 2 : 1, motionSets, 0, nullptr);
+        pipelineLayout, 0, 2, motionSets, 0, nullptr);
     uint32_t motionGX = (extent.width  + FG_TILE_SIZE - 1) / FG_TILE_SIZE;
     uint32_t motionGY = (extent.height + FG_TILE_SIZE - 1) / FG_TILE_SIZE;
     {
@@ -3953,7 +3921,7 @@ bool statsEnabled = (Vegas::s_fgStatsSet[0] != 0);
         srcViewCur, srcViewPrev, motionView, motionFilteredView, outputView,
         motionPrevView
       };
-      fgQueuePending(device, fence, cmdPool, cmdBuf, timedViews, 6, statsSlot);
+      fgQueuePending(device, fence, cmdPool, cmdBuf, timedViews, 6);
       if (fgWaitMs > 25.0f)
         s_fgSlowCount = std::min(s_fgSlowCount + 1u, 5u);
       return false;
@@ -3981,59 +3949,46 @@ bool statsEnabled = (Vegas::s_fgStatsSet[0] != 0);
     // Every dispatch (including timeouts that later drained) wrote its
     // own block statistics; log them so the 0.10/0.55 bound behavior is
     // observable in the device log instead of inferred from visuals.
-    // RING GUARD: each dispatch accumulates into its own slot (seq%4);
-    // the readback reads THIS dispatch's slot, and slot reuse is
-    // serialized against the previous owner's parked CB, so the epoch
-    // check below is a belt-and-suspenders canary rather than the
-    // primary defense.
-    if (Vegas::s_fgStatsMapping) {
-      // Read THIS dispatch's slot: (seq-1) because the slot was chosen and
-      // seq incremented at record time.  A timeout-parked CB's atomics can
-      // only have landed in a DIFFERENT slot, so the row below is
-      // guaranteed to be this dispatch's own accumulation.
-      uint32_t slot = (Vegas::s_fgStatsSeq - 1u) % 4u;
-      const uint32_t* stats = reinterpret_cast<const uint32_t*>(Vegas::s_fgStatsMapping) + slot * 5;
-      bool stale;
-      stale = (stats[4] != s_fgStatsEpoch);
-      if (!stale) {
-        uint32_t count = stats[0];
-        uint32_t sumQ  = stats[1];
-        uint32_t zero  = stats[2];
-        uint32_t full  = stats[3];
-        int meanThousand = count ? int((double(sumQ) / double(count) / 65535.0) * 1000.0) : 0;
-        uint32_t zeroPct = count ? zero * 100 / count : 0;
-        uint32_t fullPct = count ? full * 100 / count : 0;
-        // ---- Physical-bounds validation ----
-        // A single clean dispatch cannot exceed this mean: zeroed blocks
-        // contribute <= 0.10, mid blocks < 0.55, full blocks <= 1.0 (all
-        // clamped in-shader).  Rows exceeding the bound MUST be a mix of
-        // two dispatches' atomics (wrapper fence/coherence lie) — drop
-        // them so the bimodal-gate evidence is arithmetically honest.
-        double maxMean = 0.0;
-        if (count > 0) {
-          double zFrac = double(zero) / double(count);
-          double fFrac = double(full) / double(count);
-          double mFrac = (1.0 - zFrac - fFrac > 0.0) ? (1.0 - zFrac - fFrac) : 0.0;
-          maxMean = zFrac * 0.10 + mFrac * 0.55 + fFrac * 1.0;
-        }
-        double mean = double(meanThousand) / 1000.0;
-        if (mean > maxMean + 0.05) {
-          Vegas::s_fgStatsCorrupt++;
-          Logger::debug(str::format(
-            "Vegas FG: stat CORRUPT domMean=", meanThousand / 1000, ".", (meanThousand < 0 ? -meanThousand : meanThousand) % 1000,
-            " blocks=", count, " zero<0.10=", zeroPct, "%",
-            " full>=0.55=", fullPct, "%",
-            " maxMean=", (int)(maxMean * 1000.0) / 1000, ".", (int)(maxMean * 1000.0) % 1000,
-            " (total=", Vegas::s_fgStatsCorrupt, ")"));
-        } else {
-          Logger::debug(str::format(
-            "Vegas FG: stat domMean=", meanThousand / 1000, ".", (meanThousand < 0 ? -meanThousand : meanThousand) % 1000,
-            " blocks=", count, " zero<0.10=", zeroPct, "%",
-            " full>=0.55=", fullPct, "%"));
-        }
+    // GATED: only read back + log when env vegas_telemetry=1.  The buffer
+    // is a single 16B block (words 0..3); the ring slots and the epoch
+    // canary are gone — 2612/2612 rows were arithmetically consistent, so
+    // the parked-CB premise was disproven and there is nothing to canary.
+    if (Vegas::s_fgStatsEnabled && Vegas::s_fgStatsMapping) {
+      const uint32_t* stats = reinterpret_cast<const uint32_t*>(Vegas::s_fgStatsMapping);
+      uint32_t count = stats[0];
+      uint32_t sumQ  = stats[1];
+      uint32_t zero  = stats[2];
+      uint32_t full  = stats[3];
+      int meanThousand = count ? int((double(sumQ) / double(count) / 65535.0) * 1000.0) : 0;
+      uint32_t zeroPct = count ? zero * 100 / count : 0;
+      uint32_t fullPct = count ? full * 100 / count : 0;
+      // ---- Physical-bounds validation ----
+      // A single clean dispatch cannot exceed this mean: zeroed blocks
+      // contribute <= 0.10, mid blocks < 0.55, full blocks <= 1.0 (all
+      // clamped in-shader).  Rows exceeding the bound are physically
+      // impossible for one dispatch's atomics — if one ever appears it is
+      // a genuine anomaly worth investigating, not a log-format artifact.
+      double maxMean = 0.0;
+      if (count > 0) {
+        double zFrac = double(zero) / double(count);
+        double fFrac = double(full) / double(count);
+        double mFrac = (1.0 - zFrac - fFrac > 0.0) ? (1.0 - zFrac - fFrac) : 0.0;
+        maxMean = zFrac * 0.10 + mFrac * 0.55 + fFrac * 1.0;
+      }
+      double mean = double(meanThousand) / 1000.0;
+      if (mean > maxMean + 0.05) {
+        Vegas::s_fgStatsCorrupt++;
+        Logger::debug(str::format(
+          "Vegas FG: stat CORRUPT domMean=", meanThousand / 1000, ".", fmt03(uint32_t(meanThousand % 1000)),
+          " blocks=", count, " zero<0.10=", zeroPct, "%",
+          " full>=0.55=", fullPct, "%",
+          " maxMean=", (int)(maxMean * 1000.0) / 1000, ".", fmt03((uint32_t)((int)(maxMean * 1000.0) % 1000)),
+          " (total=", Vegas::s_fgStatsCorrupt, ")"));
       } else {
         Logger::debug(str::format(
-          "Vegas FG: stat SKIPPED stale epoch (", s_fgStatsEpoch, " vs ", stats[4], ")"));
+          "Vegas FG: stat domMean=", meanThousand / 1000, ".", fmt03(uint32_t(meanThousand % 1000)),
+          " blocks=", count, " zero<0.10=", zeroPct, "%",
+          " full>=0.55=", fullPct, "%"));
       }
       Vegas::s_fgStatsFrames++;
     }

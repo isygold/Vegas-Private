@@ -377,19 +377,18 @@ namespace dxvk {
     // Framegen bimodal-gate diagnostic stats (set 1 / binding 0)
     // Separate pipeline-resource path from the shared 5-binding image
     // layout, so the OOM-era descriptor accounting stays frozen.
-    // RING: one 80B host-visible buffer = 4 slots x 20B (count,sumQ,zero,
-    // full,epoch), one descriptor set per slot.  slot = dispatchSeq % 4.
-    // A timeout-parked CB can only ever write ITS OWN slot; the readback
-    // reads the CURRENT slot, so cross-dispatch contamination (the
-    // arithmetically-impossible domMean rows) is impossible by
-    // construction instead of being detected post-hoc.
-    static uint64_t            s_fgStatsBuffer;       ///< VkBuffer  (80B = 4 x 20B slots)
+    // Stats: one 16B host-visible buffer = 4 words (count,sumQ,zero,full),
+    // one descriptor set (set 1).  Ring slots + epoch canary removed —
+    // 2612/2612 telemetry rows were arithmetically consistent, so the
+    // parked-CB contamination premise was disproven.  Whole diagnostic
+    // path gated by env vegas_telemetry=1 (default OFF).
+    static uint64_t            s_fgStatsBuffer;       ///< VkBuffer  (16B = 4 words)
     static uint64_t            s_fgStatsMemory;       ///< VkDeviceMemory (host-visible)
-    static uint64_t            s_fgStatsMapping;      ///< void*     (persistent map, 20 words)
+    static uint64_t            s_fgStatsMapping;      ///< void*     (persistent map, 4 words)
     static uint64_t            s_fgStatsLayout;       ///< VkDescriptorSetLayout (set 1)
     static uint64_t            s_fgStatsPool;         ///< VkDescriptorPool
-    static uint64_t            s_fgStatsSet[4];       ///< VkDescriptorSet per ring slot (bound in motion pass)
-    static uint32_t            s_fgStatsSeq;          ///< dispatch sequence → slot = seq % 4
+    static uint64_t            s_fgStatsSet;          ///< VkDescriptorSet (bound in motion pass)
+    static bool                s_fgStatsEnabled;      ///< telemetry gate: env vegas_telemetry=1
     static uint32_t            s_fgStatsFrames;       ///< #dispatches w/ readback attempted
     static uint32_t            s_fgStatsCorrupt;      ///< #rows dropped by physical-bounds validation
 
