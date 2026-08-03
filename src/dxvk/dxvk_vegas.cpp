@@ -93,6 +93,7 @@ namespace dxvk {
   uint64_t Vegas::s_fgStatsSet[4]   = {0, 0, 0, 0};
   uint32_t Vegas::s_fgStatsSeq      = 0;
   uint32_t Vegas::s_fgStatsFrames   = 0;
+  uint32_t Vegas::s_fgStatsCorrupt  = 0;
 
 
   // Pending-drain list for the framegen fence-timeout path.  When a
@@ -2700,6 +2701,7 @@ namespace dxvk {
       Vegas::s_fgStatsPool     = reinterpret_cast<uint64_t>(statsPool);
       Vegas::s_fgStatsSeq      = 0;
       Vegas::s_fgStatsFrames   = 0;
+      Vegas::s_fgStatsCorrupt  = 0;
     }
 
     // ---- Store as boxed uint64_t ----
@@ -4001,10 +4003,34 @@ bool statsEnabled = (Vegas::s_fgStatsSet[0] != 0);
         int meanThousand = count ? int((double(sumQ) / double(count) / 65535.0) * 1000.0) : 0;
         uint32_t zeroPct = count ? zero * 100 / count : 0;
         uint32_t fullPct = count ? full * 100 / count : 0;
-        Logger::debug(str::format(
-          "Vegas FG: stat domMean=", meanThousand / 1000, ".", (meanThousand < 0 ? -meanThousand : meanThousand) % 1000,
-          " blocks=", count, " zero<0.10=", zeroPct, "%",
-          " full>=0.55=", fullPct, "%"));
+        // ---- Physical-bounds validation ----
+        // A single clean dispatch cannot exceed this mean: zeroed blocks
+        // contribute <= 0.10, mid blocks < 0.55, full blocks <= 1.0 (all
+        // clamped in-shader).  Rows exceeding the bound MUST be a mix of
+        // two dispatches' atomics (wrapper fence/coherence lie) — drop
+        // them so the bimodal-gate evidence is arithmetically honest.
+        double maxMean = 0.0;
+        if (count > 0) {
+          double zFrac = double(zero) / double(count);
+          double fFrac = double(full) / double(count);
+          double mFrac = (1.0 - zFrac - fFrac > 0.0) ? (1.0 - zFrac - fFrac) : 0.0;
+          maxMean = zFrac * 0.10 + mFrac * 0.55 + fFrac * 1.0;
+        }
+        double mean = double(meanThousand) / 1000.0;
+        if (mean > maxMean + 0.05) {
+          Vegas::s_fgStatsCorrupt++;
+          Logger::debug(str::format(
+            "Vegas FG: stat CORRUPT domMean=", meanThousand / 1000, ".", (meanThousand < 0 ? -meanThousand : meanThousand) % 1000,
+            " blocks=", count, " zero<0.10=", zeroPct, "%",
+            " full>=0.55=", fullPct, "%",
+            " maxMean=", (int)(maxMean * 1000.0) / 1000, ".", (int)(maxMean * 1000.0) % 1000,
+            " (total=", Vegas::s_fgStatsCorrupt, ")"));
+        } else {
+          Logger::debug(str::format(
+            "Vegas FG: stat domMean=", meanThousand / 1000, ".", (meanThousand < 0 ? -meanThousand : meanThousand) % 1000,
+            " blocks=", count, " zero<0.10=", zeroPct, "%",
+            " full>=0.55=", fullPct, "%"));
+        }
       } else {
         Logger::debug(str::format(
           "Vegas FG: stat SKIPPED stale epoch (", s_fgStatsEpoch, " vs ", stats[4], ")"));

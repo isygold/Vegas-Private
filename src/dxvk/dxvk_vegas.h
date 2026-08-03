@@ -391,6 +391,7 @@ namespace dxvk {
     static uint64_t            s_fgStatsSet[4];       ///< VkDescriptorSet per ring slot (bound in motion pass)
     static uint32_t            s_fgStatsSeq;          ///< dispatch sequence → slot = seq % 4
     static uint32_t            s_fgStatsFrames;       ///< #dispatches w/ readback attempted
+    static uint32_t            s_fgStatsCorrupt;      ///< #rows dropped by physical-bounds validation
 
     // Framegen intermediate images
     static bool                s_fgPrevValid;         ///< true after first frame saved to prev
