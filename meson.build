@@ -190,7 +190,12 @@ glsl_generator = generator(
 )
 
 dxvk_version = vcs_tag(
-  command: ['git', 'describe', '--dirty=-1-vegas'],
+  # --always: never fails on tag-less/shallow checkouts (GHA fetch-depth: 1).
+  # With tags: "v2.4.1-V-28-g723945e"; without: bare short hash "723945e".
+  # The build must always self-identify its commit for device-side
+  # binary identity verification (HUD/banner "VEGAS <hash>").
+  command: ['git', 'describe', '--always', '--dirty=-1-vegas'],
+  fallback: 'unknown-commit',
   input:  'version.h.in',
   output: 'version.h',
 )
