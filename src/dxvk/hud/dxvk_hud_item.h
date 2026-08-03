@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -190,7 +191,7 @@ namespace dxvk::hud {
     std::vector<uint32_t>  m_onlineIds;
     std::vector<std::string> m_rows;
 
-    dxvk::steady_clock::time_point m_lastSample;
+    std::chrono::steady_clock::time_point m_lastSample;
 
   };
 

@@ -160,12 +160,12 @@ namespace dxvk::hud {
   HudCpuItem::HudCpuItem() {
     // Far-past timestamp forces an immediate first sample; the first
     // deltas are then available one interval later (no "--" stall).
-    m_lastSample = dxvk::steady_clock::time_point::min();
+    m_lastSample = std::chrono::steady_clock::time_point::min();
   }
 
 
   void HudCpuItem::sample() {
-    const auto now = dxvk::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
     if (now - m_lastSample < std::chrono::milliseconds(1000))
       return;
     m_lastSample = now;
