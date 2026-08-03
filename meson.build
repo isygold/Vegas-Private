@@ -196,9 +196,7 @@ dxvk_version = vcs_tag(
   # fails there; fall back to GITHUB_SHA (default GHA env var injected
   # into container steps) so the build still self-identifies its commit
   # in every environment (HUD/banner "VEGAS <hash>").
-  command: ['sh', '-c',
-    'git describe --always --dirty=-1-vegas 2>/dev/null || '
-    '{ test -n "$GITHUB_SHA" && echo "$GITHUB_SHA" | cut -c1-7 || echo unknown-commit; }'],
+  command: ['sh', '-c', 'git describe --always --dirty=-1-vegas 2>/dev/null || { test -n "$GITHUB_SHA" && echo "$GITHUB_SHA" | cut -c1-7 || echo unknown-commit; }'],
   fallback: 'unknown-commit',
   input:  'version.h.in',
   output: 'version.h',
