@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <sstream>
 #include <version.h>
+#include "../../util/log/log.h"
 
 namespace dxvk::hud {
 
@@ -54,6 +55,12 @@ namespace dxvk::hud {
       m_enabled.insert("devinfo");
       m_enabled.insert("fps");
     }
+
+    // DEBUG: resolved HUD config source + enabled token set (temp)
+    Logger::info(str::format("HUD debug: env DXVK_HUD=\"", env::getEnvVar("DXVK_HUD"), "\""));
+    Logger::info(str::format("HUD debug: resolved configStr=\"", configStr, "\""));
+    for (const auto& tok : m_enabled)
+      Logger::info(str::format("HUD debug: enabled=\"", tok, "\""));
   }
 
 
@@ -248,6 +255,11 @@ namespace dxvk::hud {
     if (row == "Cpu:" && m_rows.empty())
       row += " --";                  // no core mask readable
     m_rows.push_back(row);
+
+    // DEBUG: cpu HUD sample result (temp)
+    Logger::info(str::format("HUD debug: cpu rows=", m_rows.size()));
+    if (!m_rows.empty())
+      Logger::info(str::format("HUD debug: cpu row0=\"", m_rows.front(), "\""));
   }
 
 
