@@ -1,6 +1,10 @@
 #include "dxvk_hud_item.h"
 
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
 #include <iomanip>
+#include <sstream>
 #include <version.h>
 
 namespace dxvk::hud {
@@ -91,9 +95,176 @@ namespace dxvk::hud {
     renderer.drawText(16.0f,
       { position.x, position.y },
       { 1.0f, 1.0f, 1.0f, 1.0f },
-      "VEGAS " DXVK_VERSION);
+      "VEGAS " DXVK_RELEASE);
 
     position.y += 8.0f;
+    return position;
+  }
+
+
+  HudPos HudCommitItem::render(
+          HudRenderer&      renderer,
+          HudPos            position) {
+    position.y += 16.0f;
+
+    // Short commit identity only.  git-describe tags carry "-g<hash>"
+    // ("2.4.1-11-g8d2f1f7" -> "-g8d2f1f7"); GHA builds are a raw short
+    // hash ("f48d326") with no "-g" — printed as-is.
+    std::string commit = DXVK_VERSION;
+    const size_t pos = commit.rfind("-g");
+    if (pos != std::string::npos)
+      commit = commit.substr(pos);
+
+    renderer.drawText(16.0f,
+      { position.x, position.y },
+      { 1.0f, 1.0f, 1.0f, 1.0f },
+      str::format("Commit: ", commit));
+
+    position.y += 8.0f;
+    return position;
+  }
+
+
+  // Expand a kernel cpu list ("0-3,8-11", "0,2,4", "0") to core ids in
+  // ascending order.  Malformed tokens and inverted ranges are skipped.
+  static std::vector<uint32_t> expandCpuList(const std::string& list) {
+    std::vector<uint32_t> ids;
+    size_t pos = 0;
+    while (pos < list.size()) {
+      size_t comma = list.find(',', pos);
+      std::string token = list.substr(pos,
+        comma == std::string::npos ? std::string::npos : comma - pos);
+      size_t dash = token.find('-');
+      if (dash == std::string::npos) {
+        uint32_t id = std::atoi(token.c_str());
+        if (id < HudCpuItem::CpuMaxCores)
+          ids.push_back(id);
+      } else {
+        uint32_t lo = std::atoi(token.substr(0, dash).c_str());
+        uint32_t hi = std::atoi(token.substr(dash + 1).c_str());
+        if (hi >= lo) {
+          for (uint32_t id = lo; id <= hi; id++) {
+            if (id < HudCpuItem::CpuMaxCores)
+              ids.push_back(id);
+          }
+        }
+      }
+      if (comma == std::string::npos)
+        break;
+      pos = comma + 1;
+    }
+    return ids;
+  }
+
+
+  HudCpuItem::HudCpuItem() {
+    // Far-past timestamp forces an immediate first sample; the first
+    // deltas are then available one interval later (no "--" stall).
+    m_lastSample = dxvk::steady_clock::time_point::min();
+  }
+
+
+  void HudCpuItem::sample() {
+    const auto now = dxvk::steady_clock::now();
+    if (now - m_lastSample < std::chrono::milliseconds(1000))
+      return;
+    m_lastSample = now;
+
+    // Active core ids from the kernel hotplug mask.
+    std::ifstream onlineFile("/sys/devices/system/cpu/online");
+    std::string onlineStr;
+    if (onlineFile)
+      std::getline(onlineFile, onlineStr);
+    m_onlineIds = expandCpuList(onlineStr);
+
+    // Cores that left the online set lose their delta base so a hotplug
+    // return cannot produce a stale-range load.
+    for (uint32_t i = 0; i < HudCpuItem::CpuMaxCores; i++) {
+      bool online = false;
+      for (uint32_t id : m_onlineIds) {
+        if (id == i) { online = true; break; }
+      }
+      if (!online)
+        m_prevValid[i] = false;
+    }
+
+    // Per-core loads from /proc/stat.  The aggregate line ("cpu ") is
+    // skipped; busy excludes idle + iowait so I/O waits do not inflate
+    // the reported compute load.
+    uint32_t pctById[HudCpuItem::CpuMaxCores]  = {};
+    bool     validById[HudCpuItem::CpuMaxCores] = {};
+    std::ifstream statFile("/proc/stat");
+    if (statFile) {
+      std::string line;
+      while (std::getline(statFile, line)) {
+        if (line.rfind("cpu", 0) != 0)
+          break;                     // non-cpu lines follow the cpu block
+        if (line.size() <= 3 || line[3] == ' ')
+          continue;                  // aggregate "cpu  ..." line
+        uint32_t id = std::atoi(line.substr(3).c_str());
+        if (id >= HudCpuItem::CpuMaxCores)
+          continue;
+        uint64_t fields[7] = { 0, 0, 0, 0, 0, 0, 0 };
+        std::istringstream ss(line.substr(3));
+        std::string idStr;
+        ss >> idStr;
+        int fieldIdx = 0;
+        while (fieldIdx < 7 && (ss >> fields[fieldIdx]))
+          fieldIdx++;
+        // user nice system idle iowait irq softirq
+        uint64_t idle  = fields[3] + fields[4];
+        uint64_t total = fields[0] + fields[1] + fields[2] + fields[3]
+                       + fields[4] + fields[5] + fields[6];
+        if (m_prevValid[id] && total >= m_prevTotal[id] && idle >= m_prevIdle[id]) {
+          uint64_t dIdle  = idle - m_prevIdle[id];
+          uint64_t dTotal = total - m_prevTotal[id];
+          if (dTotal > 0) {
+            pctById[id]  = uint32_t((dTotal - dIdle) * 100 / dTotal);
+            validById[id] = true;
+          }
+        }
+        m_prevIdle[id]  = idle;
+        m_prevTotal[id] = total;
+        m_prevValid[id] = true;
+      }
+    }
+
+    // Build display rows, up to 4 cores per row to keep the line width
+    // within the HUD text area on phone screens.
+    m_rows.clear();
+    std::string row = "Cpu:";
+    uint32_t inRow = 0;
+    for (uint32_t id : m_onlineIds) {
+      std::string entry = str::format(" C", id, " ",
+        validById[id] ? std::to_string(pctById[id]) : "--", "%");
+      if (inRow >= 4) {
+        m_rows.push_back(row);
+        row.clear();
+        inRow = 0;
+      }
+      row += entry;
+      inRow++;
+    }
+    if (row == "Cpu:" && m_rows.empty())
+      row += " --";                  // no core mask readable
+    m_rows.push_back(row);
+  }
+
+
+  HudPos HudCpuItem::render(
+          HudRenderer&      renderer,
+          HudPos            position) {
+    sample();
+
+    position.y += 16.0f;
+
+    for (const std::string& row : m_rows) {
+      renderer.drawText(16.0f,
+        { position.x, position.y },
+        { 1.0f, 1.0f, 1.0f, 1.0f },
+        row);
+      position.y += 8.0f;
+    }
     return position;
   }
 

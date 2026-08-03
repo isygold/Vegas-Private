@@ -122,6 +122,16 @@ namespace dxvk {
   // the watchdog reliably.
   static uint32_t           s_fgSlowCount    = 0;
 
+  // Saturation-skip state (adaptive dispatch): when s_fgSlowCount trips,
+  // framegenDispatch returns false early (native present, no dispatch, no
+  // fence wait) instead of stalling the present thread on a saturated
+  // queue.  After FG_SKIP_WINDOW consecutive skipped frames a re-arm
+  // probe runs one dispatch to test whether the queue recovered — without
+  // it the skip would latch forever, since the counter only decays on
+  // clean dispatch waits.
+  static constexpr uint32_t FG_SKIP_WINDOW   = 60;
+  static uint32_t           s_fgSkipFrames   = 0;
+
   // Zero-pad a value to exactly 3 digits ("97" -> "097").  str::format is
   // stringstream-based (no printf %-flags), and the stat logs print a
   // manual "%.3f"-style mean — without this, domMean=0.097 would log as
@@ -2998,6 +3008,31 @@ namespace dxvk {
     if (!loadVulkanFuncs(device)) {
       Logger::debug("Vegas FG: skipped — Vulkan functions not available");
       return false;
+    }
+
+    // ================================================================
+    // Saturation skip (adaptive dispatch).  The watchdog (s_fgSlowCount,
+    // incremented on >25ms fence waits, capped at 5) tripping means the
+    // shared graphics queue is saturated: the 50ms dispatch fence wait
+    // stalls the present thread and FG-on runs SLOWER than FG-off (TR13
+    // test, 2026-08-03).  Present native instead — no motion/warp/blend
+    // dispatch, no fence wait, no parked CB.  Re-arm: after
+    // FG_SKIP_WINDOW skipped frames run one probe dispatch (slowCount
+    // reset to 4 so a single slow wait re-trips immediately; a clean
+    // wait decays normally and FG stays on).  s_fgPrevValid is cleared
+    // so the probe frame takes the capture path below — fresh prev
+    // reference, native present, then normal generation resumes.
+    // ================================================================
+    if (s_fgSlowCount >= 5) {
+      if (s_fgSkipFrames == 0)
+        Logger::debug("Vegas FG: saturated — presenting native (skip window)");
+      s_fgSkipFrames++;
+      if (s_fgSkipFrames < FG_SKIP_WINDOW)
+        return false;
+      s_fgSkipFrames = 0;
+      s_fgSlowCount  = 4;
+      s_fgPrevValid  = false;
+      Logger::debug("Vegas FG: re-arm probe — resuming framegen");
     }
 
     // Free resources from a previous fence-timeout before this frame

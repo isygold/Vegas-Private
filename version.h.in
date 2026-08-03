@@ -1,3 +1,8 @@
 #pragma once
 
 #define DXVK_VERSION "@VCS_TAG@"
+
+// Static release string for HUD display (kept in sync with the meson
+// project() version).  The HUD version line shows the release; the full
+// identity (release + commit) stays in DXVK_VERSION for the banner/log.
+#define DXVK_RELEASE "v2.4.1"
