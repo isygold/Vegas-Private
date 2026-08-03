@@ -3142,7 +3142,7 @@ namespace dxvk {
         // CB may still be executing — park the resources and let a later
         // dispatch destroy them once the fence signals.
         Logger::warn(str::format("Vegas FG: first-frame capture wait failed (", vr, ")"));
-        fgQueuePending(device, fence, cmdPool, cmdBuf, nullptr, 0, UINT32_MAX);
+        fgQueuePending(device, fence, cmdPool, cmdBuf, nullptr, 0);
         return false;
       }
 
