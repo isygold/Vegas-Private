@@ -752,6 +752,11 @@ namespace dxvk {
   // not when the GPU is saturated. Inverted from the original logic.
   // Tier 1 (Adreno 610) excluded — compute budget insufficient for 3-pass.
   bool Vegas::needsFrameGen(float frameTime, uint32_t tier) {
+      // User toggle: vegas.enableFramegen = True force-enables framegen
+      // regardless of tier (e.g. Tier 1 testing).
+      auto dev = s_dxvkDevice;
+      if (dev != nullptr && dev->config().vegasEnableFramegen == Tristate::True)
+        return true;
       if (tier == 1) return false;
       if (tier == 2) return frameTime <= 29.0f;  // ≥34 FPS headroom
       return frameTime <= 33.0f;                   // ≥30 FPS headroom
@@ -2896,6 +2901,11 @@ namespace dxvk {
 
   /** Returns true if the Frame Generator has a valid VkDevice/VkQueue. */
   bool Vegas::isFrameGenReady() {
+    // User toggle: vegas.enableFramegen = False disables framegen entirely,
+    // irrespective of tier. True is handled in needsFrameGen (force-enable).
+    auto dev = s_dxvkDevice;
+    if (dev != nullptr && dev->config().vegasEnableFramegen == Tristate::False)
+      return false;
     return s_device != nullptr;
   }
 

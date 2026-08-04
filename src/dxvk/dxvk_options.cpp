@@ -26,6 +26,7 @@ namespace dxvk {
 
     enableStarProfile   = config.getOption<Tristate>("dxvk.enableStarProfile",   Tristate::Auto);
     vegasForceTier      = config.getOption<int32_t> ("vegas.forceTier",          0);
+    vegasEnableFramegen = config.getOption<Tristate>("vegas.enableFramegen",     Tristate::Auto);
 
   }
 

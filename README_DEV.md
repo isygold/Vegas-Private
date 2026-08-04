@@ -83,11 +83,11 @@ InitializeProfile(DxvkDevice*)
   -> called once from dxvk_vegas.cpp configure()
 
 Per-Frame (D3D11SwapChain::PresentImage / D3D9SwapChainEx::PresentImage):
-  Vegas::onPresent() — frame counter + FPS histogram for session reports
-  measure frameTime
-  -> compute GPU load from frameTime/target ratio
-  -> pushMetrics() -> stores gpuLoad, frameTime, perfState in Vegas statics
-  -> updateFrameTiming() -> calculateThreshold() -> endOfFrameCleanup() (gov v4.1)
+   Vegas::onPresent() — frame counter + FPS histogram for session reports
+   measure frameTime
+   -> compute GPU load from frameTime/target ratio
+   -> pushMetrics() -> stores gpuLoad, frameTime, perfState in Vegas statics
+   -> updateFrameTiming() -> calculateThreshold() -> endOfFrameCleanup() (gov v4.2.1d)
   -> shouldUpscale() -> FSR dispatch (cross-DLL safe in d3d11.dll)
   -> needsFrameGen() -> framegenDispatch() if eligible
 
@@ -375,7 +375,8 @@ would not be visually beneficial.
 | Function | Lines | Purpose |
 |----------|-------|---------|
 | `Vegas::framegenDispatch()` | ~2000-3000 | Full 3-pass motion-compensated FG |
-| `Vegas::needsFrameGen()` | ~330 | Tier-based eligibility |
+| `Vegas::needsFrameGen()` | ~330 | Tier-based eligibility + user toggle |
+| `Vegas::isFrameGenReady()` | ~2898 | Device-ready gate + user toggle |
 | `initFgPipeline(VkDevice)` | ~1800-2000 | Creates 3 compute pipelines |
 
 **3 Passes:**
@@ -383,14 +384,26 @@ would not be visually beneficial.
 2. Median filter (3x3 spatial denoise on motion field)
 3. Warp + blend (warp prev frame by filtered motion, alpha-blend at 0.5)
 
-**Eligibility:**
+**Eligibility (Auto mode):**
 - Tier 1: never (compute budget insufficient)
 - Tier 2: frameTime <= 29ms
 - Tier 3: frameTime <= 33ms
 
+**User toggle (`vegas.enableFramegen`):**
+- **Auto** (default): tier + headroom gate as above
+- **True**: force-enable regardless of tier (e.g. Tier 1 testing)
+- **False**: disable entirely, irrespective of tier
+
 **Framegen timeout:** If GPU dispatch takes longer than 50ms, the frame is
 skipped (calls `fgCleanup(8)` and returns false). Prevents present thread
 deadlock on stalled GPU.
+
+**What is frame generation?** Frame generation (sometimes called "motion
+interpolation") analyses the motion between two consecutively rendered
+frames and synthesises an in-between frame. The GPU still renders at the
+native framerate, but the display shows twice as many frames — smoother
+motion at the same rendering cost. The mobile equivalent of DLSS 3 Frame
+Generation.
 
 ---
 
@@ -410,6 +423,11 @@ The version string shows "VEGAS" branding instead of "DXVK".
 **Frame-skip optimization (C3):** `pushMetrics()` writes data only every 5th
 call via `thread_local s_hudSkip` counter. HUD updates at ~12fps instead of
 ~60fps — smooth enough for monitoring, zero impact on render path.
+
+**Removed tokens:** The per-core `cpu` HUD item (HudCpuItem) was removed
+in ff2e377 — it performed /proc + /sys reads at 1 Hz and added a noisy
+row to the HUD. Valid VEGAS HUD tokens now: devinfo, fps, frametimes,
+gpuload, vegas, version, commit.
 
 **Data flow:**
 ```
@@ -542,6 +560,7 @@ else   -> 0.25 (lots of headroom)
 | `dxvk.enableAsync` | bool | true | `dxvk_options.h:29` | Async pipeline compilation |
 | `dxvk.gplAsyncCache` | bool | false | `dxvk_options.h:31` | GPL state cache with fixes |
 | `dxvk.enableStarProfile` | Tristate | Auto | `dxvk_options.h:52` | Master switch for VEGAS features |
+| `vegas.enableFramegen` | Tristate | Auto | `dxvk_options.h:56` | Frame generation toggle (Auto/Tier gate, True/force, False/disable) |
 | `vegas.forceTier` | int32 | 0 | `dxvk_options.h:55` | Override GPU tier detection |
 | `dxvk.enableGraphicsPipelineLibrary` | Tristate | Auto | `dxvk_options.h:23` | Vulkan GPL support |
 | `dxvk.numCompilerThreads` | int32 | 0 | `dxvk_options.h:20` | Override compiler thread count |
@@ -689,9 +708,10 @@ The GPLAsync patch for DXVK 2.4 was created by **Ph42oN**
 - **Lead Developer:** isygold
 - **Base Project:** DXVK v2.4.1 by doitsujin
 - **FSR 1.0:** AMD GPUOpen (EASU compute shader)
+- **Framegen Testing:** @devaspe — on-device validation of the motion-compensated frame generator
 - **Testing & Feedback:** @H0tIce77 — consistent Adreno device testing and detailed logs since Star Engine DXVK 2.7.2.1
 - **License:** zlib/libpng
 
 ---
 
-*Last updated: 2026-07-31 | Branch: release-v2.4.1 (tag v2.4.1-V)*
+*Last updated: 2026-08-04 | Branch: release-v2.4.1 (tag v2.4.1-V)*

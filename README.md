@@ -48,6 +48,13 @@ Available on Tier 2 (<= 29ms frametime) and Tier 3 (<= 33ms frametime):
 
 Compute-only pipeline. Disabled on Tier 1 (insufficient compute budget).
 
+Frame generation (sometimes called "motion interpolation" or "fake frames") works by analysing the motion between two consecutively rendered frames and synthesising an in-between frame. The result is smoother motion at the same rendering cost — the GPU still renders at the native framerate, but the display shows twice as many frames. Think of it as the mobile equivalent of DLSS 3 Frame Generation.
+
+Toggle with `vegas.enableFramegen`:
+- **Auto** (default): enabled on Tier 2/3 when headroom allows
+- **True**: force-enable regardless of tier (useful for testing)
+- **False**: disable entirely, even on capable hardware
+
 ### Adaptive Governor — TBDR-Aware Submission Pacing
 Three-function pipeline running each frame (`updateFrameTiming` → `calculateThreshold` → `endOfFrameCleanup`):
 - **Draw-load density metric** (draws/ms, EMA-smoothed) — the reliable geometry signal under Wine where the classic GPU-load sensor is broken
@@ -75,6 +82,7 @@ Crash detection: if the game crashes or is force-killed, the orphaned marker fil
 - Lightweight performance HUD with frame-skip optimization (updates every 5th frame)
 - Draw call count, frame time, GPU load, tier info
 - Configurable via standard `DXVK_HUD` environment variable
+- Legacy `cpu` token (per-core CPU load) was removed in this build
 
 ### Dynamic VRAM & GPU Mask
 - VRAM clamped to ~40% of system RAM (1-4 GB range)
@@ -118,6 +126,9 @@ Or set `DXVK_CONFIG_FILE` to your config path.
 # Master switch: Auto (Adreno only), True (force-on), False (force-off)
 dxvk.enableStarProfile = Auto
 
+# Frame generation: Auto (tier-gated), True (force), False (disable)
+vegas.enableFramegen = Auto
+
 # Async shader compilation: True (default), False
 dxvk.enableAsync = True
 
@@ -155,7 +166,7 @@ All other parameters (draw thresholds, bind skip, HAAE pacing, quality scaling) 
 - **Synthetic benchmarks:** May show lower FPS than stock due to draw thresholds. Judge performance by actual gameplay smoothness.
 - **GPU-bound workloads:** VSync-off provides negligible gain when the GPU is already saturated (17+ ms frame times).
 - **Bake thresholds `{100,200,350}` are Ph42oN GPLAsync battle-tested defaults.** Unity games automatically receive `{200,400,700}` via the game preset system. These are the governor's seed values — the runtime threshold is recomputed every frame from the draw-load predictor and never drops below `floorMinimumCap` (600). Thresholds do NOT affect rendering correctness — every draw call still renders, just with more efficient batching.
-- **Governor v4.2 (tile-overflow safety).** The split logic counts every draw type (including indirect draws), measures draws since the last submission rather than per-frame totals, and enforces a 600-draw per-render-pass safety floor. Bind-skip is invalidated at every command-buffer boundary so a mid-frame flush can never leave geometry unbound. Verified smooth on Tomb Raider (2013) and Hollow Knight on Adreno 610 — zero tile-overflow artifacts, zero governor flushes at steady state.
+- **Governor v4.2.1d (final).** The split logic counts every draw type (including indirect draws), measures draws since the last submission rather than per-frame totals, and enforces a 600-draw per-render-pass safety floor. Bind-skip is invalidated at every command-buffer boundary so a mid-frame flush can never leave geometry unbound. Verified smooth on Tomb Raider (2013) and Hollow Knight on Adreno 610 — zero tile-overflow artifacts, zero governor flushes at steady state.
 
 ---
 
@@ -194,6 +205,7 @@ A: Every game session auto-generates `vegas-<game>.report.json` and `vegas-<game
 - **GPLAsync Patch:** Ph42oN (dxvk-gplasync v2.4-1), ishitatsuyuki (upstream GPLAsync)
 - **FSR 1.0:** AMD GPUOpen (EASU compute shader)
 - **Testing & Feedback:** @H0tIce77 — consistent Adreno device testing and detailed logs since Star Engine DXVK 2.7.2.1
+- **Framegen Testing:** @devaspe
 - **License:** zlib/libpng
 
 ---

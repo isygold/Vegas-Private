@@ -54,6 +54,10 @@ namespace dxvk {
     /// Force GPU tier (0 = auto, 1-3 = manual override)
     int32_t vegasForceTier = 0;
 
+    /// Frame generation toggle (Auto = tier + headroom gate,
+    /// True = force enable regardless of tier, False = disable)
+    Tristate vegasEnableFramegen = Tristate::Auto;
+
   };
 
 }
