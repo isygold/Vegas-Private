@@ -157,46 +157,6 @@ namespace dxvk::hud {
 
 
   /**
-   * \brief HUD item to display per-core CPU load
-   *
-   * Lists each ACTIVE core (from the kernel hotplug online mask) with
-   * its own load percentage, e.g. "Cpu: C0 12%  C4 80%  C6 45%".
-   * Loads are /proc/stat per-core tick deltas (busy = total - idle -
-   * iowait), sampled at 1 Hz — no per-frame file I/O.  Off by default;
-   * enable with DXVK_HUD=cpu.
-   */
-  class HudCpuItem : public HudItem {
-
-  public:
-
-    static constexpr uint32_t CpuMaxCores = 64;
-
-    HudCpuItem();
-
-    HudPos render(
-            HudRenderer&      renderer,
-            HudPos            position);
-
-  private:
-
-    void sample();
-
-    // Per-core tick deltas keyed by core id.  A core that leaves the
-    // online set has its base cleared so a hotplug return cannot
-    // produce a stale-range load.
-    uint64_t m_prevIdle[CpuMaxCores]  = {};
-    uint64_t m_prevTotal[CpuMaxCores] = {};
-    bool     m_prevValid[CpuMaxCores] = {};
-
-    std::vector<uint32_t>  m_onlineIds;
-    std::vector<std::string> m_rows;
-
-    std::chrono::steady_clock::time_point m_lastSample;
-
-  };
-
-
-  /**
    * \brief HUD item to display the client API
    */
   class HudClientApiItem : public HudItem {
