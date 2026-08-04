@@ -924,9 +924,12 @@ namespace dxvk {
       // back buffer into the WSI image. Fail-closed: any error leaves
       // the blit result in place (bilinear), so the frame is never stale.
       if (Vegas::isEnabled() && cFsrEnabled) {
+        // Lambda by-value captures are const — fsrUpscale takes a
+        // non-const ref, so hand it a mutable local copy.
+        VegasFsrConstants cFsr = cFsrConsts;
         Vegas::fsrUpscale(
           cFsrSrcImage, cFgImage,
-          cFsrSrcExtent, cFgExtent, cFgFormat, cFsrConsts);
+          cFsrSrcExtent, cFgExtent, cFgFormat, cFsr);
       }
 
       // Vegas: framegen dispatch. Runs on the same graphics queue AFTER
