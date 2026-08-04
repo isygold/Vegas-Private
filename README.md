@@ -69,6 +69,22 @@ Toggle with `vegas.enableFramegen`:
 - **True**: force-enable regardless of tier (useful for testing)
 - **False**: disable entirely, even on capable hardware
 
+### FSR Upscaler (FidelityFX Super Resolution 1.0 EASU)
+Spatial upscaler that sharpens and rescales the back buffer to the
+presentation surface. Runs **before** framegen in the present path:
+FSR upscales (spatial), then framegen interpolates (temporal) — the
+smoother-motion benefit stacks on the sharper image.
+
+Toggle with `vegas.enableUpscaler`:
+- **Auto** (default): upscale only when the back buffer is meaningfully
+  smaller than the presentation surface (games rendering at internal
+  resolutions below the screen)
+- **True**: force upscale regardless of size (testing only)
+- **False**: disable entirely
+
+Note: FSR adds latency from the compute pass. Combined FSR + framegen is
+supported, but treat both-on as experimental — see the Disclaimer above.
+
 ### Adaptive Governor — TBDR-Aware Submission Pacing
 Three-function pipeline running each frame (`updateFrameTiming` → `calculateThreshold` → `endOfFrameCleanup`):
 - **Draw-load density metric** (draws/ms, EMA-smoothed) — the reliable geometry signal under Wine where the classic GPU-load sensor is broken
@@ -142,6 +158,9 @@ dxvk.enableStarProfile = Auto
 
 # Frame generation: Auto (tier-gated), True (force), False (disable)
 vegas.enableFramegen = Auto
+
+# FSR upscaler: Auto (back buffer < 85% of surface), True (force), False (disable)
+vegas.enableUpscaler = Auto
 
 # Async shader compilation: True (default), False
 dxvk.enableAsync = True

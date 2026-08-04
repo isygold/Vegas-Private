@@ -1313,9 +1313,122 @@ namespace dxvk {
   bool Vegas::ensureFsrIntermediate(
           VkDevice             device,
           VkExtent3D           extent) {
-    // Stub: assume intermediate image exists (caller will create it
-    // if needed).  Full implementation would manage a persistent
-    // VkImage with STORAGE_BIT for async FSR dispatch.
+    // Lazy, one-time load of the Vulkan function table.
+    if (!s_vk.loaded && !loadVulkanFuncs(device))
+      return false;
+
+    VkImage  interImage = reinterpret_cast<VkImage>(s_fsrInterImage);
+    VkDeviceMemory interMem = reinterpret_cast<VkDeviceMemory>(s_fsrInterMemory);
+
+    // Already exists at the right size — ready for EASU dispatch.
+    if (interImage != VK_NULL_HANDLE
+        && s_fsrInterW == extent.width && s_fsrInterH == extent.height)
+      return true;
+
+    // Recreate on dimension change (swapchain resize).
+    if (interImage != VK_NULL_HANDLE) {
+      s_vk.vkDestroyImageView(device,
+        reinterpret_cast<VkImageView>(s_fsrInterView), nullptr);
+      s_vk.vkDestroyImage(device, interImage, nullptr);
+      if (interMem != VK_NULL_HANDLE)
+        s_vk.vkFreeMemory(device, interMem, nullptr);
+      s_fsrInterImage  = 0;
+      s_fsrInterMemory = 0;
+      s_fsrInterView   = 0;
+      s_fsrInterW = 0;
+      s_fsrInterH = 0;
+    }
+
+    // R8G8B8A8_UNORM guarantees STORAGE support; swapchain format is
+    // converted at blit time (EASU operates in the intermediate only).
+    VkImageCreateInfo imgCI = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    imgCI.imageType     = VK_IMAGE_TYPE_2D;
+    imgCI.format        = VK_FORMAT_R8G8B8A8_UNORM;
+    imgCI.extent        = { extent.width, extent.height, 1 };
+    imgCI.mipLevels     = 1;
+    imgCI.arrayLayers   = 1;
+    imgCI.samples       = VK_SAMPLE_COUNT_1_BIT;
+    imgCI.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    imgCI.usage         = VK_IMAGE_USAGE_STORAGE_BIT
+                        | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                        | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    imgCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkResult vr = s_vk.vkCreateImage(device, &imgCI, nullptr, &interImage);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkCreateImage(intermediate) failed (", vr, ")"));
+      return false;
+    }
+
+    VkMemoryRequirements memReq;
+    s_vk.vkGetImageMemoryRequirements(device, interImage, &memReq);
+
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    if (s_vk.vkGetPhysicalDeviceMemoryProperties != nullptr)
+      s_vk.vkGetPhysicalDeviceMemoryProperties(
+        reinterpret_cast<VkPhysicalDevice>(s_physicalDevice), &memProps);
+
+    uint32_t memIndex = 0;
+    bool foundMem = false;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+      if ((memReq.memoryTypeBits & (1u << i)) == 0)
+        continue;
+      if ((memProps.memoryTypes[i].propertyFlags
+            & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 0)
+        continue;
+      memIndex  = i;
+      foundMem  = true;
+      break;
+    }
+    if (!foundMem) {
+      Logger::warn("Vegas FSR: no device-local memory type for intermediate image");
+      s_vk.vkDestroyImage(device, interImage, nullptr);
+      return false;
+    }
+
+    VkMemoryAllocateInfo allocAI = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    allocAI.allocationSize  = memReq.size;
+    allocAI.memoryTypeIndex = memIndex;
+
+    VkDeviceMemory interMemNew = VK_NULL_HANDLE;
+    vr = s_vk.vkAllocateMemory(device, &allocAI, nullptr, &interMemNew);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkAllocateMemory(intermediate) failed (", vr, ")"));
+      s_vk.vkDestroyImage(device, interImage, nullptr);
+      return false;
+    }
+
+    vr = s_vk.vkBindImageMemory(device, interImage, interMemNew, 0);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkBindImageMemory(intermediate) failed (", vr, ")"));
+      s_vk.vkFreeMemory(device, interMemNew, nullptr);
+      s_vk.vkDestroyImage(device, interImage, nullptr);
+      return false;
+    }
+
+    VkImageViewCreateInfo viewCI = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    viewCI.viewType            = VK_IMAGE_VIEW_TYPE_2D;
+    viewCI.format              = VK_FORMAT_R8G8B8A8_UNORM;
+    viewCI.image               = interImage;
+    viewCI.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    VkImageView interView = VK_NULL_HANDLE;
+    vr = s_vk.vkCreateImageView(device, &viewCI, nullptr, &interView);
+    if (vr != VK_SUCCESS) {
+      Logger::warn(str::format("Vegas FSR: vkCreateImageView(intermediate) failed (", vr, ")"));
+      s_vk.vkFreeMemory(device, interMemNew, nullptr);
+      s_vk.vkDestroyImage(device, interImage, nullptr);
+      return false;
+    }
+
+    s_fsrInterImage  = reinterpret_cast<uint64_t>(interImage);
+    s_fsrInterMemory = reinterpret_cast<uint64_t>(interMemNew);
+    s_fsrInterView   = reinterpret_cast<uint64_t>(interView);
+    s_fsrInterW      = extent.width;
+    s_fsrInterH      = extent.height;
+
+    Logger::debug(str::format("Vegas FSR: intermediate image ",
+      extent.width, "x", extent.height));
     return true;
   }
 
@@ -1517,7 +1630,11 @@ namespace dxvk {
     // needs COLOR_ATTACHMENT_OUTPUT write visibility; inter + dst
     // have no producer to synchronize with).
     // ----------------------------------------------------------------
-    // Barrier 1a: src PRESENT_SRC_KHR -> GENERAL (for shader read)
+    // Barrier 1a: src UNDEFINED -> GENERAL (for shader read)
+    //   Layout-agnostic source: the back buffer's actual layout at call
+    //   time is game-dependent (typically COLOR_ATTACHMENT_OPTIMAL or
+    //   SHADER_READ_ONLY_OPTIMAL after the presenter blit). UNDEFINED
+    //   accepts any prior layout — same pattern as framegenDispatch.
     //   srcStage/access must cover the COLOR_ATTACHMENT_OUTPUT writes
     //   from the previous render pass that produced srcImage content.
     VkImageMemoryBarrier srcBarrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
@@ -1610,13 +1727,17 @@ namespace dxvk {
         dstImage,   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         1, &blitRegion, VK_FILTER_NEAREST);
 
-    // Barrier 5a: src GENERAL -> PRESENT_SRC_KHR (restore for future acquire)
+    // Barrier 5a: src GENERAL -> SHADER_READ_ONLY_OPTIMAL (restore)
+    //   The back buffer is a plain render target (not a swapchain image);
+    //   DxvkContext tracks its post-blit layout as SHADER_READ_ONLY_OPTIMAL.
+    //   Restoring to that keeps DXVK's layout tracking in sync with the
+    //   actual image state — no divergence on the next blit/render pass.
     VkImageMemoryBarrier srcBack = {};
     srcBack.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     srcBack.srcAccessMask       = VK_ACCESS_SHADER_READ_BIT;
     srcBack.dstAccessMask       = 0;  // no producer — just layout restore
     srcBack.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
-    srcBack.newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    srcBack.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     srcBack.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     srcBack.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     srcBack.image               = srcImage;
@@ -1910,11 +2031,13 @@ namespace dxvk {
       return false;
     }
 
-    // Barrier: src PRESENT_SRC_KHR -> GENERAL (for shader read)
+    // Barrier: src UNDEFINED -> GENERAL (for shader read)
+    //   Layout-agnostic source: back buffer layout is game-dependent
+    //   (mirrors the sync fsrUpscale path).
     VkImageMemoryBarrier srcBarrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
     srcBarrier.srcAccessMask    = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     srcBarrier.dstAccessMask    = VK_ACCESS_SHADER_READ_BIT;
-    srcBarrier.oldLayout        = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    srcBarrier.oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED;
     srcBarrier.newLayout        = VK_IMAGE_LAYOUT_GENERAL;
     srcBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     srcBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1957,13 +2080,15 @@ namespace dxvk {
     uint32_t gy = (dstExtent.height + 15) / 16;
     s_vk.vkCmdDispatch(cmdBuf, gx, gy, 1);
 
-    // Barrier: src GENERAL -> PRESENT_SRC_KHR (restore for next acquire)
+    // Barrier: src GENERAL -> SHADER_READ_ONLY_OPTIMAL (restore)
+    //   Back buffer (not swapchain image); DxvkContext tracks the post-blit
+    //   layout as SHADER_READ_ONLY_OPTIMAL — keep tracking in sync.
     VkImageMemoryBarrier srcBack = {};
     srcBack.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     srcBack.srcAccessMask       = VK_ACCESS_SHADER_READ_BIT;
     srcBack.dstAccessMask       = 0;
     srcBack.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
-    srcBack.newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    srcBack.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     srcBack.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     srcBack.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     srcBack.image               = srcImage;

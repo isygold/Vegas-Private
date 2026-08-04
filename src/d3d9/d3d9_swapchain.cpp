@@ -890,6 +890,17 @@ namespace dxvk {
       m_wctx->presenter->info().imageExtent.height, 1 };
     const VkFormat  cFgFormat  = m_wctx->presenter->info().format.format;
 
+    // Vegas: FSR upscale inputs (spatial upscaler — runs BEFORE framegen).
+    // Source is the d3d9 back buffer (blit source); the WSI image is the
+    // upscale target. Auto mode only upscales when the back buffer is
+    // meaningfully smaller than the presentation surface.
+    const VkImage    cFsrSrcImage  = m_backBuffers[0]->GetCommonTexture()->GetImage()->handle();
+    const VkExtent3D cFsrSrcExtent = m_backBuffers[0]->GetCommonTexture()->GetImage()->info().extent;
+    const bool       cFsrEnabled   = Vegas::shouldUpscale(
+      m_device->config().vegasEnableUpscaler, cFsrSrcExtent, cFgExtent);
+    VegasFsrConstants cFsrConsts = {};
+    Vegas::calculateFsrConstants(cFsrConsts, cFsrSrcExtent, cFgExtent);
+
     m_parent->EmitCs([this,
       cRepeat      = Repeat,
       cSync        = Sync,
@@ -900,10 +911,23 @@ namespace dxvk {
       cFgEnabled,
       cFgImage,
       cFgExtent,
-      cFgFormat
+      cFgFormat,
+      cFsrEnabled,
+      cFsrSrcImage,
+      cFsrSrcExtent,
+      cFsrConsts
     ] (DxvkContext* ctx) {
       cCommandList->setWsiSemaphores(cSync);
       m_device->submitCommandList(cCommandList, nullptr);
+
+      // Vegas: FSR upscale dispatch (spatial) — EASU compute from the
+      // back buffer into the WSI image. Fail-closed: any error leaves
+      // the blit result in place (bilinear), so the frame is never stale.
+      if (Vegas::isEnabled() && cFsrEnabled) {
+        Vegas::fsrUpscale(
+          cFsrSrcImage, cFgImage,
+          cFsrSrcExtent, cFgExtent, cFgFormat, cFsrConsts);
+      }
 
       // Vegas: framegen dispatch. Runs on the same graphics queue AFTER
       // the blit command list (queue ordering guarantees the rendered

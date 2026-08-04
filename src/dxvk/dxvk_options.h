@@ -58,6 +58,11 @@ namespace dxvk {
     /// True = force enable regardless of tier, False = disable)
     Tristate vegasEnableFramegen = Tristate::Auto;
 
+    /// FSR upscaling toggle (Auto = upscale only when the back buffer
+    /// is meaningfully smaller than the presentation surface,
+    /// True = force upscale, False = disable)
+    Tristate vegasEnableUpscaler = Tristate::Auto;
+
   };
 
 }

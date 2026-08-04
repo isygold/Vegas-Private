@@ -560,7 +560,8 @@ else   -> 0.25 (lots of headroom)
 | `dxvk.enableAsync` | bool | true | `dxvk_options.h:29` | Async pipeline compilation |
 | `dxvk.gplAsyncCache` | bool | false | `dxvk_options.h:31` | GPL state cache with fixes |
 | `dxvk.enableStarProfile` | Tristate | Auto | `dxvk_options.h:52` | Master switch for VEGAS features |
-| `vegas.enableFramegen` | Tristate | Auto | `dxvk_options.h:56` | Frame generation toggle (Auto/Tier gate, True/force, False/disable) |
+| `vegas.enableFramegen` | Tristate | Auto | `dxvk_options.h:59` | Frame generation toggle (Auto/Tier gate, True/force, False/disable) |
+| `vegas.enableUpscaler` | Tristate | Auto | `dxvk_options.h:65` | FSR upscaler toggle (Auto/back buffer < 85% of surface, True/force, False/disable) |
 | `vegas.forceTier` | int32 | 0 | `dxvk_options.h:55` | Override GPU tier detection |
 | `dxvk.enableGraphicsPipelineLibrary` | Tristate | Auto | `dxvk_options.h:23` | Vulkan GPL support |
 | `dxvk.numCompilerThreads` | int32 | 0 | `dxvk_options.h:20` | Override compiler thread count |
