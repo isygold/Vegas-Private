@@ -193,6 +193,15 @@ A: `dxvk.enableStarProfile` (Auto / True / False): **Auto** (default) enables al
 **Q: The game crashes or doesn't launch — what should I try?**
 A: Try in order: (1) `dxvk.enableStarProfile = False` — if the game launches, it's a VEGAS-specific issue. (2) `vegas.forceTier = 1` — conservative thresholds, frame gen disabled. (3) `dxvk.numCompilerThreads = 2` — reduce CPU contention. (4) Check logcat with `DXVK_LOG_LEVEL=debug` for error lines. If the game still crashes with the master switch off, the issue is DXVK/driver compatibility, not VEGAS.
 
+**Q: Does frame generation increase FPS?**
+A: No. Framegen makes the display show more frames per second by
+synthesising in-between frames, but the GPU still renders at the
+native framerate. The FPS counter shows 60fps because the display
+is receiving 60 frames — 30 real, 30 interpolated. The GPU didn't
+get faster; it's doing the same work. Framegen is a smoothness
+feature, not a performance feature. For real FPS gains, use FSR
+upscaling or the TBDR-aware governor.
+
 **Q: How do I report a bug?**
 A: Every game session auto-generates `vegas-<game>.report.json` and `vegas-<game>.issue.md` in the game directory. The `.issue.md` is a pre-formatted GitHub issue with device info, FPS histogram, and config snapshot — ready to paste at https://github.com/isygold/vegas-releases/issues. For manual reports, include: Adreno model, driver version, game title, your `dxvk.conf`, full debug logcat output, and reproduction steps.
 
