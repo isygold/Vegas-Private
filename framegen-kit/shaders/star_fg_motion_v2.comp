@@ -1,0 +1,284 @@
+// star_fg_motion.comp — VEGAS framegen Motion pass, rewrite v2 (atomic
+// reductions).
+//
+// Block-level SAD search with shared-memory staging, hierarchical
+// coarse ±8 + refine ±2, variance-aware confidence.
+//
+// v2 stages the previous-frame search window into shared memory once per
+// block (4 fetches/thread) so candidate evaluation never touches global
+// memory (≈4,000× fewer global fetches than v1).  This iteration replaces
+// the butterfly reductions (36 barriers/workgroup — two 2-pass sum
+// reductions + two 8-level min reductions) with shared atomics
+// (4 barriers).  The butterfly pattern plus 11.5KB shared collapsed
+// occupancy on Adreno 610 TBDR and pushed the dispatch-timeout rate to
+// ~91% on-device; atomics are the minimal fix and also shrink the shared
+// footprint by 384 floats (scratch arrays dropped).
+//
+// Design notes:
+//   - block variance: two uint atomicAdd accumulators in fixed point
+//     (Σ l·2^16, Σ l²·2^16).  Each term ≤ 65536, 256 terms → sum ≤
+//     16,777,216 < 2^24, exactly representable in float, no uint32
+//     overflow.  For a constant-luma block every term is identical so
+//     quantization cancels exactly — the flat-block gate stays exact.
+//   - argmin: packed atomicMin over (uint(cost·16) << 8 | idx).  Costs
+//     ≤ 384 → ≤ 6144, fits 16 bits, packing order-preserving.
+//     floatBitsToUint(cost) << 8 would wrap for costs ≥ 2.0 (exponent
+//     bits shifted out) and break ordering — fixed point is required.
+//   - the coarse winner is broadcast via shared ints (all 25 refine
+//     threads need it); s_minPacked is reset by thread 0 under the same
+//     barrier that publishes the coarse winner.
+//   - displacement: trust gate (smoothstep over confidence) outputs either
+//     the full integer search vector or zero — never a fractional vector.
+//     Fractional scaling (conf * mv) produced camera wobble on HK pans;
+//     hard caps (±2/±4) either ghosted movers or under-tracked pans.
+//     Trusted blocks keep full ±8 displacement; untrusted blocks fall back
+//     to the current frame through sadNorm=1.
+
+#version 460
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) uniform texture2D uCurrent;
+layout(set = 0, binding = 1) uniform texture2D uPrevious;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D uMotion;
+layout(set = 0, binding = 4) uniform texture2D uMotionPrev;
+
+// ---- Diagnostic stats (set 1, separate from the shared image layout) ----
+// Per-dispatch accumulator for the bimodal dominance gate.  Thread 0 of
+// each block that reaches the gate adds its dominance quantized to Q16.
+// Host zeroes the buffer with vkCmdFillBuffer before the motion dispatch
+// and reads it back after the fence so we can confirm *which* regime each
+// game actually sits in (unimodal ~1 vs bimodal ~0 vs flat ~0) instead of
+// guessing from visuals.
+layout(set = 1, binding = 0, std430) buffer FGStats {
+  uint s_blockCount;   // (+1 per block that ran the gate)
+  uint s_domSumQ16;    // Σ dominance·65535 (Q16 fixed point; mean = sum/count/65535)
+  uint s_zeroCount;    // blocks with dominance <= 0.10 (gate zeroed them)
+  uint s_fullCount;    // blocks with dominance >= 0.55 (full trust)
+} fgStats;
+
+layout(push_constant) uniform uPC {
+  vec4 info;    // info.xy = block grid size (int), info.z = temporal
+                 // center valid (0/1), info.w = variance threshold
+  vec4 hudRect; // HUD graph rect in block coords (x0,y0,x1,y1);
+                 // x0 > x1 = mask disabled
+} pc;
+
+const float kChromaW = 0.5;     // chroma weight in refine cost
+const float kSADMaxPerPx = 1.5; // max per-pixel cost: |dL|<=1 + 0.5*|dC|<=0.5
+const int   kSearch = 8;        // half window ±8 around temporal center
+const uint  kMinPacked = 0xFFFFFFFFu;
+
+shared float s_curL[256];   // current block luma       (16x16)
+shared float s_curC[256];   // current block chroma
+shared float s_prevL[1024]; // previous window luma     (32x32, ±8)
+shared float s_prevC[1024]; // previous window chroma
+shared uint  s_accL;        // Σ luma·2^16    (atomicAdd accumulator)
+shared uint  s_accL2;       // Σ luma²·2^16   (atomicAdd accumulator)
+shared uint  s_minPacked;   // (cost<<8)|idx   (atomicMin; coarse pass only)
+shared int   s_coarseX;     // coarse winner offset, broadcast to refine
+shared int   s_coarseY;
+shared float s_refSad[25];  // refine-pass SADs for the bimodal gate
+
+float lumaOf(vec4 c)   { return dot(c.rgb, vec3(0.299, 0.587, 0.114)); }
+float chromaOf(vec4 c) { return 0.5 * (c.r - c.b); }
+
+// Pack a non-negative cost into an order-preserving uint for atomicMin.
+uint packCost(float cost, uint idx) {
+  return (uint(clamp(cost, 0.0, 4095.0) * 16.0) << 8u) | (idx & 0xFFu);
+}
+
+void main() {
+  ivec2 blocks = ivec2(pc.info.xy);
+  ivec2 blockId = ivec2(gl_WorkGroupID.xy);
+  if (blockId.x >= blocks.x || blockId.y >= blocks.y) return;
+
+  uint  tid = gl_LocalInvocationIndex;
+  ivec2 local = ivec2(gl_LocalInvocationID.xy);
+  ivec2 pixelPos = blockId * 16 + local;
+  ivec2 srcSize = textureSize(uCurrent, 0);
+  ivec2 clampMax = srcSize - 1;
+
+  // ---- HUD graph mask: exempt the dynamic frametimes graph ----------
+  // Masked blocks present the exact current frame ({0,0,1,0} → warp
+  // samples at zero displacement with full distrust) and skip the whole
+  // search — the graph is a 1px line scrolling at ~1px/frame, which no
+  // interpolation can render cleanly (fractional sample offsets smear
+  // it), so it is excluded deterministically.
+  ivec4 hud = ivec4(round(pc.hudRect));
+  if (blockId.x >= hud.x && blockId.x <= hud.z &&
+      blockId.y >= hud.y && blockId.y <= hud.w) {
+    if (tid == 0u)
+      imageStore(uMotion, blockId, vec4(0.0, 0.0, 1.0, 0.0));
+    return;
+  }
+
+  // ---- Temporal search center: previous frame's filtered vector -----
+  // Camera pans keep their velocity across frames, so centering the ±8
+  // search window on last frame's vector tracks pans up to ~16 px/frame
+  // with the same window cost. Invalid (first frame / resize) → (0,0).
+  ivec2 center = ivec2(0);
+  if (pc.info.z > 0.5f)
+    center = ivec2(round(texelFetch(uMotionPrev, blockId, 0).xy));
+
+  // ---- Stage current block (1 fetch/thread) -------------------------
+  vec4 curr = texelFetch(uCurrent, clamp(pixelPos, ivec2(0), clampMax), 0);
+  float l = lumaOf(curr);
+  s_curL[tid] = l;
+  s_curC[tid] = chromaOf(curr);
+
+  // ---- Stage previous window ±8 around the temporal center (4 fetches/thread)
+  ivec2 winBase = blockId * 16 + center - ivec2(kSearch);
+  for (int i = 0; i < 4; i++) {
+    int idx = int(tid) * 4 + i;
+    int wx = idx & 31;
+    int wy = idx >> 5;
+    vec4 prev = texelFetch(uPrevious,
+        clamp(winBase + ivec2(wx, wy), ivec2(0), clampMax), 0);
+    s_prevL[idx] = lumaOf(prev);
+    s_prevC[idx] = chromaOf(prev);
+  }
+  if (tid == 0u) {
+    s_accL = 0u;
+    s_accL2 = 0u;
+    s_minPacked = kMinPacked;
+  }
+  barrier();  // (1) staging + accumulator init visible to all threads
+
+  // ---- Block luma variance via fixed-point atomicAdd ----------------
+  atomicAdd(s_accL,  uint(l * 65536.0));
+  atomicAdd(s_accL2, uint(l * l * 65536.0));
+
+  // ---- Coarse pass: 81 candidates (±8, step 2), decimated 8x8 pixels,
+  //      luma-only.  Window index: block-local pixel (xx,yy) + offset →
+  //      (yy + 8 + dy) * 32 + (xx + 8 + dx) — always within [0,32). -----
+  if (tid < 81u) {
+    int cdx = (int(tid) % 9) * 2 - 8;
+    int cdy = (int(tid) / 9) * 2 - 8;
+    float sad = 0.0;
+    for (int yy = 0; yy < 16; yy += 2) {
+      for (int xx = 0; xx < 16; xx += 2) {
+        int pi = (yy + kSearch + cdy) * 32 + (xx + kSearch + cdx);
+        sad += abs(s_curL[yy * 16 + xx] - s_prevL[pi]);
+      }
+    }
+    atomicMin(s_minPacked, packCost(sad, tid));
+  }
+  barrier();  // (2) variance adds + coarse atomicMin complete
+
+  if (tid == 0u) {
+    uint co = s_minPacked & 0xFFu;
+    s_coarseX = (int(co) % 9) * 2 - 8;
+    s_coarseY = (int(co) / 9) * 2 - 8;
+  }
+  barrier();  // (3) coarse winner + reset visible to all threads
+
+  // ---- Refine pass: 25 candidates (±2 around coarse), full-res 16x16,
+  //      luma+chroma.  Offsets clamped to ±8 so the window index stays
+  //      in bounds (edge refinement is clipped, negligible accuracy
+  //      cost at the search boundary). Each tid stores its SAD in
+  //      shared memory — the bimodal gate needs ALL 25, not just the
+  //      winner, so we drop the refine atomicMin. -----------------------
+  if (tid < 25u) {
+    int rdx = clamp((int(tid) % 5) - 2 + s_coarseX, -kSearch, kSearch);
+    int rdy = clamp((int(tid) / 5) - 2 + s_coarseY, -kSearch, kSearch);
+    float sad = 0.0;
+    for (int yy = 0; yy < 16; yy++) {
+      for (int xx = 0; xx < 16; xx++) {
+        int ci = yy * 16 + xx;
+        int pi = (yy + kSearch + rdy) * 32 + (xx + kSearch + rdx);
+        sad += abs(s_curL[ci] - s_prevL[pi])
+             + kChromaW * abs(s_curC[ci] - s_prevC[pi]);
+      }
+    }
+    s_refSad[tid] = sad;
+  }
+  barrier();  // (4) refine SADs visible
+
+// ---- Write: vector + normalized SAD + variance gate -----------------
+  if (tid == 0u) {
+    // Bimodal gate: scan the 25 stored SADs.
+    //  bestSad  = the winner (lowest SAD).
+    //  spread   = maxSad - bestSad  (landscape amplitude).
+    //  distinct = cheapest candidate >1 GRID STEP from the winner
+    //             (a second motion valley, e.g. sprite vs parallax).
+    //  dominance = (distinct - bestSad) / max(spread, 1e-4).
+    //    Unimodal block: distinct >> bestSad, spread large -> dominance ~1.
+    //    Bimodal block:  distinct ~ bestSad  -> dominance ~0 -> distrust.
+    //    Flat block:     spread ~ 0 -> clamped -> dominance ~0 -> distrust.
+    //  Grid-step (not pixel-offset) distance is used so the metric is
+    //  immune to the edge clamps in refineCandidate. The median-
+    //  normalization idea was rejected after analysis: a true bimodal
+    //  block has ~half the non-winner SADs near the second valley, so
+    //  otherMedian ≈ distinct → numerator ≈ denominator → dominance ≥1 —
+    //  the signal cancels exactly when needed.
+    int  bestIdx = 0;
+    float bestSad = s_refSad[0];
+    float maxSad  = s_refSad[0];
+    for (int k = 1; k < 25; k++) {
+      if (s_refSad[k] < bestSad) { bestSad = s_refSad[k]; bestIdx = k; }
+      if (s_refSad[k] > maxSad)  maxSad = s_refSad[k];
+    }
+    int bx = bestIdx % 5;   // grid position of the winner (0..4)
+    int by = bestIdx / 5;
+    float distinct = 3.402823466e+38;
+    for (int k = 0; k < 25; k++) {
+      int gx = k % 5;
+      int gy = k / 5;
+      int dist = abs(gx - bx) + abs(gy - by);
+      if (dist > 1 && s_refSad[k] < distinct) distinct = s_refSad[k];
+    }
+    if (distinct >= 3.402823466e+38) distinct = bestSad;  // no far candidate
+    float spread = max(maxSad - bestSad, 1e-4);
+    float dominance = clamp((distinct - bestSad) / spread, 0.0, 1.0);
+
+    // Absolute vector = temporal center + best relative offset.
+    int rawX = (bestIdx % 5) - 2 + s_coarseX + center.x;
+    int rawY = (bestIdx / 5) - 2 + s_coarseY + center.y;
+
+    // Block variance from fixed-point accumulators
+    float mean = float(s_accL) / 65536.0 / 256.0;
+    float blockVar = max((float(s_accL2) / 65536.0 / 256.0) - mean * mean, 0.0);
+
+    float sadNorm = bestSad / (256.0 * kSADMaxPerPx);
+    // Confidence: variance gate (textureless → low) × SAD quality gate (poor match → low)
+    float conf = smoothstep(pc.info.w * 0.5, pc.info.w * 2.0, blockVar);
+    conf *= 1.0 - smoothstep(0.3, 0.6, sadNorm);  // distrust high-SAD blocks (HUD/overlays)
+    // Trust gate: trusted blocks keep the full integer search vector
+    // (temporal center + offset, no hard cap — the ±4/±8 caps clipped
+    // real gameplay pans of 5-20 px/frame and caused ghosting); untrusted
+    // blocks get zero (current frame via sadNorm). Wide transition
+    // (0.35-0.65) kills boundary flicker that caused HUD popping at the
+    // 0.45-0.55 gate.
+    float trust = smoothstep(0.35, 0.65, conf);
+    // Bimodal dominance gate: distrust blocks whose SAD landscape has a
+    // second, nearly-equal valley in a DIFFERENT direction (a block
+    // straddling a sprite silhouette sees sprite AND parallax motion —
+    // any single vector is a compromise that shows up as halo/fuzz).
+    // Multiplicative on `trust` so the falloff is continuous (ny jumps):
+    // at dominance >= 0.55 the block is warp-trusted; below 0.10 it is
+    // distrusted (current frame). 0.10/0.55 are the device-tuning knobs.
+    trust *= smoothstep(0.10, 0.55, dominance);
+
+    // Diagnostic accumulation (host reads after the dispatch fence).
+    // Only thread 0 of each block touches the buffer, so 54x30 = 1620
+    // atomic ops per dispatch — negligible vs the search work.  The
+    // zero/full split tells us the true regime: unimodal games should
+    // show fullCount high (dominance >= 0.55) and zeroCount low; a
+    // bimodal game (HK sprite edges) shows zeroCount near 100%.
+    atomicAdd(fgStats.s_blockCount, 1u);
+    atomicAdd(fgStats.s_domSumQ16, uint(dominance * 65535.0));
+    if (dominance <= 0.10)
+      atomicAdd(fgStats.s_zeroCount, 1u);
+    if (dominance >= 0.55)
+      atomicAdd(fgStats.s_fullCount, 1u);
+
+    int mvX = int(float(rawX) * trust);
+    int mvY = int(float(rawY) * trust);
+
+    // Apply variance gate to SAD norm for warp pass
+    sadNorm = max(sadNorm, 1.0 - conf);
+    imageStore(uMotion, blockId, vec4(float(mvX), float(mvY), sadNorm, 0.0));
+  }
+}

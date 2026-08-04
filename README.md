@@ -13,6 +13,20 @@ VEGAS is a specialized performance fork of **DXVK v2.4.1** (via the GPLAsync bac
 
 ---
 
+## ⚠️ Disclaimer
+
+The frame generation (FG) and FSR features in VEGAS are provided
+**for testing and evaluation purposes only**. Enabling frame
+generation alongside other interpolation or upscaling features
+(including the emulator's own FSR, LSFG-VK, or bionic framegen)
+may produce compounding artifacts, increased latency, or unexpected
+behavior. The authors of VEGAS assume **no responsibility for any
+loss, damage, game crashes, or degraded experience** that may result
+from using these features. By using VEGAS you accept full
+responsibility for testing and evaluating it in your own environment.
+
+---
+
 ## Key Features
 
 ### GPLAsync — Async Shader Compilation (Backported)
