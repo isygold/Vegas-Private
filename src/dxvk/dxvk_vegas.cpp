@@ -4203,17 +4203,22 @@ namespace dxvk {
     s_ftHistory[s_ftHead] = frameTime;
     s_ftHead = (s_ftHead + 1) % FT_HISTORY_SIZE;
 
-    // Record per-frame draw count to circular history (reads from gov state,
-    // reset is handled by endOfFrameCleanup at end of Present).
-    if (s_gov.frameDrawCount > 0) {
+    // Record per-frame draw count to circular history — profiling only
+    // (VEGAS_PROFILE_DRAWS=1). Reads from gov state, reset is handled by
+    // endOfFrameCleanup at end of Present. When profiling is off, no
+    // recording and no CSV I/O happens at all.
+    if (s_profileActive && s_gov.frameDrawCount > 0) {
       s_drawHistory[s_drawHead] = s_gov.frameDrawCount;
       s_drawFtHistory[s_drawHead] = frameTime;   // paired ms → fps in CSV dump
       s_drawHead = (s_drawHead + 1) % DRAW_HISTORY_SIZE;
     }
 
-    // Dump CSV every DRAW_HISTORY_SIZE frames (roughly ~1s at 60fps)
+    // Dump CSV every DRAW_HISTORY_SIZE frames (~1s at 60fps) — profiling
+    // only. Previously dumpDrawCsv() ran unconditionally and overwrote
+    // /sdcard/vegas_<game>_drawcount.csv every second even with the env
+    // var unset (the var only flipped append vs overwrite mode).
     s_dumpCounter++;
-    if (s_dumpCounter >= DRAW_HISTORY_SIZE) {
+    if (s_profileActive && s_dumpCounter >= DRAW_HISTORY_SIZE) {
       s_dumpCounter = 0;
       dumpDrawCsv();
     }

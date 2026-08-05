@@ -572,6 +572,11 @@ else   -> 0.25 (lots of headroom)
 | `DXVK_ASYNC=0` | Disable async compilation (overrides `dxvk.enableAsync`) |
 | `DXVK_GPLASYNCCACHE=1` | Enable GPL state cache (overrides `dxvk.gplAsyncCache`) |
 | `DXVK_HUD=...` | Standard DXVK HUD configuration |
+| `VEGAS_PROFILE_DRAWS=1` | Enable per-frame draw-count CSV dump to `/sdcard/vegas_<game>_drawcount.csv` (append mode, accumulates). Unset = zero recording, zero file I/O — `pushMetrics` gates the ring buffer + `dumpDrawCsv()` on `s_profileActive` |
+
+**Session report / crash marker lifecycle:**
+- `vegas-<game>.marker.txt` written at `beginSession()` (DxvkDevice ctor), deleted at `endSession()`.
+- `endSession()` now also runs from `DllMain(PROCESS_DETACH)` (`dxvk_dll_main.cpp`, added to `dxvk_src`) — the dtor-only path was unreliable: it's skipped during module detachment (`this_thread::isInModuleDetachment()`) and never runs for games that ExitProcess without releasing the device. Normal quit → marker deleted → no false crash report. TerminateProcess / unhandled exception → no detach → marker stays → crash detection intact.
 
 ---
 

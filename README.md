@@ -108,6 +108,10 @@ Every game session generates three files in the game directory automatically:
 
 Crash detection: if the game crashes or is force-killed, the orphaned marker file is detected on next launch and `crashed: true` is set in the new report. No manual placement or config required.
 
+Clean exit: the marker is removed on normal process exit (Wine DLL-detach hook) and on orderly device teardown — quitting a game normally never leaves a stale marker, so it won't be misreported as a crash. A force-stop from the launcher still counts as an unclean exit (by definition) and leaves the marker.
+
+Draw-count profiling is separate: `VEGAS_PROFILE_DRAWS=1` enables the per-frame CSV dump to `/sdcard/vegas_<game>_drawcount.csv` (append mode, accumulates across sessions). Unset, nothing is recorded and the file is never touched.
+
 ### VegaHud Performance Overlay
 - Lightweight performance HUD with frame-skip optimization (updates every 5th frame)
 - Draw call count, frame time, GPU load, tier info
