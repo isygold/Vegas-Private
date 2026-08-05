@@ -110,7 +110,7 @@ Crash detection: if the game crashes or is force-killed, the orphaned marker fil
 
 Clean exit: the marker is removed on normal process exit (Wine DLL-detach hook) and on orderly device teardown — quitting a game normally never leaves a stale marker, so it won't be misreported as a crash. A force-stop from the launcher still counts as an unclean exit (by definition) and leaves the marker.
 
-Draw-count profiling is separate: `VEGAS_PROFILE_DRAWS=1` enables the per-frame CSV dump to `/sdcard/vegas_<game>_drawcount.csv` (append mode, accumulates across sessions). Unset, nothing is recorded and the file is never touched.
+Draw-count profiling is separate: `vegas.profileDraws = true` in dxvk.conf (or the equivalent `VEGAS_PROFILE_DRAWS=1` env var — either works) enables the per-frame CSV dump to `/sdcard/vegas_<game>_drawcount.csv` (append mode, accumulates across sessions). Unset, nothing is recorded and the file is never touched. `vegas.telemetry = true` enables frame-generation fill/bind/readback stats in logcat (diagnostics only).
 
 ### VegaHud Performance Overlay
 - Lightweight performance HUD with frame-skip optimization (updates every 5th frame)
@@ -181,8 +181,12 @@ vegas.forceTier = 0
 # Compiler thread count (advanced): 0=auto (hardware concurrency, max 64)
 dxvk.numCompilerThreads = 0
 
-# Draw profiling: VEGAS_PROFILE_DRAWS=1 enables per-frame CSV dump to /sdcard/
-# (off by default — zero production impact)
+# Draw profiling: vegas.profileDraws = true enables per-frame CSV dump to
+# /sdcard/ (off by default — zero production impact)
+# vegas.profileDraws = true
+
+# FG telemetry: vegas.telemetry = true logs fill/bind/readback stats to logcat
+# vegas.telemetry = true
 
 # Environment variable overrides:
 # DXVK_ASYNC=0         → disable async compilation

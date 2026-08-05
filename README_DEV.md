@@ -562,6 +562,8 @@ else   -> 0.25 (lots of headroom)
 | `dxvk.enableStarProfile` | Tristate | Auto | `dxvk_options.h:52` | Master switch for VEGAS features |
 | `vegas.enableFramegen` | Tristate | Auto | `dxvk_options.h:59` | Frame generation toggle (Auto/Tier gate, True/force, False/disable) |
 | `vegas.enableUpscaler` | Tristate | Auto | `dxvk_options.h:65` | FSR upscaler toggle (Auto/back buffer < 85% of surface, True/force, False/disable) |
+| `vegas.profileDraws` | bool | false | `dxvk_options.h:69` | Draw-count CSV dump (per-frame record + append every ~60 frames). OR-combined with `VEGAS_PROFILE_DRAWS=1` |
+| `vegas.telemetry` | bool | false | `dxvk_options.h:74` | FG fill/bind/readback stats to logcat. OR-combined with `vegas_telemetry=1` |
 | `vegas.forceTier` | int32 | 0 | `dxvk_options.h:55` | Override GPU tier detection |
 | `dxvk.enableGraphicsPipelineLibrary` | Tristate | Auto | `dxvk_options.h:23` | Vulkan GPL support |
 | `dxvk.numCompilerThreads` | int32 | 0 | `dxvk_options.h:20` | Override compiler thread count |
@@ -572,7 +574,8 @@ else   -> 0.25 (lots of headroom)
 | `DXVK_ASYNC=0` | Disable async compilation (overrides `dxvk.enableAsync`) |
 | `DXVK_GPLASYNCCACHE=1` | Enable GPL state cache (overrides `dxvk.gplAsyncCache`) |
 | `DXVK_HUD=...` | Standard DXVK HUD configuration |
-| `VEGAS_PROFILE_DRAWS=1` | Enable per-frame draw-count CSV dump to `/sdcard/vegas_<game>_drawcount.csv` (append mode, accumulates). Unset = zero recording, zero file I/O — `pushMetrics` gates the ring buffer + `dumpDrawCsv()` on `s_profileActive` |
+| `VEGAS_PROFILE_DRAWS=1` | Enable per-frame draw-count CSV dump to `/sdcard/vegas_<game>_drawcount.csv` (append mode, accumulates). Unset = zero recording, zero file I/O — `pushMetrics` gates the ring buffer + `dumpDrawCsv()` on `s_profileActive`. Equivalent config key: `vegas.profileDraws=true` |
+| `vegas_telemetry=1` | Enable FG fill/bind/readback stats in logcat (diagnostics). Equivalent config key: `vegas.telemetry=true`. Gate on `s_fgStatsEnabled`, read in `initFgPipeline` |
 
 **Session report / crash marker lifecycle:**
 - `vegas-<game>.marker.txt` written at `beginSession()` (DxvkDevice ctor), deleted at `endSession()`.

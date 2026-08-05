@@ -63,6 +63,16 @@ namespace dxvk {
     /// True = force upscale, False = disable)
     Tristate vegasEnableUpscaler = Tristate::Auto;
 
+    /// Draw-count profiling (false = fully off, zero recording and I/O;
+    /// true = record per-frame draw counts and append vegas_<game>_drawcount.csv
+    /// every ~60 frames). Equivalent to the VEGAS_PROFILE_DRAWS env var.
+    bool vegasProfileDraws = false;
+
+    /// Frame-generation telemetry (false = stats buffer created but never
+    /// filled or read back; true = log fill/bind/readback stats to logcat).
+    /// Equivalent to the vegas_telemetry env var.
+    bool vegasTelemetry = false;
+
   };
 
 }

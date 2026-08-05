@@ -28,6 +28,8 @@ namespace dxvk {
     vegasForceTier      = config.getOption<int32_t> ("vegas.forceTier",          0);
     vegasEnableFramegen = config.getOption<Tristate>("vegas.enableFramegen",     Tristate::Auto);
     vegasEnableUpscaler = config.getOption<Tristate>("vegas.enableUpscaler",     Tristate::Auto);
+    vegasProfileDraws   = config.getOption<bool>    ("vegas.profileDraws",       false);
+    vegasTelemetry      = config.getOption<bool>    ("vegas.telemetry",          false);
 
   }
 

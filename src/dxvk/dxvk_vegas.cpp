@@ -828,11 +828,12 @@ namespace dxvk {
 
     s_dxvkDevice = device;
 
-    // Profiling: VEGAS_PROFILE_DRAWS=1 enables append-mode CSV dump
-    // (off by default — zero production impact)
-    s_profileActive = (env::getEnvVar("VEGAS_PROFILE_DRAWS") == "1");
+    // Profiling: VEGAS_PROFILE_DRAWS=1 or vegas.profileDraws=true enables
+    // append-mode CSV dump (off by default — zero production impact)
+    s_profileActive = (env::getEnvVar("VEGAS_PROFILE_DRAWS") == "1")
+                   || device->config().vegasProfileDraws;
     if (s_profileActive)
-      Logger::info("Vegas: draw count profiling active (VEGAS_PROFILE_DRAWS=1)");
+      Logger::info("Vegas: draw count profiling active (VEGAS_PROFILE_DRAWS=1 / vegas.profileDraws=true)");
 
     // Master switch: dxvk.enableStarProfile
     // Auto  → Adreno detection (current behavior)
@@ -2758,7 +2759,10 @@ namespace dxvk {
         return false;
       }
       memset(mapPtr, 0, FG_STATS_WORDS * sizeof(uint32_t));
-      Vegas::s_fgStatsEnabled = (env::getEnvVar("vegas_telemetry") == "1");
+      // Gate: vegas_telemetry=1 env var OR vegas.telemetry=true config key
+      // (config needs s_dxvkDevice — set by initializeProfile before FG init)
+      Vegas::s_fgStatsEnabled = (env::getEnvVar("vegas_telemetry") == "1")
+                             || (Vegas::s_dxvkDevice && Vegas::s_dxvkDevice->config().vegasTelemetry);
 
       // Own pool for the single stats set (no touch to the OOM-tuned pool)
       VkDescriptorPoolSize statsPoolSizes[1] = {};
