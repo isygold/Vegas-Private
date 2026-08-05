@@ -11,6 +11,8 @@
 [![Latest Release](https://img.shields.io/github/v/release/isygold/vegas-releases?style=flat-square)](https://github.com/isygold/vegas-releases/releases/latest)
 [![Sponsor](https://img.shields.io/badge/Sponsor-%24?logo=github&style=flat-square)](https://github.com/sponsors/isygold/card)
 
+📖 **[Wiki (user guide)](https://github.com/isygold/vegas-releases/wiki)** · **[Wiki (dev guide)](https://github.com/isygold/Vegas-Private/wiki)**
+
 ### Stability Backport: GPLAsync + Performance Optimizations for Adreno Mobile
 
 VEGAS is a specialized performance fork of **DXVK v2.4.1** (via the GPLAsync backport) targeting **Qualcomm Adreno GPUs** on Android emulation (Star Emulator / Winlator). It features automatic async shader compilation, tier-based auto-tuning, FSR 1.0 compute upscaling, motion-compensated frame generation, and a TBDR-aware dynamic governor — all configurable through simple DXVK options.
