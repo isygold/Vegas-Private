@@ -134,6 +134,14 @@ Each release provides **two** WCP packages with identical DLLs but different met
 | `dxvk-2.4.1-vegas-*.wcp` | DXVK | Stock Winlator and general Android DXVK use |
 | `vegas-2.4.1-*.wcp` | VEGAS | Star Emulator (latest build) |
 
+> **Note — can't find a config file for a build?**
+> All VEGAS builds and their artifacts (including the `vegas-config-*`
+> `dxvk.conf`) are stationed on the development repo **before** they become
+> releases. If what you need isn't attached to a release at
+> **github.com/isygold/vegas-releases**, go to
+> **github.com/isygold/Vegas-Private** — that's where every build and artifact
+> lives until it's promoted to a release (Actions tab → artifact list).
+
 ### Via Star Emulator
 1. Open Star Emulator
 2. Go to **Contents** menu
