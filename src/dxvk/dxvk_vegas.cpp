@@ -583,6 +583,20 @@ namespace dxvk {
     if (!formatIsBcn(originalFormat))
       return VK_FORMAT_UNDEFINED;
 
+    // Native BCn gate: if the driver exposes the original BCn format for
+    // sampling, transcoding to ASTC is pure downside — lossy re-encode,
+    // GPU cost, and the per-mip sync stall. Modern Adreno drivers
+    // (major 512, minor >= 514 — Snapdragon 865 era onward), Turnip, and
+    // desktop drivers all expose BCn natively. Only older Adreno drivers
+    // (pre-514) lack BCn support and actually need the ASTC fallback.
+    VkFormatFeatureFlags2 bcnFeatures = adapter->getFormatFeatures(originalFormat).optimal;
+    if (bcnFeatures & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT) {
+      Logger::debug(str::format(
+        "VEGAS: BCn ", static_cast<uint32_t>(originalFormat),
+        " natively supported — skipping transcode"));
+      return VK_FORMAT_UNDEFINED;
+    }
+
     if (originalFormat == VK_FORMAT_BC6H_UFLOAT_BLOCK ||
         originalFormat == VK_FORMAT_BC6H_SFLOAT_BLOCK)
       return VK_FORMAT_UNDEFINED;
