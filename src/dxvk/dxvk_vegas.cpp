@@ -1130,9 +1130,11 @@ namespace dxvk {
     s_physicalDevice  = reinterpret_cast<uint64_t>(device->adapter()->handle());
 
     // Eager GPU transcoder init: check availability before any texture is created.
-    // On Windows/Wine, loadVulkanFuncs returns false (no dlopen), so s_tcAvailable
-    // stays false and shouldTranscodeFormat will skip the format swap — correct,
-    // because the GPU transcoder can't run there.
+    // loadVulkanFuncs resolves loader entry points from winevulkan.dll on
+    // Windows-PE builds (Winelator/Bannerlator) or libvulkan on Linux builds;
+    // s_tcAvailable stays false only if the loader or pipeline init genuinely
+    // fails — format swap is then skipped, avoiding ASTC images with raw BCn
+    // data (GPU hang protection).
     if (s_enabled && s_device != nullptr) {
       VkDevice vkDev = reinterpret_cast<VkDevice>(s_device);
       if (loadVulkanFuncs(vkDev) && initTranscoderPipeline(vkDev))
@@ -1258,22 +1260,45 @@ namespace dxvk {
 
     static FsrVulkanFuncs s_vk;
 
-    /** Load all needed Vulkan device functions via dlsym + vkGetDeviceProcAddr. */
+    /** Load all needed Vulkan device functions via vkGetDeviceProcAddr.
+     *
+     *  Windows-PE builds (Wine/Winelator/Bannerlator): resolve the loader
+     *  entry points from the already-loaded winevulkan.dll / vulkan-1.dll,
+     *  mirroring DXVK's own LibraryLoader. The old dlopen-only path could
+     *  never work in the PE build, so s_tcAvailable stayed false and the
+     *  GPU transcoder was silently dead on every Android build. */
     static bool loadVulkanFuncs(VkDevice device) {
-#ifndef _WIN32
       if (s_vk.loaded)
         return s_vk.vkCreateShaderModule != nullptr;
+
+      // Resolve loader-level entry points per platform.
+#ifdef _WIN32
+      HMODULE lib = LoadLibraryA("winevulkan.dll");
+      if (!lib) lib = LoadLibraryA("vulkan-1.dll");
+      s_vk.vkGetDeviceProcAddr = lib
+          ? reinterpret_cast<PFN_vkGetDeviceProcAddr>(GetProcAddress(lib, "vkGetDeviceProcAddr"))
+          : nullptr;
+      s_vk.vkGetPhysicalDeviceMemoryProperties = lib
+          ? reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+                GetProcAddress(lib, "vkGetPhysicalDeviceMemoryProperties"))
+          : nullptr;
+#else
       void* lib = dlopen("libvulkan.so", RTLD_NOLOAD | RTLD_LOCAL);
       if (!lib) lib = dlopen("libvulkan.so.1", RTLD_NOLOAD | RTLD_LOCAL);
       // Fall back to RTLD_DEFAULT if libvulkan isn't accessible by path
       s_vk.vkGetDeviceProcAddr =
           lib ? (PFN_vkGetDeviceProcAddr)dlsym(lib, "vkGetDeviceProcAddr")
               : (PFN_vkGetDeviceProcAddr)dlsym(RTLD_DEFAULT, "vkGetDeviceProcAddr");
-      if (!s_vk.vkGetDeviceProcAddr) {
-        Logger::warn("Vegas FSR: vkGetDeviceProcAddr not found");
-        s_vk.loaded = true;
-        return false;
+      s_vk.vkGetPhysicalDeviceMemoryProperties =
+          reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+              dlsym(RTLD_DEFAULT, "vkGetPhysicalDeviceMemoryProperties"));
+      if (!s_vk.vkGetPhysicalDeviceMemoryProperties && lib) {
+        s_vk.vkGetPhysicalDeviceMemoryProperties =
+            reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+                dlsym(lib, "vkGetPhysicalDeviceMemoryProperties"));
       }
+#endif
+
       if (!s_vk.vkGetDeviceProcAddr) {
         Logger::warn("Vegas FSR: vkGetDeviceProcAddr not found");
         s_vk.loaded = true;
@@ -1336,28 +1361,14 @@ namespace dxvk {
       VK_LOAD_DEV_FUNC(vkUnmapMemory)
 #     undef VK_LOAD_DEV_FUNC
 
-      // Load physical-device-level functions via dlsym (not vkGetDeviceProcAddr)
       if (!s_vk.vkGetPhysicalDeviceMemoryProperties) {
-        s_vk.vkGetPhysicalDeviceMemoryProperties =
-            reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
-                dlsym(RTLD_DEFAULT, "vkGetPhysicalDeviceMemoryProperties"));
-        if (!s_vk.vkGetPhysicalDeviceMemoryProperties && lib) {
-          s_vk.vkGetPhysicalDeviceMemoryProperties =
-              reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
-                  dlsym(lib, "vkGetPhysicalDeviceMemoryProperties"));
-        }
-        if (!s_vk.vkGetPhysicalDeviceMemoryProperties) {
-          Logger::warn("Vegas FSR: vkGetPhysicalDeviceMemoryProperties not found");
-          s_vk.loaded = true;
-          return false;
-        }
+        Logger::warn("Vegas FSR: vkGetPhysicalDeviceMemoryProperties not found");
+        s_vk.loaded = true;
+        return false;
       }
 
       s_vk.loaded = true;
       return true;
-#else
-      return false;
-#endif
     }
 
   } // anonymous namespace
