@@ -15,7 +15,7 @@
 
 ### Stability Backport: GPLAsync + Performance Optimizations for Adreno Mobile
 
-VEGAS is a specialized performance fork of **DXVK v2.4.1** (via the GPLAsync backport) targeting **Qualcomm Adreno GPUs** on Android emulation (Star Emulator / Winlator). It features automatic async shader compilation, tier-based auto-tuning, FSR 1.0 compute upscaling, motion-compensated frame generation, and a TBDR-aware dynamic governor — all configurable through simple DXVK options.
+VEGAS is a specialized performance fork of **DXVK v2.4.1** (via the GPLAsync backport) targeting **Qualcomm Adreno GPUs** on Android emulation (Star Emulator / Winlator & its forks/GAMEHUB/GAMENATIVE/BANNERLATOR). It features automatic async shader compilation, tier-based auto-tuning, FSR 1.0 compute upscaling, motion-compensated frame generation, and a TBDR-aware dynamic governor — all configurable through simple DXVK options.
 
 **This is the stable release line (`release-v2.4.1`, tag `v2.4.1-V`).** It ships with auto-generated crash reports, per-game config presets, and automatic session tracking. A `dxvk.conf` file is bundled but **not required** — VEGAS works out of the box with sensible defaults. Only create one if you want to tweak specific behavior.
 
@@ -120,7 +120,7 @@ Clean exit: the marker is removed on normal process exit (Wine DLL-detach hook) 
 
 Draw-count profiling is separate: `vegas.profileDraws = true` in dxvk.conf (or the equivalent `VEGAS_PROFILE_DRAWS=1` env var — either works) enables the per-frame CSV dump to `/sdcard/vegas_<game>_drawcount.csv` (append mode, accumulates across sessions). Unset, nothing is recorded and the file is never touched. `vegas.telemetry = true` enables frame-generation fill/bind/readback stats in logcat (diagnostics only).
 
-### VegaHud Performance Overlay
+### VegasHud Performance Overlay
 - Lightweight performance HUD with frame-skip optimization (updates every 5th frame)
 - Draw call count, frame time, GPU load, tier info
 - Configurable via standard `DXVK_HUD` environment variable
@@ -139,8 +139,8 @@ Each release provides **two** WCP packages with identical DLLs but different met
 
 | Package | Type field | For |
 |---------|-----------|-----|
-| `dxvk-2.4.1-vegas-*.wcp` | DXVK | Stock Winlator and general Android DXVK use |
-| `vegas-2.4.1-*.wcp` | VEGAS | Star Emulator (latest build) |
+| `dxvk-2.4.1-vegas-*.wcp` | DXVK | Stock Winlator & its forks/GAMEHUB/GAMENATIVE and general Android DXVK use |
+| `vegas-2.4.1-*.wcp` | VEGAS | Star Emulator/Bannerlator (latest build) |
 
 > **Note — can't find a config file for a build?**
 > All VEGAS builds and their artifacts (including the `vegas-config-*`
@@ -150,12 +150,12 @@ Each release provides **two** WCP packages with identical DLLs but different met
 > **github.com/isygold/Vegas-Private** — that's where every build and artifact
 > lives until it's promoted to a release (Actions tab → artifact list).
 
-### Via Star Emulator
-1. Open Star Emulator
+### Via Star Emulator/Bannerlator
+1. Open Star Emulator/Bannerlator emulator
 2. Go to **Contents** menu
 3. Install the `vegas-2.4.1-*.wcp` package (VEGAS-native type)
 
-### Via Stock Winlator
+### Via Stock Winlator & its forks/GAMEHUB/GAMENATIVE
 1. Download the `dxvk-2.4.1-vegas-*.wcp` package
 2. Install it as a standard DXVK WCP package in Winlator
 
@@ -242,7 +242,7 @@ A: VEGAS targets Qualcomm Adreno GPUs running Turnip Vulkan driver (Mesa 25.x+).
 A: VEGAS reads `dxvk.conf` from: `DXVK_CONFIG_FILE` environment variable, `/storage/emulated/0/Winlator/`, `/storage/emulated/0/Download/`, or `/storage/emulated/0/`. A default `dxvk.conf` is bundled in the WCP but is **not required** — VEGAS works out of the box. Only create one if you want to override specific behavior.
 
 **Q: What's the difference between the DXVK-type and VEGAS-type WCP packages?**
-A: Each release provides two WCP packages with **identical DLLs** — only the metadata in `profile.json` differs. The `dxvk-2.4.1-vegas-*.wcp` package has type `"DXVK"` for stock Winlator and general Android DXVK use. The `vegas-2.4.1-*.wcp` package has type `"VEGAS"` for Star Emulator's custom WCP installer. Use the DXVK-type package for Winlator and the VEGAS-type package for Star Emulator — the DLLs are the same either way.
+A: Each release provides two WCP packages with **identical DLLs** — only the metadata in `profile.json` differs. The `dxvk-2.4.1-vegas-*.wcp` package has type `"DXVK"` for stock Winlator & its forks /GAMEHUB/GAMENATIVE and general Android DXVK use. The `vegas-2.4.1-*.wcp` package has type `"VEGAS"` for Star Emulator's custom WCP installer. Use the DXVK-type package for Winlator and the VEGAS-type package for Star Emulator/Bannerlator — the DLLs are the same either way.
 
 **Q: What does the master switch do?**
 A: `dxvk.enableStarProfile` (Auto / True / False): **Auto** (default) enables all VEGAS features on Adreno, disables on non-Adreno. **True** force-enables regardless of GPU. **False** hard-disables every VEGAS feature — the DLL behaves like stock DXVK. Use False as an emergency escape for problematic games.
