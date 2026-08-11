@@ -419,6 +419,11 @@ namespace dxvk {
     static void recordDrawCall(
             uint32_t             count = 1);
 
+    /// Append the draw-count ring to /sdcard/vegas_<game>_drawcount.csv
+    /// (header written only when the file is empty). Called from
+    /// pushMetrics every DRAW_HISTORY_SIZE frames.
+    static void dumpDrawCsv();
+
     /// Push frame-timing metrics for HUD consumption.
     static void pushMetrics(
             float                gpuLoad,
