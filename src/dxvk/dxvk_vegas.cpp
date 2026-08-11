@@ -4685,7 +4685,7 @@ namespace dxvk {
       auto dev = s_dxvkDevice;
       std::string deviceName = "unknown";
       if (dev != nullptr && dev->adapter() != nullptr)
-        deviceName = dev->adapter()->deviceProperties().deviceName;
+        deviceName = dev->adapter()->deviceProperties().core.properties.deviceName;
 
       auto now = std::chrono::system_clock::now();
       std::time_t now_t = std::chrono::system_clock::to_time_t(now);
