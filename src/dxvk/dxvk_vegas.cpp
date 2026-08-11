@@ -22,6 +22,9 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
+#include <ctime>
+#include <cerrno>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -147,6 +150,15 @@ namespace dxvk {
   float    Vegas::s_lastFrameTime      = 0.0f;
   bool     Vegas::s_fsrActive          = false;
   bool     Vegas::s_fgActive           = false;
+
+  // Draw-count CSV profiling
+  uint32_t Vegas::s_drawHistory[DRAW_HISTORY_SIZE] = {};
+  float    Vegas::s_drawFtHistory[DRAW_HISTORY_SIZE] = {};
+  uint32_t Vegas::s_drawHead          = 0;
+  uint32_t Vegas::s_frameDrawCount    = 0;
+  uint32_t Vegas::s_dumpCounter       = 0;
+  bool     Vegas::s_profileActive     = false;
+  std::string Vegas::s_gameName;
 
 
 
@@ -590,20 +602,20 @@ namespace dxvk {
     // desktop drivers all expose BCn natively. Only older Adreno drivers
     // (pre-514) lack BCn support and actually need the ASTC fallback.
     //
-    // VEGAS_FORCE_TRANSCODE=1 (test-only escape hatch): bypasses ONLY
-    // this native-BCn gate, forcing the transcode path so it can be
-    // exercised on drivers that support BCn natively (e.g. Turnip for
-    // validating batching/mapping fixes). It never bypasses the
-    // isEnabled / s_device / s_tcAvailable guards above — those protect
-    // against the ASTC-format-with-raw-BCn-data GPU hang.
-    static const bool forceTranscode = env::getEnvVar("VEGAS_FORCE_TRANSCODE") == "1";
+    // VEGAS_FORCE_TRANSCODE=1 / vegas.forceTranscode=true (test-only
+    // escape hatch): bypasses ONLY this native-BCn gate, forcing the
+    // transcode path so it can be exercised on drivers that support BCn
+    // natively (e.g. Turnip for validating batching/mapping fixes). It
+    // never bypasses the isEnabled / s_device / s_tcAvailable guards
+    // above — those protect against the ASTC-format-with-raw-BCn-data
+    // GPU hang.
     static bool forceTranscodeLogged = false;
-    if (forceTranscode && !forceTranscodeLogged) {
+    if (isForceTranscode() && !forceTranscodeLogged) {
       forceTranscodeLogged = true;
-      Logger::debug("VEGAS: VEGAS_FORCE_TRANSCODE=1 — transcoding despite native BCn (test mode)");
+      Logger::debug("VEGAS: force transcode enabled (VEGAS_FORCE_TRANSCODE=1 / vegas.forceTranscode=true) — transcoding despite native BCn (test mode)");
     }
     VkFormatFeatureFlags2 bcnFeatures = adapter->getFormatFeatures(originalFormat).optimal;
-    if ((bcnFeatures & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT) && !forceTranscode) {
+    if ((bcnFeatures & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT) && !isForceTranscode()) {
       Logger::debug(str::format(
         "VEGAS: BCn ", static_cast<uint32_t>(originalFormat),
         " natively supported — skipping transcode"));
@@ -1158,6 +1170,17 @@ namespace dxvk {
     if (device != nullptr) {
       device->m_vegasMetrics.tier        = s_tier;
       device->m_vegasMetrics.initialized = true;
+    }
+
+    // Draw-count CSV profiling: VEGAS_PROFILE_DRAWS=1 or vegas.profileDraws=true
+    s_profileActive = env::getEnvVar("VEGAS_PROFILE_DRAWS") == "1"
+                   || device->config().vegasProfileDraws;
+    if (s_profileActive) {
+      s_gameName = sanitizeGameName(env::getExeName());
+      Logger::debug(str::format(
+          "Vegas: draw count profiling active (VEGAS_PROFILE_DRAWS=1 / "
+          "vegas.profileDraws=true) — output vegas_", s_gameName,
+          "_drawcount.csv"));
     }
 
     s_initialized = true;
@@ -4608,6 +4631,88 @@ namespace dxvk {
   }
 
   // ============================================================
+  // Draw-count CSV profiling
+  // ============================================================
+
+  std::string Vegas::sanitizeGameName(const std::string& exeName) {
+    std::string result = exeName;
+    // Remove .exe extension
+    if (result.size() > 4 && result.substr(result.size() - 4) == ".exe")
+      result = result.substr(0, result.size() - 4);
+    // Replace non-alphanumeric chars with underscore
+    for (auto& c : result) {
+      if (!std::isalnum(static_cast<unsigned char>(c)))
+        c = '_';
+    }
+    return result;
+  }
+
+  bool Vegas::isForceTranscode() {
+    // Test-only escape hatch: VEGAS_FORCE_TRANSCODE=1 env or
+    // vegas.forceTranscode=true in dxvk.conf. Bypasses ONLY the
+    // native-BCn gate (see shouldTranscodeFormat); the safety guards
+    // (isEnabled / s_device / s_tcAvailable) always apply.
+    auto dev = s_dxvkDevice;
+    if (dev != nullptr && dev->config().vegasForceTranscode)
+      return true;
+    return env::getEnvVar("VEGAS_FORCE_TRANSCODE") == "1";
+  }
+
+  void Vegas::recordDrawCall(uint32_t count) {
+    // Only count when profiling is active (zero-cost otherwise).
+    if (!s_profileActive)
+      return;
+    s_frameDrawCount += count;
+  }
+
+  void Vegas::dumpDrawCsv() {
+    // Open in append mode: one file per game, rows appended as the ring
+    // fills. Header written only when the file is brand new (empty).
+    const std::string path = "/sdcard/vegas_" + s_gameName + "_drawcount.csv";
+
+    FILE* f = std::fopen(path.c_str(), "a");
+    if (!f) {
+      Logger::err(str::format(
+        "Vegas: failed to open draw CSV '", path, "': ", strerror(errno)));
+      return;
+    }
+
+    // Write metadata header only if file is brand new (empty), so data
+    // from multiple sessions accumulates without duplicate headers.
+    std::fseek(f, 0, SEEK_END);
+    bool fileEmpty = (std::ftell(f) == 0);
+    if (fileEmpty) {
+      auto dev = s_dxvkDevice;
+      std::string deviceName = "unknown";
+      if (dev != nullptr && dev->adapter() != nullptr)
+        deviceName = dev->adapter()->deviceProperties().deviceName;
+
+      auto now = std::chrono::system_clock::now();
+      std::time_t now_t = std::chrono::system_clock::to_time_t(now);
+      char timeBuf[32] = {};
+      std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", std::localtime(&now_t));
+
+      std::fprintf(f, "# Device: %s\n", deviceName.c_str());
+      std::fprintf(f, "# Game: %s\n", s_gameName.c_str());
+      std::fprintf(f, "# Created: %s\n", timeBuf);
+      std::fprintf(f, "# Columns: session_frame,drawCount,fps\n");
+      std::fprintf(f, "session_frame,drawCount,fps\n");
+    }
+
+    // Dump ring contents in order (oldest first).
+    for (uint32_t i = 0; i < DRAW_HISTORY_SIZE; i++) {
+      uint32_t idx = (s_drawHead + i) % DRAW_HISTORY_SIZE;
+      float fps = s_drawFtHistory[idx] > 0.0f
+        ? 1000.0f / s_drawFtHistory[idx] : 0.0f;
+      std::fprintf(f, "%u,%u,%.2f\n",
+        i + 1, s_drawHistory[idx], fps);
+    }
+
+    std::fflush(f);
+    std::fclose(f);
+  }
+
+  // ============================================================
   // VegasHud metrics
   // ============================================================
   void Vegas::pushMetrics(
@@ -4625,6 +4730,22 @@ namespace dxvk {
 
     s_ftHistory[s_ftHead] = frameTime;
     s_ftHead = (s_ftHead + 1) % FT_HISTORY_SIZE;
+
+    // Draw-count CSV: record per-frame draw count into the ring, then
+    // dump every DRAW_HISTORY_SIZE frames. pushMetrics runs once per
+    // presented frame (called from PresentBase in dxgi.dll), so this is
+    // the per-frame record site (mirrors the 2.4.1 series).
+    if (s_profileActive) {
+      s_drawHistory[s_drawHead]     = s_frameDrawCount;
+      s_drawFtHistory[s_drawHead]   = frameTime;
+      s_drawHead = (s_drawHead + 1) % DRAW_HISTORY_SIZE;
+      s_frameDrawCount = 0;
+
+      if (++s_dumpCounter >= DRAW_HISTORY_SIZE) {
+        s_dumpCounter = 0;
+        dumpDrawCsv();
+      }
+    }
 
     // Also write to shared DxvkDevice metrics (cross-DLL safe).
     // The device object is the same pointer in both d3d11.dll and

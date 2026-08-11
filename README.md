@@ -145,6 +145,12 @@ vegas.enableUpscaler = Auto
 # Manual tier override (advanced): 0=auto, 1=low-end, 2=mid, 3=high-end
 vegas.forceTier = 0
 
+# Draw-count profiling CSV (debug): writes vegas_<game>_drawcount.csv
+vegas.profileDraws = false
+
+# Test-only: force BCn→ASTC transcode despite native BCn support
+vegas.forceTranscode = false
+
 # Compiler thread count (advanced): 0=auto (max 4 on ARM64)
 dxvk.numCompilerThreads = 0
 ```

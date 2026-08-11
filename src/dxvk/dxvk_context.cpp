@@ -843,6 +843,9 @@ if (unlikely(!m_vegasProfile.initialized)) {
     initVegasProfile();
 }
 
+    // Vegas: per-draw CSV profiling (no-op when inactive)
+    Vegas::recordDrawCall();
+
 // Threshold check using Relaxed ordering
     uint32_t drawCount = m_drawsSinceSubmit.load(std::memory_order_relaxed);
     if (unlikely(Vegas::shouldFlush(drawCount))) {
@@ -924,6 +927,8 @@ if (unlikely(!m_vegasProfile.initialized)) {
   void DxvkContext::draw(
           uint32_t          count,
     const VkDrawIndirectCommand* draws) {
+    // Vegas: per-draw CSV profiling — batch path, count each draw
+    Vegas::recordDrawCall(count);
     drawGeneric<false>(count, draws);
   }
   
@@ -933,6 +938,8 @@ if (unlikely(!m_vegasProfile.initialized)) {
           uint32_t          count,
           uint32_t          stride,
           bool              unroll) {
+    // Vegas: per-draw CSV profiling
+    Vegas::recordDrawCall(count);
     drawIndirectGeneric<false>(offset, count, stride, unroll);
   }
   
@@ -942,6 +949,8 @@ if (unlikely(!m_vegasProfile.initialized)) {
           VkDeviceSize      countOffset,
           uint32_t          maxCount,
           uint32_t          stride) {
+    // Vegas: per-draw CSV profiling (1 per call — actual count is GPU-side)
+    Vegas::recordDrawCall();
     drawIndirectCountGeneric<false>(offset, countOffset, maxCount, stride);
   }
   
@@ -953,6 +962,9 @@ if (unlikely(!m_vegasProfile.initialized)) {
     if (unlikely(!m_vegasProfile.initialized)) {
         initVegasProfile();
     }
+
+    // Vegas: per-draw CSV profiling (no-op when inactive)
+    Vegas::recordDrawCall();
 
     // Threshold check using Relaxed ordering
     uint32_t drawCount = m_drawsSinceSubmit.load(std::memory_order_relaxed);
@@ -978,6 +990,8 @@ void DxvkContext::drawIndexed(
           uint32_t                          count,
     const VkDrawIndexedIndirectCommand* draws) {
     // This is the batch version required by the D3D11 frontend
+    // Vegas: per-draw CSV profiling — batch path, count each draw
+    Vegas::recordDrawCall(count);
     drawGeneric<true>(count, draws);
   }
 
@@ -987,6 +1001,8 @@ void DxvkContext::drawIndexed(
           uint32_t          count,
           uint32_t          stride,
           bool              unroll) {
+    // Vegas: per-draw CSV profiling
+    Vegas::recordDrawCall(count);
     drawIndirectGeneric<true>(offset, count, stride, unroll);
   }
   
@@ -996,6 +1012,8 @@ void DxvkContext::drawIndexed(
           VkDeviceSize      countOffset,
           uint32_t          maxCount,
           uint32_t          stride) {
+    // Vegas: per-draw CSV profiling (1 per call — actual count is GPU-side)
+    Vegas::recordDrawCall();
     drawIndirectCountGeneric<true>(offset, countOffset, maxCount, stride);
   }
 
@@ -1004,6 +1022,8 @@ void DxvkContext::drawIndexed(
           VkDeviceSize      counterOffset,
           uint32_t          counterDivisor,
           uint32_t          counterBias) {
+    // Vegas: per-draw CSV profiling
+    Vegas::recordDrawCall();
     if (this->commitGraphicsState<false, true>()) {
       auto argInfo = m_state.id.cntBuffer.getSliceInfo();
 

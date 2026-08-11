@@ -674,6 +674,9 @@ placed in `src/dxvk/hud/` and included with quoted paths for local resolution.
 | `dxvk.enableStarProfile` | Tristate | Auto | `dxvk_options.h:79` | `dxvk_options.cpp:26`, `vegas.cpp:898` | Master switch for ALL Vegas features |
 | `vegas.enableUpscaler` | Tristate | Auto | `dxvk_options.h:83` | `dxvk_options.cpp:27`, `dxgi_options.cpp:130` | FSR 1.0 spatial upscaler |
 | `vegas.forceTier` | int32_t | 0 | `dxvk_options.h:91` | `dxvk_options.cpp:28`, `vegas.cpp:947-949` | Override GPU tier detection |
+| `vegas.profileDraws` | bool | false | `dxvk_options.h:95` | `dxvk_options.cpp:31`, `vegas.cpp:initializeProfile` | Per-draw CSV profiling (`vegas_<game>_drawcount.csv`) |
+| `vegas.telemetry` | bool | false | `dxvk_options.h:100` | `dxvk_options.cpp:32` | Reserved for framegen-stats telemetry (parsed, not yet functional) |
+| `vegas.forceTranscode` | bool | false | `dxvk_options.h:105` | `dxvk_options.cpp:33`, `vegas.cpp:isForceTranscode` | Test-only: force BCn→ASTC transcode despite native BCn |
 | `dxvk.enableAsync` | bool | false | `dxvk_options.h:15` | `dxvk_options.cpp:24`, `context.cpp:5874` | Async pipeline compilation |
 | `dxvk.numCompilerThreads` | int32_t | 0 | `dxvk_options.h:22` | `dxvk_options.cpp:8` | Override compiler thread count |
 

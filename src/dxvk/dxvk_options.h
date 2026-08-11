@@ -86,6 +86,19 @@ namespace dxvk {
     /// Forces the tier detected by the GPU-name classifier to this value.
     /// Useful for misclassified Adreno GPUs or manual tuning.
     int32_t vegasForceTier = 0;
+
+    /// Enables per-draw profiling CSV output (vegas_<game>_drawcount.csv).
+    /// Equivalent to VEGAS_PROFILE_DRAWS=1.
+    bool vegasProfileDraws = false;
+
+    /// Reserved for framegen-stats telemetry. Parsed for dxvk.conf
+    /// compatibility on this branch; the FG stats series is not ported here.
+    bool vegasTelemetry = false;
+
+    /// Test-only escape hatch: force BCn transcode even when the driver
+    /// natively supports the format. Equivalent to VEGAS_FORCE_TRANSCODE=1.
+    /// Never bypasses the isEnabled / s_device / s_tcAvailable guards.
+    bool vegasForceTranscode = false;
   };
 
 }

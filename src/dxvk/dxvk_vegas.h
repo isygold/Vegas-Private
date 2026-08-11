@@ -404,6 +404,21 @@ namespace dxvk {
 
     static bool                s_fgActive;
 
+    // ---- Draw-count CSV profiling (VEGAS_PROFILE_DRAWS / vegas.profileDraws) ----
+    static constexpr uint32_t  DRAW_HISTORY_SIZE = 60;
+    static uint32_t            s_drawHistory[DRAW_HISTORY_SIZE];
+    static float               s_drawFtHistory[DRAW_HISTORY_SIZE];
+    static uint32_t            s_drawHead;
+    static uint32_t            s_frameDrawCount;
+    static uint32_t            s_dumpCounter;
+    static bool                s_profileActive;
+    static std::string         s_gameName;
+
+    /// Count API draw calls (default 1 per call; batch paths pass the
+    /// number of draws so multi-draw is not undercounted).
+    static void recordDrawCall(
+            uint32_t             count = 1);
+
     /// Push frame-timing metrics for HUD consumption.
     static void pushMetrics(
             float                gpuLoad,
@@ -420,6 +435,15 @@ namespace dxvk {
     static float getLastFrameTime();
     static bool isFsrActive();
     static bool isFgActive();
+
+    /// Test-only escape hatch (VEGAS_FORCE_TRANSCODE=1 / vegas.forceTranscode=true):
+    /// bypasses ONLY the native-BCn gate; never bypasses isEnabled/s_device/
+    /// s_tcAvailable guards.
+    static bool isForceTranscode();
+
+    /// Strip ".exe" and replace non-alphanumeric chars with underscore
+    /// (used for the draw CSV filename).
+    static std::string sanitizeGameName(const std::string& exeName);
   };
 
 } // namespace dxvk
