@@ -86,7 +86,8 @@ namespace dxvk {
       // use the ASTC format — a BCn view on an ASTC image is invalid
       // (hard fault on Turnip). Map the requested (BCn) view format to
       // its ASTC 4×4 equivalent so SRGB/UNORM variants stay correct;
-      // non-BCn formats pass through untouched.
+      // non-BCn formats pass through untouched. Swizzle stays as the
+      // BCn one — BCn and ASTC 4×4 both use identity RGBA swizzles.
       auto dxvkImage = texture->GetImage();
       if (dxvkImage != nullptr && dxvkImage->info().originalFormat != VK_FORMAT_UNDEFINED) {
         VkFormat astcForView = Vegas::getAstcFormat(viewInfo.format);
@@ -94,11 +95,6 @@ namespace dxvk {
           viewInfo.format = astcForView;
         auto swappedInfo = lookupFormatInfo(viewInfo.format);
         viewInfo.aspects = swappedInfo->aspectMask;
-        if (formatInfo.Swizzle.r == VK_COMPONENT_SWIZZLE_R
-         && formatInfo.Swizzle.g == VK_COMPONENT_SWIZZLE_G
-         && formatInfo.Swizzle.b == VK_COMPONENT_SWIZZLE_B
-         && formatInfo.Swizzle.a == VK_COMPONENT_SWIZZLE_A)
-          viewInfo.packedSwizzle = DxvkImageViewKey::packSwizzle(swappedInfo->swizzle);
       }
 
       // Shaders expect the stencil value in the G component
