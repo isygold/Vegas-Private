@@ -1175,6 +1175,12 @@ namespace dxvk {
     // Draw-count CSV profiling: VEGAS_PROFILE_DRAWS=1 or vegas.profileDraws=true
     s_profileActive = env::getEnvVar("VEGAS_PROFILE_DRAWS") == "1"
                    || device->config().vegasProfileDraws;
+    // Publish to shared DxvkDevice metrics so pushMetrics()/dumpDrawCsv()
+    // can see it — they run in dxgi.dll, whose copy of s_profileActive
+    // is always false (initializeProfile() only executes in d3d11.dll).
+    if (device != nullptr)
+      device->m_vegasMetrics.profileActive.store(
+          s_profileActive, std::memory_order_release);
     if (s_profileActive) {
       s_gameName = sanitizeGameName(env::getExeName());
       Logger::debug(str::format(
@@ -4660,15 +4666,27 @@ namespace dxvk {
 
   void Vegas::recordDrawCall(uint32_t count) {
     // Only count when profiling is active (zero-cost otherwise).
+    // The static gate is valid here: recordDrawCall runs in d3d11.dll
+    // (draw path via DxvkContext), the same copy of the statics that
+    // initializeProfile() set.
     if (!s_profileActive)
       return;
     s_frameDrawCount += count;
+    // Accumulate into the shared device counter — pushMetrics (dxgi.dll)
+    // consumes it via exchange(). s_dxvkDevice is set in this copy of
+    // the statics by initializeProfile().
+    if (s_dxvkDevice != nullptr)
+      s_dxvkDevice->m_vegasMetrics.frameDrawCount.fetch_add(
+          count, std::memory_order_relaxed);
   }
 
   void Vegas::dumpDrawCsv() {
     // Open in append mode: one file per game, rows appended as the ring
     // fills. Header written only when the file is brand new (empty).
-    const std::string path = "/sdcard/vegas_" + s_gameName + "_drawcount.csv";
+    // Game name is computed here (not from s_gameName, which is set only
+    // in d3d11.dll's copy of the statics) — getExeName() is process-wide.
+    const std::string gameName = sanitizeGameName(env::getExeName());
+    const std::string path = "/sdcard/vegas_" + gameName + "_drawcount.csv";
 
     FILE* f = std::fopen(path.c_str(), "a");
     if (!f) {
@@ -4693,7 +4711,7 @@ namespace dxvk {
       std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", std::localtime(&now_t));
 
       std::fprintf(f, "# Device: %s\n", deviceName.c_str());
-      std::fprintf(f, "# Game: %s\n", s_gameName.c_str());
+      std::fprintf(f, "# Game: %s\n", gameName.c_str());
       std::fprintf(f, "# Created: %s\n", timeBuf);
       std::fprintf(f, "# Columns: session_frame,drawCount,fps\n");
       std::fprintf(f, "session_frame,drawCount,fps\n");
@@ -4734,12 +4752,16 @@ namespace dxvk {
     // Draw-count CSV: record per-frame draw count into the ring, then
     // dump every DRAW_HISTORY_SIZE frames. pushMetrics runs once per
     // presented frame (called from PresentBase in dxgi.dll), so this is
-    // the per-frame record site (mirrors the 2.4.1 series).
-    if (s_profileActive) {
-      s_drawHistory[s_drawHead]     = s_frameDrawCount;
+    // the per-frame record site (mirrors the 2.4.1 series). The gate
+    // reads the shared device flag: this DLL's copy of s_profileActive
+    // is always false here (initializeProfile() only runs in d3d11.dll).
+    if (s_dxvkDevice != nullptr && s_dxvkDevice->m_vegasMetrics.profileActive
+        .load(std::memory_order_acquire)) {
+      uint64_t frameDraws = s_dxvkDevice->m_vegasMetrics.frameDrawCount
+          .exchange(0, std::memory_order_relaxed);
+      s_drawHistory[s_drawHead]     = frameDraws;
       s_drawFtHistory[s_drawHead]   = frameTime;
       s_drawHead = (s_drawHead + 1) % DRAW_HISTORY_SIZE;
-      s_frameDrawCount = 0;
 
       if (++s_dumpCounter >= DRAW_HISTORY_SIZE) {
         s_dumpCounter = 0;
