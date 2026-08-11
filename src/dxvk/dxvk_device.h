@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include "dxvk_adapter.h"
 #include "dxvk_buffer.h"
 #include "dxvk_compute.h"
@@ -707,12 +706,6 @@ namespace dxvk {
       bool     fgActive      = false;
       float    ftHistory[60] = {};
       uint32_t ftHead        = 0;
-      // Draw-count CSV state. Written by recordDrawCall()/initializeProfile()
-      // in d3d11.dll, consumed by pushMetrics()/dumpDrawCsv() in dxgi.dll —
-      // atomics because the two DLLs' copies of the vegas statics are
-      // separate, while they share this DxvkDevice object.
-      std::atomic<bool>     profileActive   = { false };
-      std::atomic<uint64_t> frameDrawCount  = { 0 };
     };
 
     VegasMetrics m_vegasMetrics;
