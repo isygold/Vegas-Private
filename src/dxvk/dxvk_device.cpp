@@ -249,8 +249,16 @@ namespace dxvk {
       info.format, info.usage, info.extent, m_adapter);
 
     if (astcFormat != VK_FORMAT_UNDEFINED) {
-      info.originalFormat = info.format;
-      info.format         = astcFormat;
+      // The image is recreated as ASTC. The BCn view-format family and the
+      // mutable flag the caller set up for the original BCn format are now
+      // INVALID (vkCreateImage would get an incompatible format list —
+      // hard fault on Turnip). Strip them: views on the swapped image must
+      // be created with the ASTC format (see D3D11 SRV/RTV creation).
+      info.originalFormat  = info.format;
+      info.format          = astcFormat;
+      info.viewFormatCount = 0;
+      info.viewFormats     = nullptr;
+      info.flags          &= ~VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
 
 #ifndef NDEBUG
       if (dxvk::Logger::logLevel() >= dxvk::LogLevel::Debug) {
