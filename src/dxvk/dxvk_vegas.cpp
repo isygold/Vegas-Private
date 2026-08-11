@@ -434,6 +434,19 @@ namespace dxvk {
   // not when the GPU is saturated. Inverted from the original logic.
   // Tier 1 (Adreno 610) excluded — compute budget insufficient for 3-pass.
   bool Vegas::needsFrameGen(float frameTime, uint32_t tier) {
+      // Tristate user toggle (vegas.enableFramegen):
+      //   True  = force-enable regardless of tier (e.g. Tier 1 testing).
+      //   False = disable entirely. (2.4.1 only honored True — False fell
+      //           through to the heuristic below; fixed here.)
+      //   Auto  = tier headroom heuristic.
+      // s_dxvkDevice is lazily resolved before this call in dxgi.dll;
+      // if still null (cold frames) fall back to the heuristic.
+      auto dev = s_dxvkDevice;
+      if (dev != nullptr) {
+        Tristate fg = dev->config().vegasEnableFramegen;
+        if (fg == Tristate::True)  return true;
+        if (fg == Tristate::False) return false;
+      }
       if (tier == 1) return false;
       if (tier == 2) return frameTime <= 29.0f;  // ≥34 FPS headroom
       return frameTime <= 33.0f;                   // ≥30 FPS headroom

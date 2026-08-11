@@ -82,6 +82,13 @@ namespace dxvk {
     /// Only effective when enableStarProfile is not False.
     Tristate vegasEnableUpscaler = Tristate::Auto;
 
+    /// Framegen toggle (Auto/True/False).
+    /// True = force-enable regardless of tier (Tier-1 testing).
+    /// False = disable entirely (2.4.1 only honored True — False fell
+    ///         through to the heuristic; this branch fixes that).
+    /// Auto = tier headroom heuristic (Tier 2 ≤29ms, Tier 3 ≤33ms frame time).
+    Tristate vegasEnableFramegen = Tristate::Auto;
+
     /// Override GPU tier (0 = auto-detect, 1 = entry, 2 = mid, 3 = high).
     /// Forces the tier detected by the GPU-name classifier to this value.
     /// Useful for misclassified Adreno GPUs or manual tuning.
