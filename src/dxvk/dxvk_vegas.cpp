@@ -589,8 +589,21 @@ namespace dxvk {
     // (major 512, minor >= 514 — Snapdragon 865 era onward), Turnip, and
     // desktop drivers all expose BCn natively. Only older Adreno drivers
     // (pre-514) lack BCn support and actually need the ASTC fallback.
+    //
+    // VEGAS_FORCE_TRANSCODE=1 (test-only escape hatch): bypasses ONLY
+    // this native-BCn gate, forcing the transcode path so it can be
+    // exercised on drivers that support BCn natively (e.g. Turnip for
+    // validating batching/mapping fixes). It never bypasses the
+    // isEnabled / s_device / s_tcAvailable guards above — those protect
+    // against the ASTC-format-with-raw-BCn-data GPU hang.
+    static const bool forceTranscode = env::getEnvVar("VEGAS_FORCE_TRANSCODE") == "1";
+    static bool forceTranscodeLogged = false;
+    if (forceTranscode && !forceTranscodeLogged) {
+      forceTranscodeLogged = true;
+      Logger::debug("VEGAS: VEGAS_FORCE_TRANSCODE=1 — transcoding despite native BCn (test mode)");
+    }
     VkFormatFeatureFlags2 bcnFeatures = adapter->getFormatFeatures(originalFormat).optimal;
-    if (bcnFeatures & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT) {
+    if ((bcnFeatures & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT) && !forceTranscode) {
       Logger::debug(str::format(
         "VEGAS: BCn ", static_cast<uint32_t>(originalFormat),
         " natively supported — skipping transcode"));
