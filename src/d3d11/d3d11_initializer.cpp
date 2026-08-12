@@ -166,21 +166,6 @@ namespace dxvk {
     VkFormat packedFormat = m_parent->LookupPackedFormat(desc->Format, pTexture->GetFormatMode()).Format;
     auto formatInfo = lookupFormatInfo(packedFormat);
 
-    // --- VEGAS: detect BCn→ASTC format swap for staging sizing ---
-    VkFormat originalBcnFormat = image->info().originalFormat;
-    bool needsAstcStaging = false;
-    bool needsTranscode = false;
-
-    if (originalBcnFormat != VK_FORMAT_UNDEFINED) {
-      needsTranscode = true;
-      const DxvkFormatInfo* bcnFmt = lookupFormatInfo(originalBcnFormat);
-      // ASTC 4×4 uses 16 bytes/block. BC1/BC4 use 8 bytes/block — the
-      // staging buffer must be sized for ASTC output, not BCn input.
-      // BC3/BC5/BC7 are already 16 bytes/block so no resize needed.
-      needsAstcStaging = (bcnFmt->elementSize < 16);
-    }
-    // --- END VEGAS ---
-
     if (pInitialData != nullptr && pInitialData->pSysMem != nullptr) {
       // Compute data size for all subresources and allocate staging buffer memory
       DxvkBufferSlice stagingSlice;
@@ -191,10 +176,6 @@ namespace dxvk {
         for (uint32_t mip = 0; mip < image->info().mipLevels; mip++) {
           VkDeviceSize mipLayerSize = util::computeImageDataSize(
             packedFormat, image->mipLevelExtent(mip), formatInfo->aspectMask);
-          // When the staging must hold ASTC 4×4 output (16 B/block)
-          // but the source is BC1/BC4 (8 B/block), double the per-layer size
-          if (needsAstcStaging)
-            mipLayerSize *= 2;
           dataSize += image->info().numLayers * align(mipLayerSize, CACHE_LINE_SIZE);
         }
 
@@ -220,10 +201,7 @@ namespace dxvk {
               pInitialData[index].pSysMem, pInitialData[index].SysMemPitch, pInitialData[index].SysMemSlicePitch,
               0, 0, pTexture->GetVkImageType(), mipLevelExtent, 1, formatInfo, formatInfo->aspectMask);
 
-            // Advance by ASTC-sized stride when the transcoder will expand the data
             VkDeviceSize mipStride = align(mipDataSize, CACHE_LINE_SIZE);
-            if (needsAstcStaging)
-              mipStride *= 2;
             dataOffset += mipStride;
           }
 
@@ -234,42 +212,6 @@ namespace dxvk {
           }
         }
       }
-
-      // --- VEGAS: GPU BCn→ASTC transcoding (in-place, all BCn formats) ---
-      // Transcodes BCn→ASTC 4×4 in-place in the staging buffer.
-      // The staging buffer was allocated with enough space for ASTC output
-      // (doubled for BC1/BC4 where ASTC is 16 B/block vs 8 B/block).
-      if (needsTranscode && pTexture->HasImage()) {
-        const DxvkFormatInfo* bcFormatInfo = lookupFormatInfo(originalBcnFormat);
-        VkBuffer stagingVkBuffer = stagingSlice.buffer()->getSliceInfo().buffer;
-        VkDeviceSize tcOffset = stagingSlice.offset();
-
-        for (uint32_t mip = 0; mip < image->info().mipLevels; mip++) {
-          VkExtent3D mipExtent = image->mipLevelExtent(mip);
-
-          VkDeviceSize mipDataSize = util::computeImageDataSize(
-            originalBcnFormat, mipExtent, bcFormatInfo->aspectMask);
-
-          for (uint32_t layer = 0; layer < image->info().numLayers; layer++) {
-            bool ok = Vegas::gpuTranscodeImageData(
-                stagingVkBuffer, static_cast<uint32_t>(tcOffset),
-                stagingVkBuffer, static_cast<uint32_t>(tcOffset),
-                originalBcnFormat,
-                mipExtent.width, mipExtent.height);
-            if (!ok) {
-              Logger::warn(str::format(
-                  "VEGAS: gpuTranscodeImageData failed for ",
-                  originalBcnFormat, " mip ", mip, " layer ", layer));
-            }
-            // Advance by ASTC-sized stride (same as the packing loop)
-            VkDeviceSize mipStride = align(mipDataSize, CACHE_LINE_SIZE);
-            if (needsAstcStaging)
-              mipStride *= 2;
-            tcOffset += mipStride;
-          }
-        }
-      }
-      // --- END VEGAS ---
 
       // Upload all subresources of the image in one go
       if (pTexture->HasImage()) {

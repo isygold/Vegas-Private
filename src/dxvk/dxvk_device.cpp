@@ -242,36 +242,7 @@ namespace dxvk {
   Rc<DxvkImage> DxvkDevice::createImage(
     const DxvkImageCreateInfo&  createInfo,
           VkMemoryPropertyFlags memoryType) {
-    // --- VEGAS: BCn→ASTC GPU transcoding format swap ---
-    DxvkImageCreateInfo info = createInfo;
-
-    VkFormat astcFormat = Vegas::shouldTranscodeFormat(
-      info.format, info.usage, info.extent, m_adapter);
-
-    if (astcFormat != VK_FORMAT_UNDEFINED) {
-      // The image is recreated as ASTC. The BCn view-format family and the
-      // mutable flag the caller set up for the original BCn format are now
-      // INVALID (vkCreateImage would get an incompatible format list —
-      // hard fault on Turnip). Strip them: views on the swapped image must
-      // be created with the ASTC format (see D3D11 SRV/RTV creation).
-      info.originalFormat  = info.format;
-      info.format          = astcFormat;
-      info.viewFormatCount = 0;
-      info.viewFormats     = nullptr;
-      info.flags          &= ~VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
-
-#ifndef NDEBUG
-      if (dxvk::Logger::logLevel() >= dxvk::LogLevel::Debug) {
-        Logger::debug(str::format(
-          "VEGAS: transcode ", info.originalFormat, " -> ",
-          info.format, " (", info.extent.width, "x",
-          info.extent.height, ")"));
-      }
-#endif
-    }
-    // --- END VEGAS ---
-
-    return new DxvkImage(this, info, m_objects.memoryManager(), memoryType);
+    return new DxvkImage(this, createInfo, m_objects.memoryManager(), memoryType);
   }
   
   

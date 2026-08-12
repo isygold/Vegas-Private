@@ -101,11 +101,6 @@ namespace dxvk {
     /// Reserved for framegen-stats telemetry. Parsed for dxvk.conf
     /// compatibility on this branch; the FG stats series is not ported here.
     bool vegasTelemetry = false;
-
-    /// Test-only escape hatch: force BCn transcode even when the driver
-    /// natively supports the format. Equivalent to VEGAS_FORCE_TRANSCODE=1.
-    /// Never bypasses the isEnabled / s_device / s_tcAvailable guards.
-    bool vegasForceTranscode = false;
   };
 
 }
