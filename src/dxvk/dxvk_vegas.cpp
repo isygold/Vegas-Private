@@ -485,6 +485,67 @@ namespace dxvk {
 
 
   // ============================================================
+
+
+  // ============================================================
+  // Cross-DLL shared state (draw CSV counter + tier)
+  // ============================================================
+  // This fork instantiates separate DxvkDevice objects in d3d11.dll and
+  // dxgi.dll (verified on-device: tier=1 written by d3d11 initializes as
+  // 0 on the dxgi side), so state parked on a DxvkDevice is invisible
+  // across the DLL boundary. Cross-DLL state therefore lives in
+  // process-shared memory reachable from any DLL copy of these statics:
+  //   - Windows builds: a named section (CreateFileMapping). Within one
+  //     process the section name resolves to the SAME memory in every DLL.
+  //   - Non-Windows builds: a fixed-path shared mmap of a temp file.
+  // Writers:
+  //   recordDrawCall (d3d11.dll)   — drawCounter.fetch_add
+  //   initializeProfile (d3d11.dll) — tier + flags(initialized), release
+  // Readers:
+  //   pushMetrics (dxgi.dll)       — drawCounter.exchange(0) per frame
+  //   getTier (any DLL)            — tier, acquisition-ordered via flags
+  struct VegasSharedState {
+    std::atomic<uint64_t> drawCounter;  ///< per-frame draw count accumulator
+    std::atomic<uint32_t> tier;         ///< computed tier (1-3), 0 = unset
+    std::atomic<uint32_t> flags;        ///< bit 0: tier initialized (release)
+  };
+  static constexpr uint32_t kSharedStateSize = sizeof(VegasSharedState);
+  static constexpr uint32_t kSharedFlagTierInit = 1u;
+#ifdef _WIN32
+  static void* s_sharedStateView   = nullptr;
+  static bool  s_sharedStateMapped = false;
+
+  static VegasSharedState* vegasSharedState() {
+    if (!s_sharedStateMapped) {
+      s_sharedStateMapped = true;
+      HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr,
+          PAGE_READWRITE, 0, kSharedStateSize, "Local\\VegasDrawCounter");
+      if (h != nullptr)
+        s_sharedStateView = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, kSharedStateSize);
+    }
+    return reinterpret_cast<VegasSharedState*>(s_sharedStateView);
+  }
+#else
+  static void* s_sharedStateView   = nullptr;
+  static bool  s_sharedStateMapped = false;
+
+  static VegasSharedState* vegasSharedState() {
+    if (!s_sharedStateMapped) {
+      s_sharedStateMapped = true;
+      int fd = ::open("/tmp/vegas_csv_counter.bin", O_RDWR | O_CREAT, 0600);
+      if (fd >= 0) {
+        if (::ftruncate(fd, kSharedStateSize) == 0) {
+          void* p = ::mmap(nullptr, kSharedStateSize,
+              PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+          if (p != MAP_FAILED)
+            s_sharedStateView = p;
+        }
+        ::close(fd);
+      }
+    }
+    return reinterpret_cast<VegasSharedState*>(s_sharedStateView);
+  }
+#endif
   // Self-Aware Profile — auto-detect GPU, bake all thresholds
   // ============================================================
 
@@ -982,9 +1043,6 @@ namespace dxvk {
     return true;
   }
 
-
-    return true;
-  }
   // Creates a private VkImage with STORAGE_BIT + TRANSFER_SRC_BIT.
   // Destroys and recreates if dimensions changed (swapchain resize).
   static bool ensureFsrIntermediate(VkDevice device, VkExtent3D extent) {
@@ -3246,65 +3304,6 @@ namespace dxvk {
         c = '_';
     }
 
-  // ============================================================
-  // Cross-DLL shared state (draw CSV counter + tier)
-  // ============================================================
-  // This fork instantiates separate DxvkDevice objects in d3d11.dll and
-  // dxgi.dll (verified on-device: tier=1 written by d3d11 initializes as
-  // 0 on the dxgi side), so state parked on a DxvkDevice is invisible
-  // across the DLL boundary. Cross-DLL state therefore lives in
-  // process-shared memory reachable from any DLL copy of these statics:
-  //   - Windows builds: a named section (CreateFileMapping). Within one
-  //     process the section name resolves to the SAME memory in every DLL.
-  //   - Non-Windows builds: a fixed-path shared mmap of a temp file.
-  // Writers:
-  //   recordDrawCall (d3d11.dll)   — drawCounter.fetch_add
-  //   initializeProfile (d3d11.dll) — tier + flags(initialized), release
-  // Readers:
-  //   pushMetrics (dxgi.dll)       — drawCounter.exchange(0) per frame
-  //   getTier (any DLL)            — tier, acquisition-ordered via flags
-  struct VegasSharedState {
-    std::atomic<uint64_t> drawCounter;  ///< per-frame draw count accumulator
-    std::atomic<uint32_t> tier;         ///< computed tier (1-3), 0 = unset
-    std::atomic<uint32_t> flags;        ///< bit 0: tier initialized (release)
-  };
-  static constexpr uint32_t kSharedStateSize = sizeof(VegasSharedState);
-  static constexpr uint32_t kSharedFlagTierInit = 1u;
-#ifdef _WIN32
-  static void* s_sharedStateView   = nullptr;
-  static bool  s_sharedStateMapped = false;
-
-  static VegasSharedState* vegasSharedState() {
-    if (!s_sharedStateMapped) {
-      s_sharedStateMapped = true;
-      HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr,
-          PAGE_READWRITE, 0, kSharedStateSize, "Local\\VegasDrawCounter");
-      if (h != nullptr)
-        s_sharedStateView = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, kSharedStateSize);
-    }
-    return reinterpret_cast<VegasSharedState*>(s_sharedStateView);
-  }
-#else
-  static void* s_sharedStateView   = nullptr;
-  static bool  s_sharedStateMapped = false;
-
-  static VegasSharedState* vegasSharedState() {
-    if (!s_sharedStateMapped) {
-      s_sharedStateMapped = true;
-      int fd = ::open("/tmp/vegas_csv_counter.bin", O_RDWR | O_CREAT, 0600);
-      if (fd >= 0) {
-        if (::ftruncate(fd, kSharedStateSize) == 0) {
-          void* p = ::mmap(nullptr, kSharedStateSize,
-              PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-          if (p != MAP_FAILED)
-            s_sharedStateView = p;
-        }
-        ::close(fd);
-      }
-    }
-    return reinterpret_cast<VegasSharedState*>(s_sharedStateView);
-  }
-#endif
 
   void Vegas::recordDrawCall(uint32_t count) {
     // Only count when profiling is active (zero-cost otherwise).
