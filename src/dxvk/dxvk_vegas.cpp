@@ -308,7 +308,7 @@ namespace dxvk {
       if (s_drawThreshold != oldThresh) {
           Logger::debug(str::format(
               "Vegas: tuneThreshold ", oldThresh, " -> ", s_drawThreshold,
-              " load=", load, " smoothFt=", s_smoothFt, "ms tier=", s_tier));
+              " load=", load, " smoothFt=", s_smoothFt, "ms tier=", getTier()));
       }
   }
 
@@ -602,10 +602,20 @@ namespace dxvk {
     s_physicalDevice  = reinterpret_cast<uint64_t>(device->adapter()->handle());
 
 
-    // Store tier in shared DxvkDevice metrics for cross-DLL access
+    // Store tier in shared DxvkDevice metrics (d3d11-side HUD) AND in the
+    // process-shared section (cross-DLL): the FG/FSR decision runs in
+    // dxgi.dll, which holds a different DxvkDevice instance — the section
+    // is the only channel that reaches it (2.4.1 was correct because its
+    // live decision ran in d3d11.dll; the beta consolidated present into
+    // dxgi and lost tier visibility).
     if (device != nullptr) {
       device->m_vegasMetrics.tier        = s_tier;
       device->m_vegasMetrics.initialized = true;
+    }
+    auto* shared = vegasSharedState();
+    if (shared != nullptr) {
+      shared->tier.store(s_tier, std::memory_order_relaxed);
+      shared->flags.store(kSharedFlagTierInit, std::memory_order_release);
     }
 
     // Draw-count CSV profiling: VEGAS_PROFILE_DRAWS=1 or vegas.profileDraws=true.
@@ -631,7 +641,22 @@ namespace dxvk {
   uint32_t Vegas::getDrawThreshold() { return s_drawThreshold; }
   uint32_t Vegas::getHaaeThreshold() { return s_haaeThreshold; }
   uint32_t Vegas::getTier()         {
-    // Prefer shared device metrics (cross-DLL safe)
+    // Cross-DLL: prefer the process-shared tier (written by
+    // initializeProfile in d3d11.dll) — this fork holds separate
+    // DxvkDevice instances per DLL, so device metrics are only valid
+    // within the DLL that initialized them. Flags load is acquire to
+    // order the tier store publish. Falls back to per-DLL statics on
+    // cold frames / DLLs that never ran initializeProfile.
+    auto* shared = vegasSharedState();
+    if (shared != nullptr) {
+      if (shared->flags.load(std::memory_order_acquire) & kSharedFlagTierInit) {
+        uint32_t t = shared->tier.load(std::memory_order_relaxed);
+        if (t != 0)
+          return t;
+      }
+    }
+    // Same-instance fallback: device metrics (valid when this copy of
+    // the statics ran initializeProfile against the same DxvkDevice).
     auto dev = s_dxvkDevice;
     if (dev != nullptr && dev->m_vegasMetrics.initialized
         && dev->m_vegasMetrics.tier != 0)
@@ -3222,51 +3247,62 @@ namespace dxvk {
     }
 
   // ============================================================
-  // Cross-DLL draw counter (draw-count CSV profiling)
+  // Cross-DLL shared state (draw CSV counter + tier)
   // ============================================================
   // This fork instantiates separate DxvkDevice objects in d3d11.dll and
   // dxgi.dll (verified on-device: tier=1 written by d3d11 initializes as
   // 0 on the dxgi side), so state parked on a DxvkDevice is invisible
-  // across the DLL boundary. The draw counter therefore lives in
+  // across the DLL boundary. Cross-DLL state therefore lives in
   // process-shared memory reachable from any DLL copy of these statics:
   //   - Windows builds: a named section (CreateFileMapping). Within one
   //     process the section name resolves to the SAME memory in every DLL.
   //   - Non-Windows builds: a fixed-path shared mmap of a temp file.
-  // recordDrawCall (d3d11.dll) accumulates, pushMetrics (dxgi.dll)
-  // exchanges to zero each presented frame.
+  // Writers:
+  //   recordDrawCall (d3d11.dll)   — drawCounter.fetch_add
+  //   initializeProfile (d3d11.dll) — tier + flags(initialized), release
+  // Readers:
+  //   pushMetrics (dxgi.dll)       — drawCounter.exchange(0) per frame
+  //   getTier (any DLL)            — tier, acquisition-ordered via flags
+  struct VegasSharedState {
+    std::atomic<uint64_t> drawCounter;  ///< per-frame draw count accumulator
+    std::atomic<uint32_t> tier;         ///< computed tier (1-3), 0 = unset
+    std::atomic<uint32_t> flags;        ///< bit 0: tier initialized (release)
+  };
+  static constexpr uint32_t kSharedStateSize = sizeof(VegasSharedState);
+  static constexpr uint32_t kSharedFlagTierInit = 1u;
 #ifdef _WIN32
-  static void* s_csvCounterView   = nullptr;
-  static bool  s_csvCounterMapped = false;
+  static void* s_sharedStateView   = nullptr;
+  static bool  s_sharedStateMapped = false;
 
-  static std::atomic<uint64_t>* vegasCsvCounter() {
-    if (!s_csvCounterMapped) {
-      s_csvCounterMapped = true;
+  static VegasSharedState* vegasSharedState() {
+    if (!s_sharedStateMapped) {
+      s_sharedStateMapped = true;
       HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr,
-          PAGE_READWRITE, 0, sizeof(uint64_t), "Local\\VegasDrawCounter");
+          PAGE_READWRITE, 0, kSharedStateSize, "Local\\VegasDrawCounter");
       if (h != nullptr)
-        s_csvCounterView = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(uint64_t));
+        s_sharedStateView = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, kSharedStateSize);
     }
-    return reinterpret_cast<std::atomic<uint64_t>*>(s_csvCounterView);
+    return reinterpret_cast<VegasSharedState*>(s_sharedStateView);
   }
 #else
-  static void* s_csvCounterView   = nullptr;
-  static bool  s_csvCounterMapped = false;
+  static void* s_sharedStateView   = nullptr;
+  static bool  s_sharedStateMapped = false;
 
-  static std::atomic<uint64_t>* vegasCsvCounter() {
-    if (!s_csvCounterMapped) {
-      s_csvCounterMapped = true;
+  static VegasSharedState* vegasSharedState() {
+    if (!s_sharedStateMapped) {
+      s_sharedStateMapped = true;
       int fd = ::open("/tmp/vegas_csv_counter.bin", O_RDWR | O_CREAT, 0600);
       if (fd >= 0) {
-        if (::ftruncate(fd, sizeof(uint64_t)) == 0) {
-          void* p = ::mmap(nullptr, sizeof(uint64_t),
+        if (::ftruncate(fd, kSharedStateSize) == 0) {
+          void* p = ::mmap(nullptr, kSharedStateSize,
               PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
           if (p != MAP_FAILED)
-            s_csvCounterView = p;
+            s_sharedStateView = p;
         }
         ::close(fd);
       }
     }
-    return reinterpret_cast<std::atomic<uint64_t>*>(s_csvCounterView);
+    return reinterpret_cast<VegasSharedState*>(s_sharedStateView);
   }
 #endif
 
@@ -3280,9 +3316,9 @@ namespace dxvk {
     s_frameDrawCount += count;
     // Accumulate into the process-shared counter — pushMetrics (dxgi.dll)
     // consumes it via exchange(). Mapped lazily on first use.
-    auto* ctr = vegasCsvCounter();
-    if (ctr != nullptr)
-      ctr->fetch_add(count, std::memory_order_relaxed);
+    auto* shared = vegasSharedState();
+    if (shared != nullptr)
+      shared->drawCounter.fetch_add(count, std::memory_order_relaxed);
   }
 
   void Vegas::dumpDrawCsv() {
@@ -3366,9 +3402,9 @@ namespace dxvk {
     if (!csvActive && s_dxvkDevice != nullptr)
       csvActive = s_dxvkDevice->config().vegasProfileDraws;
     if (csvActive) {
-      auto* ctr = vegasCsvCounter();
-      if (ctr != nullptr) {
-        uint64_t frameDraws = ctr->exchange(0, std::memory_order_relaxed);
+      auto* shared = vegasSharedState();
+      if (shared != nullptr) {
+        uint64_t frameDraws = shared->drawCounter.exchange(0, std::memory_order_relaxed);
         s_drawHistory[s_drawHead]     = frameDraws;
         s_drawFtHistory[s_drawHead]   = frameTime;
         s_drawHead = (s_drawHead + 1) % DRAW_HISTORY_SIZE;
