@@ -868,6 +868,14 @@ namespace dxvk {
       PFN_vkFreeMemory                vkFreeMemory                = nullptr;
       PFN_vkBindImageMemory           vkBindImageMemory           = nullptr;
       PFN_vkCmdBlitImage              vkCmdBlitImage              = nullptr;
+      // Buffer functions (framegen stats set + motion-prev staging)
+      PFN_vkCreateBuffer              vkCreateBuffer              = nullptr;
+      PFN_vkDestroyBuffer             vkDestroyBuffer             = nullptr;
+      PFN_vkGetBufferMemoryRequirements vkGetBufferMemoryRequirements = nullptr;
+      PFN_vkBindBufferMemory          vkBindBufferMemory          = nullptr;
+      PFN_vkMapMemory                 vkMapMemory                 = nullptr;
+      PFN_vkUnmapMemory               vkUnmapMemory               = nullptr;
+      PFN_vkCmdFillBuffer             vkCmdFillBuffer             = nullptr;
       // Physical-device-level (loaded separately)
       PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties = nullptr;
       bool                         loaded                   = false;
@@ -966,6 +974,14 @@ namespace dxvk {
       VK_LOAD_DEV_FUNC(vkFreeMemory)
       VK_LOAD_DEV_FUNC(vkBindImageMemory)
       VK_LOAD_DEV_FUNC(vkCmdBlitImage)
+      // Buffer functions (framegen stats set + motion-prev staging)
+      VK_LOAD_DEV_FUNC(vkCreateBuffer)
+      VK_LOAD_DEV_FUNC(vkDestroyBuffer)
+      VK_LOAD_DEV_FUNC(vkGetBufferMemoryRequirements)
+      VK_LOAD_DEV_FUNC(vkBindBufferMemory)
+      VK_LOAD_DEV_FUNC(vkMapMemory)
+      VK_LOAD_DEV_FUNC(vkUnmapMemory)
+      VK_LOAD_DEV_FUNC(vkCmdFillBuffer)
 #     undef VK_LOAD_DEV_FUNC
 
       if (!s_vk.vkGetPhysicalDeviceMemoryProperties) {
@@ -3624,9 +3640,11 @@ Vegas::s_fgStatsEnabled = false;  // BETA STUB: GPU-side stats readback disabled
       if (s_fgSlowCount >= 5) {
         blendFloor = 0.95f;
       } else {
-      // BETA DIVERGENCE (approved): static floor 0.5 instead of 2.4.1 EMA
-      // (0.5@12ms -> 0.95@33ms). Keeps FG visible at low fps on the 610;
-      // the dominance gate handles text-block distrust content-adaptively.
+        // BETA DIVERGENCE (approved): static floor 0.5 instead of 2.4.1 EMA
+        // (0.5@12ms -> 0.95@33ms). Keeps FG visible at low fps on the 610;
+        // the dominance gate handles text-block distrust content-adaptively.
+        // (floor stays 0.5 — no EMA, no ramp)
+      }
       float blendSlope = 0.1f;
       float blendCap   = std::min(blendFloor + 0.1f, 0.95f);
       float sadThreshold = 0.15f;  // 15% mean luma error → full distrust
