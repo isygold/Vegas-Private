@@ -3303,6 +3303,8 @@ namespace dxvk {
       if (!std::isalnum(static_cast<unsigned char>(c)))
         c = '_';
     }
+    return result;
+  }
 
 
   void Vegas::recordDrawCall(uint32_t count) {
