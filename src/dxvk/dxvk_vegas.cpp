@@ -130,6 +130,7 @@ namespace dxvk {
   float    Vegas::s_lastFrameTime      = 0.0f;
   bool     Vegas::s_fsrActive          = false;
   bool     Vegas::s_fgActive           = false;
+  bool     Vegas::s_fgDispatchLastFrame = false;
 
   // Draw-count CSV profiling
   uint32_t Vegas::s_drawHistory[DRAW_HISTORY_SIZE] = {};
@@ -139,6 +140,13 @@ namespace dxvk {
   uint32_t Vegas::s_dumpCounter       = 0;
   bool     Vegas::s_profileActive     = false;
   std::string Vegas::s_gameName;
+
+  // FG-stats CSV ring
+  uint32_t Vegas::s_fgActiveHistory[DRAW_HISTORY_SIZE]   = {};
+  uint32_t Vegas::s_fgDispatchHistory[DRAW_HISTORY_SIZE] = {};
+  float    Vegas::s_fgFtHistory[DRAW_HISTORY_SIZE]       = {};
+  uint32_t Vegas::s_fgHead            = 0;
+  uint32_t Vegas::s_fgDumpCounter     = 0;
 
 
 
@@ -679,18 +687,18 @@ namespace dxvk {
       shared->flags.store(kSharedFlagTierInit, std::memory_order_release);
     }
 
-    // Draw-count CSV profiling: VEGAS_PROFILE_DRAWS=1 or vegas.profileDraws=true.
+    // Draw-count CSV profiling: master key vegas.telemetry (off|draws|fg|all)
+    // or the legacy one-way env override VEGAS_PROFILE_DRAWS=1.
     // The flag itself is NOT published cross-DLL anymore: pushMetrics() gates
     // on the same inputs directly (see pushMetrics), because this fork
     // instantiates separate DxvkDevice objects in d3d11.dll and dxgi.dll, so
     // device-parked state is invisible across the DLL boundary.
-    s_profileActive = env::getEnvVar("VEGAS_PROFILE_DRAWS") == "1"
-                   || device->config().vegasProfileDraws;
+    s_profileActive = Vegas::telemetryDrawsActive(device);
     if (s_profileActive) {
       s_gameName = sanitizeGameName(env::getExeName());
       Logger::debug(str::format(
           "Vegas: draw count profiling active (VEGAS_PROFILE_DRAWS=1 / "
-          "vegas.profileDraws=true) — output vegas_", s_gameName,
+          "vegas.telemetry=draws|all) — output vegas_", s_gameName,
           "_drawcount.csv"));
     }
 
@@ -3307,6 +3315,84 @@ namespace dxvk {
   }
 
 
+  bool Vegas::telemetryDrawsActive(const DxvkDevice* dev) {
+    // Env override is a one-way switch: can only add, never disable.
+    if (env::getEnvVar("VEGAS_PROFILE_DRAWS") == "1")
+      return true;
+    if (dev == nullptr)
+      return false;
+    const std::string& mode = dev->config().vegasTelemetry;
+    return mode == "draws" || mode == "all"
+        || mode == "true" || mode == "1";
+  }
+
+  bool Vegas::telemetryFgActive(const DxvkDevice* dev) {
+    // One-way env override, same rule as VEGAS_PROFILE_DRAWS.
+    if (env::getEnvVar("vegas_telemetry") == "1")
+      return true;
+    if (dev == nullptr)
+      return false;
+    const std::string& mode = dev->config().vegasTelemetry;
+    if (mode == "fg" || mode == "all"
+        || mode == "true" || mode == "1")
+      return true;
+    if (mode != "off" && mode != "false" && mode != "0") {
+      static bool s_badModeWarned = false;
+      if (!s_badModeWarned) {
+        s_badModeWarned = true;
+        Logger::warn(str::format(
+          "Vegas: unknown vegas.telemetry value '", mode,
+          "' — treating as off (valid: off|draws|fg|all)"));
+      }
+    }
+    return false;
+  }
+
+  void Vegas::recordFgDispatchFrame(bool dispatched) {
+    s_fgDispatchLastFrame = dispatched;
+  }
+
+  void Vegas::dumpFgStatsCsv() {
+    // Same append-style file as the draw CSV: one file per game, header
+    // written only when brand new. Game name via process-wide getExeName.
+    const std::string gameName = sanitizeGameName(env::getExeName());
+    const std::string path = "/sdcard/vegas_" + gameName + "_fgstats.csv";
+
+    FILE* f = std::fopen(path.c_str(), "a");
+    if (!f) {
+      Logger::err(str::format(
+        "Vegas: failed to open FG stats CSV '", path, "': ", strerror(errno)));
+      return;
+    }
+
+    std::fseek(f, 0, SEEK_END);
+    bool fileEmpty = (std::ftell(f) == 0);
+    if (fileEmpty) {
+      auto dev = s_dxvkDevice;
+      std::string deviceName = "unknown";
+      if (dev != nullptr && dev->adapter() != nullptr)
+        deviceName = dev->adapter()->deviceProperties().core.properties.deviceName;
+
+      auto now = std::chrono::system_clock::now();
+      std::time_t now_t = std::chrono::system_clock::to_time_t(now);
+      char timeBuf[32] = {};
+      std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", std::localtime(&now_t));
+
+      std::fprintf(f, "# Device: %s\n", deviceName.c_str());
+      std::fprintf(f, "# Game: %s\n", gameName.c_str());
+      std::fprintf(f, "# Created: %s\n", timeBuf);
+      std::fprintf(f, "# Columns: session_frame,fgActive,fgDispatched,frameTimeMs\n");
+      std::fprintf(f, "session_frame,fgActive,fgDispatched,frameTimeMs\n");
+    }
+
+    for (uint32_t i = 0; i < DRAW_HISTORY_SIZE; i++) {
+      uint32_t idx = (s_fgHead + i) % DRAW_HISTORY_SIZE;
+      std::fprintf(f, "%u,%u,%u,%.2f\n",
+        i + 1, s_fgActiveHistory[idx], s_fgDispatchHistory[idx], s_fgFtHistory[idx]);
+    }
+    std::fclose(f);
+  }
+
   void Vegas::recordDrawCall(uint32_t count) {
     // Only count when profiling is active (zero-cost otherwise).
     // The static gate is valid here: recordDrawCall runs in d3d11.dll
@@ -3399,9 +3485,7 @@ namespace dxvk {
     // identically in every DLL) — NOT device-parked state: this fork
     // holds separate DxvkDevice instances per DLL, so the flag stored
     // by initializeProfile() in d3d11.dll is never visible here.
-    bool csvActive = env::getEnvVar("VEGAS_PROFILE_DRAWS") == "1";
-    if (!csvActive && s_dxvkDevice != nullptr)
-      csvActive = s_dxvkDevice->config().vegasProfileDraws;
+    bool csvActive = Vegas::telemetryDrawsActive(s_dxvkDevice);
     if (csvActive) {
       auto* shared = vegasSharedState();
       if (shared != nullptr) {
@@ -3420,6 +3504,26 @@ namespace dxvk {
           s_csvMapWarned = true;
           Logger::warn("Vegas: draw CSV counter unavailable (shared mapping failed)");
         }
+      }
+    }
+
+    // FG-stats CSV (vegas.telemetry=fg|all or vegas_telemetry=1): per-frame
+    // framegen observability — was FG active?, did this frame actually
+    // dispatch?, frame time. Same ring size/cadence/path family as the
+    // draw CSV. recordFgDispatchFrame() runs in PresentBase (dxgi.dll)
+    // right before pushMetrics, so the "dispatched" flag is consumed
+    // one frame at a time. d3d9-only sessions have no dispatcher and
+    // record all-false rows here — accurate, FG does not exist there.
+    if (Vegas::telemetryFgActive(s_dxvkDevice)) {
+      s_fgActiveHistory[s_fgHead]    = fgActive ? 1u : 0u;
+      s_fgDispatchHistory[s_fgHead]  = s_fgDispatchLastFrame ? 1u : 0u;
+      s_fgFtHistory[s_fgHead]        = frameTime;
+      s_fgHead = (s_fgHead + 1) % DRAW_HISTORY_SIZE;
+      s_fgDispatchLastFrame = false;
+
+      if (++s_fgDumpCounter >= DRAW_HISTORY_SIZE) {
+        s_fgDumpCounter = 0;
+        dumpFgStatsCsv();
       }
     }
 

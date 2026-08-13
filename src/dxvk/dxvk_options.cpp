@@ -27,8 +27,7 @@ namespace dxvk {
     vegasEnableUpscaler = config.getOption<Tristate>("vegas.enableUpscaler", Tristate::Auto);
     vegasEnableFramegen = config.getOption<Tristate>("vegas.enableFramegen", Tristate::Auto);
     vegasForceTier      = config.getOption<int32_t> ("vegas.forceTier",          0);
-    vegasProfileDraws   = config.getOption<bool>    ("vegas.profileDraws",      false);
-    vegasTelemetry      = config.getOption<bool>    ("vegas.telemetry",         false);
+    vegasTelemetry      = config.getOption<std::string>("vegas.telemetry",      "off");
 
     auto budget = config.getOption<int32_t>("dxvk.maxMemoryBudget", 0);
     maxMemoryBudget = VkDeviceSize(std::max(budget, 0)) << 20u;

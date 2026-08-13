@@ -548,6 +548,9 @@ namespace dxvk {
           bool dispatched = Vegas::framegenDispatch(
               curHandle, VK_NULL_HANDLE,
               curInfo.extent, curInfo.format);
+          // FG telemetry: remember whether THIS frame actually dispatched
+          // (pushMetrics consumes it right below for the FG stats CSV).
+          Vegas::recordFgDispatchFrame(dispatched);
           Logger::debug(str::format(
               "Vegas FG: ", dispatched ? "OK (interpolated)" : "first frame / skipped"));
         }

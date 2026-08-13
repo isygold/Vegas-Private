@@ -347,6 +347,7 @@ namespace dxvk {
     static uint64_t            s_fsrAsyncCmdBuf;  ///< VkCommandBuffer (persistent, for async FSR submits)
 
     static bool                s_fgActive;
+    static bool                s_fgDispatchLastFrame; ///< set by recordFgDispatchFrame (dxgi.dll PresentBase), consumed by pushMetrics
 
     // ---- Draw-count CSV profiling (VEGAS_PROFILE_DRAWS / vegas.profileDraws) ----
     static constexpr uint32_t  DRAW_HISTORY_SIZE = 60;
@@ -357,6 +358,29 @@ namespace dxvk {
     static uint32_t            s_dumpCounter;
     static bool                s_profileActive;
     static std::string         s_gameName;
+
+    // ---- FG-stats CSV ring (same ring size as the draw CSV) ----
+    static uint32_t            s_fgActiveHistory[DRAW_HISTORY_SIZE];
+    static uint32_t            s_fgDispatchHistory[DRAW_HISTORY_SIZE];
+    static float               s_fgFtHistory[DRAW_HISTORY_SIZE];
+    static uint32_t            s_fgHead;
+    static uint32_t            s_fgDumpCounter;
+
+    // ---- Master logging switch (vegas.telemetry: off|draws|fg|all) ----
+    // Replaces the old vegas.profileDraws key and the reserved telemetry
+    // stub. Env overrides remain one-way ON switches: VEGAS_PROFILE_DRAWS=1
+    // enables draws, vegas_telemetry=1 enables fg. If the config value is
+    // "true"/"1" it counts as "all"; "false"/"0"/unknown count as "off"
+    // (unknown additionally logs a one-time warning).
+    static bool telemetryDrawsActive(const DxvkDevice* dev);
+    static bool telemetryFgActive(const DxvkDevice* dev);
+
+    // ---- FG-stats CSV (vegas.telemetry=fg|all) ----
+    // Per-frame framegen observability: active?, actually dispatched this
+    // frame?, frame time. Written to /sdcard/vegas_<game>_fgstats.csv on
+    // the same cadence/path family as the draw-count CSV.
+    static void recordFgDispatchFrame(bool dispatched);
+    static void dumpFgStatsCsv();
 
     /// Count API draw calls (default 1 per call; batch paths pass the
     /// number of draws so multi-draw is not undercounted).

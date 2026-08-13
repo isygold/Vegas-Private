@@ -94,13 +94,17 @@ namespace dxvk {
     /// Useful for misclassified Adreno GPUs or manual tuning.
     int32_t vegasForceTier = 0;
 
-    /// Enables per-draw profiling CSV output (vegas_<game>_drawcount.csv).
-    /// Equivalent to VEGAS_PROFILE_DRAWS=1.
-    bool vegasProfileDraws = false;
-
-    /// Reserved for framegen-stats telemetry. Parsed for dxvk.conf
-    /// compatibility on this branch; the FG stats series is not ported here.
-    bool vegasTelemetry = false;
+    /// Master logging switch (replaces vegas.profileDraws + the reserved
+    /// vegas.telemetry stub):
+    ///   off   — no telemetry output
+    ///   draws — draw-count CSV (vegas_<game>_drawcount.csv)
+    ///   fg    — framegen stats CSV (vegas_<game>_fgstats.csv)
+    ///   all   — both CSVs
+    /// Legacy boolean values are honored: true = all, false = off.
+    /// Environment overrides still work as one-way switches that can only
+    /// enable their feature: VEGAS_PROFILE_DRAWS=1 -> draws,
+    /// vegas_telemetry=1 -> fg.
+    std::string vegasTelemetry = "off";
   };
 
 }
