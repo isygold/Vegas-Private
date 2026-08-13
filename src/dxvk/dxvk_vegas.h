@@ -2,12 +2,75 @@
 
 #include <cstdint>
 #include <cstring>
+#include <string>
+#include <array>
 
 #include "dxvk_adapter.h"
 
 namespace dxvk {
   class Config; // fwd decl for Config-based overloads
   enum class Tristate : int32_t; // fwd decl for shouldUpscale()
+
+  /**
+   * \brief VEGAS Autonomous Governor state
+   *
+   * Self-contained state for the closed-loop adaptive governor.
+   * Updated by UpdateFrameTiming / CalculateThreshold / EndOfFrameCleanup
+   * called from the swapchain Present path.
+   */
+  struct VegasGovernorState {
+    // Frame accumulators
+    uint32_t frameDrawCount = 0;
+    uint32_t previousFrameDrawCount = 0;
+    uint32_t drawThreshold = 100;
+    uint32_t targetFlushesPerFrame = 4;
+
+    // Timing state
+    float smoothFrameTimeMs = 0.0f;
+    float ftRatio = 0.0f;
+
+    // Self-calibrating cap state
+    uint32_t rollingMaxDraws = 0;
+    uint32_t rollingMinDraws = UINT32_MAX;
+    float    rollingVarianceRatio = 0.0f;
+    uint32_t dynamicMaxBatchCap = 2048;
+    // floorMinimumCap = tile-overflow safety line (draws per render pass).
+    // TR13-validated on Adreno 610: 0 flushes/frame was clean except for
+    // geometry disappearing on 1000+ draw single passes (tile buffer
+    // overflow); 8-14 flushes/frame broke Turnip text/state. 600 sits
+    // between: frames <=600 draws never split (0 flushes), heavier frames
+    // split into <=600-draw passes (1-2 flushes max) — under the ~8
+    // flush/frame Turnip limit, under the ~1000 draw/pass overflow line.
+    uint32_t floorMinimumCap = 600;
+
+    // Draw-load density metric (draws/ms, EMA-smoothed)
+    // Replaces the broken gpuLoad sensor under Wine.
+    float drawLoadEMA = 0.0f;
+
+    // Real GPU load from device GpuIdleTicks (0.0–1.0, EMA-smoothed)
+    float realGpuLoadEMA = 0.0f;
+
+    // Atomic-split hysteresis state
+    bool     atomicSplitActive = false;
+
+    // Telemetry
+    uint32_t actualFlushesThisFrame = 0;
+    uint32_t maxPassDraws = 0;  // peak draw count at flush check (pass-size proxy)
+    uint64_t frameCounter = 0;
+
+    // Draws since last command-list flush (ALL draw types, direct + indirect).
+    // This is the threshold counter: incremented in recordDrawCall(), reset
+    // in onCommandListFlush() (every flushCommandList) and at frame end.
+    // Must NOT be frameDrawCount — that only resets per frame, which caused
+    // a flush storm once the threshold was crossed mid-frame (v4.2.3 bug:
+    // 46 flushes on a 645-draw frame).
+    uint32_t submissionDrawCount = 0;
+
+    // Rolling window data
+    std::array<uint32_t, 120> drawHistoryWindow{};
+    uint8_t windowIndex = 0;
+    uint8_t windowScanCounter = 0;
+  };
 
   /**
    * \brief Vegas performance state enum
@@ -100,6 +163,28 @@ namespace dxvk {
     static bool shouldFlush(
             uint32_t             drawCount);
 
+    /// Draws since last command-list flush (all draw types)
+    static uint32_t getSubmissionDrawCount();
+
+    /// Command-list flush occurred — reset the submission draw counter
+    static void onCommandListFlush();
+
+    /// Governor: EMA frame-time smoothing + targetFlushes tuning (returns ftRatio)
+    static float updateFrameTiming(
+            float                gpuLoad,
+            float                frameTime);
+
+    /// Governor: variance guard + proportional threshold calc + cap sync
+    static void calculateThreshold();
+
+    /// Governor: rolling window, self-calibrating cap, predictor update
+    static void endOfFrameCleanup();
+
+    /// Governor: real GPU load from device GpuIdleTicks (EMA, 100ms accum)
+    static void updateRealGpuLoad(
+            float                realGpuLoad,
+            float                frameTimeMs);
+
     /// Should the caller skip binding descriptors?
     static bool shouldSkipBind();
 
@@ -126,18 +211,6 @@ namespace dxvk {
             uint32_t&            tier,
             DxvkDevice*          device,
             bool                 isD3D9);
-
-    static void tuneThreshold(
-            uint32_t&            threshold,
-            float                load,
-            float                frameTime,
-            uint32_t             tier);
-
-    /// Self-contained overload — reads internal s_tier and modifies
-    /// s_drawThreshold directly. Caller only supplies load + frameTime.
-    static void tuneThreshold(
-            float                load,
-            float                frameTime);
 
     static bool shouldZeroInit(
             uint32_t             tier);
@@ -287,6 +360,8 @@ namespace dxvk {
     static uint32_t            s_tier;
     static uint32_t            s_drawThreshold;
     static uint32_t            s_haaeThreshold;
+    static bool                s_useFastPath;
+    static VegasGovernorState  s_gov;
 
     // Vulkan state (opaque handles, defined in .cpp with full DXVK includes)
     static void*               s_device;          ///< VkDevice

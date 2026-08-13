@@ -186,6 +186,11 @@ initVegasProfile();
 
     m_vegasProfile.lastBoundVkPipeline = VK_NULL_HANDLE;
 
+    // Vegas: every command-list flush starts a new submission — reset the
+    // governor's threshold counter so shouldFlush measures draws-since-
+    // last-submission, not frame total (2.4.1 governor semantics).
+    Vegas::onCommandListFlush();
+
     
     // Flush pending descriptor updates and assign the sync
     // point to the submission
@@ -843,25 +848,24 @@ if (unlikely(!m_vegasProfile.initialized)) {
     initVegasProfile();
 }
 
-    // Vegas: per-draw CSV profiling (no-op when inactive)
-    Vegas::recordDrawCall();
-
-// Threshold check using Relaxed ordering
-    uint32_t drawCount = m_drawsSinceSubmit.load(std::memory_order_relaxed);
+    // Vegas: threshold check using draws-since-last-submission (governor
+    // counter). Counted BEFORE recordDrawCall() so the current draw is not
+    // included — same semantics as the 2.4.1 governor.
+    uint32_t drawCount = Vegas::getSubmissionDrawCount();
     if (unlikely(Vegas::shouldFlush(drawCount))) {
         this->spillRenderPass(true); 
         VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "Vegas_Flush" };
         this->flushCommandList(&flushLabel, nullptr);
     }
 
+    // Vegas: per-draw CSV profiling + governor counters (no-op CSV when inactive)
+    Vegas::recordDrawCall();
+
     if (unlikely((!this->commitGraphicsState<false, false>())))
         return;
 
     m_cmd->cmdDraw(vertexCount, instanceCount, firstVertex, firstInstance);
     m_cmd->addStatCtr(DxvkStatCounter::CmdDrawCalls, 1);
-
-    if (m_vegasProfile.enabled)
-        m_drawsSinceSubmit.fetch_add(1, std::memory_order_relaxed);
 }
 
 
@@ -938,6 +942,15 @@ if (unlikely(!m_vegasProfile.initialized)) {
           uint32_t          count,
           uint32_t          stride,
           bool              unroll) {
+    // Vegas: threshold-based flush also applies to indirect draws —
+    // instanced terrain/objects were invisible to the old per-submit
+    // counter (m_drawsSinceSubmit), leaving heavy passes unsplit.
+    uint32_t drawCount = Vegas::getSubmissionDrawCount();
+    if (unlikely(Vegas::shouldFlush(drawCount))) {
+        this->spillRenderPass(true); 
+        VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "Vegas_Flush" };
+        this->flushCommandList(&flushLabel, nullptr);
+    }
     // Vegas: per-draw CSV profiling
     Vegas::recordDrawCall(count);
     drawIndirectGeneric<false>(offset, count, stride, unroll);
@@ -949,6 +962,13 @@ if (unlikely(!m_vegasProfile.initialized)) {
           VkDeviceSize      countOffset,
           uint32_t          maxCount,
           uint32_t          stride) {
+    // Vegas: threshold-based flush also applies to counted indirect draws.
+    uint32_t drawCount = Vegas::getSubmissionDrawCount();
+    if (unlikely(Vegas::shouldFlush(drawCount))) {
+        this->spillRenderPass(true); 
+        VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "Vegas_Flush" };
+        this->flushCommandList(&flushLabel, nullptr);
+    }
     // Vegas: per-draw CSV profiling (1 per call — actual count is GPU-side)
     Vegas::recordDrawCall();
     drawIndirectCountGeneric<false>(offset, countOffset, maxCount, stride);
@@ -963,16 +983,17 @@ if (unlikely(!m_vegasProfile.initialized)) {
         initVegasProfile();
     }
 
-    // Vegas: per-draw CSV profiling (no-op when inactive)
-    Vegas::recordDrawCall();
-
-    // Threshold check using Relaxed ordering
-    uint32_t drawCount = m_drawsSinceSubmit.load(std::memory_order_relaxed);
+    // Vegas: threshold check using draws-since-last-submission (governor
+    // counter). Counted BEFORE recordDrawCall() — same as the 2.4.1 governor.
+    uint32_t drawCount = Vegas::getSubmissionDrawCount();
     if (unlikely(Vegas::shouldFlush(drawCount))) {
         this->spillRenderPass(true); 
         VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "Vegas_Flush" };
         this->flushCommandList(&flushLabel, nullptr);
     }
+
+    // Vegas: per-draw CSV profiling + governor counters (no-op CSV when inactive)
+    Vegas::recordDrawCall();
 
     if (unlikely((!this->commitGraphicsState<true, false>())))
         return;
@@ -980,9 +1001,6 @@ if (unlikely(!m_vegasProfile.initialized)) {
     // FIX: Use correct parameters for indexed draw
     m_cmd->cmdDrawIndexed(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
     m_cmd->addStatCtr(DxvkStatCounter::CmdDrawCalls, 1);
-
-    if (m_vegasProfile.enabled)
-        m_drawsSinceSubmit.fetch_add(1, std::memory_order_relaxed);
 }
 
 
@@ -1001,6 +1019,13 @@ void DxvkContext::drawIndexed(
           uint32_t          count,
           uint32_t          stride,
           bool              unroll) {
+    // Vegas: threshold-based flush also applies to indirect draws.
+    uint32_t drawCount = Vegas::getSubmissionDrawCount();
+    if (unlikely(Vegas::shouldFlush(drawCount))) {
+        this->spillRenderPass(true); 
+        VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "Vegas_Flush" };
+        this->flushCommandList(&flushLabel, nullptr);
+    }
     // Vegas: per-draw CSV profiling
     Vegas::recordDrawCall(count);
     drawIndirectGeneric<true>(offset, count, stride, unroll);
@@ -1012,6 +1037,13 @@ void DxvkContext::drawIndexed(
           VkDeviceSize      countOffset,
           uint32_t          maxCount,
           uint32_t          stride) {
+    // Vegas: threshold-based flush also applies to counted indirect draws.
+    uint32_t drawCount = Vegas::getSubmissionDrawCount();
+    if (unlikely(Vegas::shouldFlush(drawCount))) {
+        this->spillRenderPass(true); 
+        VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "Vegas_Flush" };
+        this->flushCommandList(&flushLabel, nullptr);
+    }
     // Vegas: per-draw CSV profiling (1 per call — actual count is GPU-side)
     Vegas::recordDrawCall();
     drawIndirectCountGeneric<true>(offset, countOffset, maxCount, stride);

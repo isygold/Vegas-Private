@@ -238,6 +238,12 @@ namespace dxvk {
               ? static_cast<float>(1000.0 / m_targetFrameRate)
               : 16.667f);
 
+      // Vegas: autonomous governor (same closed loop as DxgiSwapChain)
+      if (Vegas::isEnabled()) {
+        Vegas::updateFrameTiming(gpuLoadEstimate, frameTime);
+        Vegas::calculateThreshold();
+      }
+
       Vegas::pushMetrics(gpuLoadEstimate, frameTime,
           m_lastPerfState,
           /* fsrActive */ false,
@@ -250,6 +256,9 @@ namespace dxvk {
       UpdateWindowedRefreshRate();
       UpdateTargetFrameRate(presentInterval);
       PresentImage(presentInterval);
+      // Vegas: end-of-frame governor cleanup
+      if (Vegas::isEnabled())
+        Vegas::endOfFrameCleanup();
       return D3D_OK;
     } catch (const DxvkError& e) {
       Logger::err(e.message());

@@ -438,9 +438,12 @@ namespace dxvk {
           gpuLoadEstimate, frameTime,
           targetFt);
 
-      // Let the governor react to current conditions (only when FG-ready)
-      if (frameGenReady)
-        Vegas::tuneThreshold(gpuLoadEstimate, frameTime);
+      // Let the governor react to current conditions (closed loop)
+      if (Vegas::isEnabled()) {
+        Vegas::updateFrameTiming(gpuLoadEstimate, frameTime);
+        Vegas::updateRealGpuLoad(gpuLoadEstimate, frameTime);
+        Vegas::calculateThreshold();
+      }
 
       m_needsFrameGen = frameGenReady && Vegas::needsFrameGen(frameTime, Vegas::getTier());
 
@@ -573,6 +576,10 @@ namespace dxvk {
       std::lock_guard<dxvk::mutex> lockBuf(m_lockBuffer);
       hr = m_presenter->Present(SyncInterval, PresentFlags, nullptr);
     }
+
+    // Vegas: end-of-frame governor cleanup (rolling window, self-calibrating cap, predictor)
+    if (Vegas::isEnabled())
+      Vegas::endOfFrameCleanup();
 
     if (PresentFlags & DXGI_PRESENT_TEST)
       return hr == S_OK && occluded ? DXGI_STATUS_OCCLUDED : hr;
