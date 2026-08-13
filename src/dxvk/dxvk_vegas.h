@@ -186,12 +186,17 @@ namespace dxvk {
     /// \param [in] prevImage Previous frame (VK_IMAGE_LAYOUT_GENERAL)
     /// \param [in] extent    Image dimensions
     /// \param [in] format    Image format (must be R8G8B8A8_UNORM)
+    /// \param [in] hudRectValid  True when hudRect holds a valid HUD graph
+    ///                           rect in WSI pixels (exempted from FG)
+    /// \param [in] hudRect   [x0, y0, x1, y1] of the HUD frametimes graph
     /// \returns true if dispatch completed successfully
     static bool framegenDispatch(
             VkImage              curImage,
             VkImage              prevImage,
             VkExtent3D           extent,
-            VkFormat             format);
+            VkFormat             format,
+            bool                 hudRectValid = false,
+      const float*               hudRect      = nullptr);
 
     // ---- FSR (user-facing only via Tristate config) ----
 
@@ -322,6 +327,24 @@ namespace dxvk {
     static uint64_t            s_fgOutputMemory;      ///< VkDeviceMemory
     static uint32_t            s_fgMotionW;           ///< motion buffer width (blocks)
     static uint32_t            s_fgMotionH;           ///< motion buffer height (blocks)
+    static VkFormat            s_fgFormat;            ///< swapchain format (prev/output)
+    static uint64_t            s_fgMotionPrevImage;   ///< VkImage (prev frame's filtered motion, search center)
+    static uint64_t            s_fgMotionPrevMemory;  ///< VkDeviceMemory
+    static bool                s_fgMotionPrevValid;   ///< motionPrev layout is GENERAL (not UNDEFINED)
+
+    // Framegen bimodal-gate diagnostic stats (set 1 / binding 0)
+    // Single 16B host-visible buffer, own layout+pool.  Buffer+set always
+    // created so the motion shader atomicAdds have a valid target; the
+    // readback/fill path is gated OFF in beta (host CSV ring is telemetry home).
+    static uint64_t            s_fgStatsBuffer;       ///< VkBuffer  (16B = 4 words)
+    static uint64_t            s_fgStatsMemory;       ///< VkDeviceMemory (host-visible)
+    static uint64_t            s_fgStatsMapping;      ///< void*     (persistent map, 4 words)
+    static uint64_t            s_fgStatsLayout;       ///< VkDescriptorSetLayout (set 1)
+    static uint64_t            s_fgStatsPool;         ///< VkDescriptorPool
+    static uint64_t            s_fgStatsSet;          ///< VkDescriptorSet (bound in motion pass)
+    static bool                s_fgStatsEnabled;      ///< beta: always false (stub)
+    static uint32_t            s_fgStatsFrames;       ///< #dispatches w/ readback attempted
+    static uint32_t            s_fgStatsCorrupt;      ///< #rows dropped by physical-bounds validation
 
     // ---- VegasHud metrics (updated by pushMetrics()) ----
     static constexpr uint32_t  FT_HISTORY_SIZE = 60;
