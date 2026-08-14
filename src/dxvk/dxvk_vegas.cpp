@@ -4331,10 +4331,17 @@ Vegas::s_fgStatsEnabled = false;  // BETA STUB: GPU-side stats readback disabled
   void Vegas::recordDrawCall(uint32_t count) {
     VegasGovernorState& gov = s_gov;
 
-    // Increment per-frame draw counter (CSV/predError/histogram)
-    gov.frameDrawCount++;
+    // BETA DIVERGENCE (from 2.4.1): count DRAW units, not API calls.
+    // 2.4.1 increments by 1 per call; its floorMinimumCap=600 was
+    // calibrated in draws ("geometry disappearing on 1000+ draw single
+    // passes"). TR13 batches ~10-22 calls but 376-1240 draws/frame, so
+    // per-call counting pinned threshold at 600 with 0 flushes → deep
+    // queue → 19.5 fps vs 25.6 at static 150 (A/B 2026-08-14, 444c408).
+    // Draw-accurate counters make the 600 floor meaningful (1-2 flushes/
+    // frame on heavy frames) and restore governor calibration units.
+    gov.frameDrawCount += count;
     // Increment per-submission counter (threshold check)
-    gov.submissionDrawCount++;
+    gov.submissionDrawCount += count;
 
     // Scene-transition shock absorber: if a mid-frame flush fires because
     // the predictor underestimated the scene, snap threshold to cap.
