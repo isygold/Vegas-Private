@@ -4343,6 +4343,29 @@ Vegas::s_fgStatsEnabled = false;  // BETA STUB: GPU-side stats readback disabled
     // Increment per-submission counter (threshold check)
     gov.submissionDrawCount += count;
 
+    // TEMP PROBE (diagnosis, remove after wiring): identify which s_gov
+    // copy accumulates real draw counts and which call sites feed it.
+    // Rate-limited 1/sec. The log file this lands in identifies the DLL.
+    {
+      static auto s_probeLast = std::chrono::steady_clock::now();
+      auto probeNow = std::chrono::steady_clock::now();
+      auto probeElapsed = std::chrono::duration_cast<
+          std::chrono::milliseconds>(probeNow - s_probeLast).count();
+      if (probeElapsed >= 1000) {
+        s_probeLast = probeNow;
+        auto* shared = vegasSharedState();
+        Logger::debug(str::format(
+            "Vegas: PROBE recordDrawCall count=", count,
+            " frameDrawCount=", gov.frameDrawCount,
+            " submissionDrawCount=", gov.submissionDrawCount,
+            " sharedDraw=", shared
+              ? shared->drawCounter.load(std::memory_order_relaxed) : 0u,
+            " profileActive=", s_profileActive,
+            " enabled=", s_enabled, " fastPath=", s_useFastPath,
+            " threshold=", s_drawThreshold));
+      }
+    }
+
     // Scene-transition shock absorber: if a mid-frame flush fires because
     // the predictor underestimated the scene, snap threshold to cap.
     // Disabled when atomic-split is active — the split already manages
