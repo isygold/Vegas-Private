@@ -438,16 +438,40 @@ namespace dxvk {
           gpuLoadEstimate, frameTime,
           targetFt);
 
-      m_needsFrameGen = frameGenReady && Vegas::needsFrameGen(frameTime, Vegas::getTier());
+      // VEGAS: FG gate with hysteresis. The raw per-frame check
+      // (needsFrameGen) flips on single fps spikes (menu pop: FG
+      // dispatching on one spike frame warps the moving text). Latch:
+      //   engage   after 3 consecutive qualifying frames,
+      //   disengage after 2 consecutive failing frames.
+      // Force-enable (Tristate::True) always qualifies → engages after
+      // 3 frames and never disengages — effectively unchanged.
+      bool fgQualify = frameGenReady && Vegas::needsFrameGen(frameTime, Vegas::getTier());
+      if (fgQualify) {
+        m_fgFastFrames++;
+        m_fgSlowFrames = 0;
+      } else {
+        m_fgSlowFrames++;
+        m_fgFastFrames = 0;
+      }
+      if (m_needsFrameGen) {
+        // Engaged: stay on until 2 consecutive failing frames.
+        m_needsFrameGen = m_fgSlowFrames < 2;
+      } else {
+        // Disengaged: engage after 3 consecutive qualifying frames.
+        m_needsFrameGen = m_fgFastFrames >= 3;
+      }
 
       Logger::debug(str::format(
           "Vegas: Perf=", Vegas::getStatusString(m_lastPerfState),
           " load=", gpuLoadEstimate,
           " frameTime=", frameTime, "ms",
           " ftRatio=", (targetFt > 0.0f) ? (frameTime / targetFt) : 1.0f,
-          " frameGen=", m_needsFrameGen ? "yes" : "no"));
+          " frameGen=", m_needsFrameGen ? "yes" : "no",
+          " fgFast=", m_fgFastFrames, " fgSlow=", m_fgSlowFrames));
     } else {
       m_needsFrameGen = false;
+      m_fgFastFrames = 0;
+      m_fgSlowFrames = 0;
     }
     m_lastPresentTime = now;
     // --- END VEGAS ---

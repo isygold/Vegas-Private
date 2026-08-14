@@ -206,6 +206,10 @@ namespace dxvk {
     dxvk::high_resolution_clock::time_point  m_lastPresentTime;
     VegasPerformanceState                    m_lastPerfState = VegasPerformanceState::Normal;
     bool                                     m_needsFrameGen = false;
+    // FG gate hysteresis: engage after N consecutive qualifying frames,
+    // disengage after M consecutive failing frames (menu-pop fix).
+    uint32_t                                 m_fgFastFrames = 0;
+    uint32_t                                 m_fgSlowFrames = 0;
     float                                    m_aspectRatioX = 1.0f;
     float                                    m_aspectRatioY = 1.0f;
 
