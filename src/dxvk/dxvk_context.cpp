@@ -931,8 +931,9 @@ if (unlikely(!m_vegasProfile.initialized)) {
   void DxvkContext::draw(
           uint32_t          count,
     const VkDrawIndirectCommand* draws) {
-    // Vegas: per-draw CSV profiling — batch path, count each draw
-    Vegas::recordDrawCall(count);
+    // Vegas: draw accounting happens per-emit inside drawGeneric (the
+    // governor flush check lives there too) — counted once per emitted
+    // batch, not once per API call, so draw units stay accurate.
     drawGeneric<false>(count, draws);
   }
   
@@ -1008,8 +1009,9 @@ void DxvkContext::drawIndexed(
           uint32_t                          count,
     const VkDrawIndexedIndirectCommand* draws) {
     // This is the batch version required by the D3D11 frontend
-    // Vegas: per-draw CSV profiling — batch path, count each draw
-    Vegas::recordDrawCall(count);
+    // Vegas: draw accounting happens per-emit inside drawGeneric (the
+    // governor flush check lives there too) — counted once per emitted
+    // batch, not once per API call, so draw units stay accurate.
     drawGeneric<true>(count, draws);
   }
 
@@ -1792,9 +1794,29 @@ void DxvkContext::drawIndexed(
           uint32_t                  count,
     const T* draws) {
 
+    // Vegas: governor flush check + draw accounting at EMIT time.
+    // BETA DIVERGENCE fix (2026-08-14): the batch variants
+    // (draw(count,draws) / drawIndexed(count,draws)) previously only
+    // called recordDrawCall(count) at entry, with no shouldFlush check —
+    // TR13 renders via these batch paths, so shouldFlush never ran
+    // (maxPass=0 / actualFlushes=0 on all predError probes, session 13).
+    // 2.4.1 had no batch path: every D3D11 call went through a checked
+    // single-draw entry. Move the check here, at each emit, so the
+    // governor measures draws-since-last-submission on the real path.
+    auto flushIfNeeded = [&](uint32_t drawsToRecord) {
+      uint32_t drawCount = Vegas::getSubmissionDrawCount();
+      if (unlikely(Vegas::shouldFlush(drawCount))) {
+        this->spillRenderPass(true);
+        VkDebugUtilsLabelEXT flushLabel = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, "Vegas_Flush" };
+        this->flushCommandList(&flushLabel, nullptr);
+      }
+      Vegas::recordDrawCall(drawsToRecord);
+    };
+
     if (this->commitGraphicsState<Indexed, false>()) {
       if (count == 1u) {
         // Most common case, just emit a single draw
+        flushIfNeeded(1u);
         if constexpr (Indexed) {
           m_cmd->cmdDrawIndexed(draws->indexCount, draws->instanceCount,
             draws->firstIndex, draws->vertexOffset, draws->firstInstance);
@@ -1810,6 +1832,8 @@ void DxvkContext::drawIndexed(
         for (uint32_t i = 0; i < count; i++) {
           if (i)
             this->commitGraphicsState<Indexed, false>();
+
+          flushIfNeeded(1u);
 
           if constexpr (Indexed) {
             m_cmd->cmdDrawIndexed(draws[i].indexCount, draws[i].instanceCount,
@@ -1861,6 +1885,7 @@ void DxvkContext::drawIndexed(
           }
 
           if (emitDraw) {
+            flushIfNeeded(batchSize);
             if (m_features.test(DxvkContextFeature::DirectMultiDraw)) {
               if constexpr (Indexed) {
                 m_cmd->cmdDrawMultiIndexed(batchSize, batch.data(),
