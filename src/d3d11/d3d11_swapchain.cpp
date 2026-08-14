@@ -387,6 +387,43 @@ namespace dxvk {
     immediateContext->EndFrame(m_latency);
     immediateContext->ExecuteFlush(GpuFlushType::ExplicitFlush, nullptr, true);
 
+    // Vegas: autonomous governor (driven from d3d11.dll where isEnabled()
+    // and all per-DLL statics are correctly initialized — dxgi.dll's copy
+    // never runs initializeProfile). Mirrors 2.4.1 d3d11_swapchain:397-399.
+    if (Vegas::isEnabled()) {
+      if (m_lastPresentTime == std::chrono::steady_clock::time_point{})
+        m_lastPresentTime = std::chrono::steady_clock::now();
+
+      auto now = std::chrono::steady_clock::now();
+      float frameTime = std::chrono::duration_cast<
+        std::chrono::duration<float, std::milli>>(now - m_lastPresentTime).count();
+      m_lastPresentTime = now;
+
+      // gpuLoad from frameTime is broken under Wine (always 1.0) but kept
+      // for the legacy path; the draw-load metric replaces it.
+      float gpuLoad = (frameTime > 0.001f)
+        ? std::min(frameTime / 16.667f, 1.0f) : 0.0f;
+
+      // Real GPU load from GpuIdleTicks (accurate under Wine — same counter
+      // the DXVK HUD reads for its "GPU: XX%" line).
+      uint64_t currIdle = m_device->getStatCounters()
+        .getCtr(DxvkStatCounter::GpuIdleTicks);
+      float realGpuLoad = 1.0f;  // default: fully busy if no prior sample
+      if (m_prevGpuIdleTicks != 0) {
+        uint64_t idleDelta = (currIdle > m_prevGpuIdleTicks)
+          ? (currIdle - m_prevGpuIdleTicks) : 0;
+        float totalUs = frameTime * 1000.0f;
+        realGpuLoad = (totalUs > idleDelta)
+          ? (totalUs - idleDelta) / totalUs
+          : 0.0f;
+      }
+      m_prevGpuIdleTicks = currIdle;
+
+      Vegas::updateFrameTiming(gpuLoad, frameTime);
+      Vegas::updateRealGpuLoad(realGpuLoad, frameTime);
+      Vegas::calculateThreshold();
+    }
+
     m_presenter->setSyncInterval(SyncInterval);
 
     // Presentation semaphores and WSI swap chain image
@@ -459,6 +496,10 @@ namespace dxvk {
       RotateBackBuffers(immediateContext);
 
     immediateContext->FlushCsChunk();
+
+    // Vegas: end-of-frame governor cleanup (rolling window, self-calibrating cap, predictor)
+    if (Vegas::isEnabled())
+      Vegas::endOfFrameCleanup();
 
     if (m_latency) {
       m_latency->notifyCpuPresentEnd(m_frameId);

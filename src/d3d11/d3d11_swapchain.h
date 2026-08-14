@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+
 #include "d3d11_texture.h"
 
 #include "../dxvk/hud/dxvk_hud.h"
@@ -124,6 +126,10 @@ namespace dxvk {
 
     dxvk::mutex               m_frameStatisticsLock;
     DXGI_VK_FRAME_STATISTICS  m_frameStatistics = { };
+
+    // Vegas governor: present timing + real GPU load (GpuIdleTicks delta)
+    std::chrono::steady_clock::time_point m_lastPresentTime = {};
+    uint64_t m_prevGpuIdleTicks = 0;
 
     Rc<hud::HudLatencyItem>   m_latencyHud;
 
